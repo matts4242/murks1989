@@ -1,0 +1,24 @@
+# Godot
+game/.godot/
+*.import
+game/probe.gd
+
+# godot-cpp is cloned separately (see README)
+godot-cpp/
+
+# Build output
+*.o
+*.obj
+*.os
+*.lib
+*.exp
+*.pdb
+*.ilk
+.sconsign.dblite
+build/
+
+# Keep the prebuilt extension libraries in game/bin/ so the project runs without a compiler.
+
+# Python
+__pycache__/
+*.pyc
