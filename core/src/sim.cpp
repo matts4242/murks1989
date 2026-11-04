@@ -177,6 +177,7 @@ void World::setup_scenario(int extra_groups) {
     outcome_ = OUT_ONGOING;
     outcome_text_.clear();
     default_standoff = 0;
+    trains_announced_ = -1;
     stats_.kills = stats_.losses = 0;
     time_min = 6 * 60; // 14 April 1989, 06:00
     rng_.reseed(seed * 31ull + 7);
@@ -351,6 +352,46 @@ int World::hq_of(int side) const {
     for (const auto &u : units)
         if (u.alive && u.side == side && u.type == U_HQ) return u.id;
     return -1;
+}
+
+int World::dead_hq(int formation) const {
+    if (formation < 0 || formation >= (int)formations.size()) return -1;
+    int dead = -1;
+    for (int id : formations[formation].members) {
+        if (units[id].type != U_HQ) continue;
+        if (units[id].alive) return -1;
+        dead = id;
+    }
+    return dead;
+}
+
+int World::acting_hq(int formation, int64_t at) const {
+    if (formation < 0 || formation >= (int)formations.size()) return -1;
+    if (at < 0) at = time_min;
+    const auto &m = formations[formation].members;
+    for (int id : m)
+        if (units[id].alive && units[id].type == U_HQ) return id;
+    const int hq = dead_hq(formation);
+    if (hq < 0) return -1; // the formation never had an HQ
+    // The HQ died with its last element, so its last hit is when it was lost.
+    if (at - units[hq].last_hit < HANDOVER_MIN) return -1;
+    // The senior platoon still able to fight: first in the order of battle.
+    for (int id : m) {
+        const Unit &u = units[id];
+        if (u.alive && (u.type == U_TANK || u.type == U_MECH || u.type == U_INFANTRY) && u.strength >= 30.0f)
+            return id;
+    }
+    for (int id : m)
+        if (units[id].alive) return id;
+    return -1;
+}
+
+int World::handover_minutes_left(int formation) const {
+    const int hq = dead_hq(formation);
+    if (hq < 0) return 0;
+    int64_t left = units[hq].last_hit + HANDOVER_MIN - time_min;
+    if (left > 0) return (int)left;
+    return acting_hq(formation) >= 0 ? 0 : -1;
 }
 
 bool World::road_step(int from_idx, int to_idx) const {
@@ -591,9 +632,8 @@ void World::update_standoff() {
 HexCoord World::regroup_point(const Unit &u) const {
     static const int ring[12][2] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}, {1, 1}, {-1, 1},
                                     {1, -1}, {-1, -1}, {2, 0}, {-2, 0}, {0, 2}, {0, -2}};
-    int hq = -1;
-    for (int id : formations[u.formation].members)
-        if (units[id].alive && units[id].type == U_HQ) hq = id;
+    // On the HQ, or on whoever has taken over from it.
+    int hq = acting_hq(u.formation);
     if (hq < 0 || hq == u.id) return u.pos;
     HexCoord base = units[hq].pos;
     // Where the HQ is heading counts, so the company gathers where the HQ will be.
@@ -1339,9 +1379,13 @@ void World::update_combat() {
                 if (t.side == SIDE_PLAYER) stats_.losses++;
                 else stats_.kills++;
                 push_event(EV_DESTROYED, t.id, t.side == SIDE_PLAYER,
-                           t.side == SIDE_PLAYER
-                               ? fmt("%s has been destroyed %s.", t.name.c_str(), place_name(t.pos).c_str())
-                               : fmt("Hostile %s destroyed by %s.", tt.name, u.name.c_str()));
+                           t.side != SIDE_PLAYER
+                               ? fmt("Hostile %s destroyed by %s.", tt.name, u.name.c_str())
+                           : t.type == U_HQ
+                               ? fmt("%s has been destroyed %s. Orders will be slow, and the trains need about "
+                                     "%d minutes to report to a new commander.",
+                                     t.name.c_str(), place_name(t.pos).c_str(), HANDOVER_MIN)
+                               : fmt("%s has been destroyed %s.", t.name.c_str(), place_name(t.pos).c_str()));
             }
         }
     }
@@ -1493,9 +1537,16 @@ void World::update_logistics() {
         u.ammo = std::min(100.0f, u.ammo + 8.0f);
         u.fuel = std::min(100.0f, u.fuel + 8.0f);
     }
-    int hq = -1;
-    for (int id : formations[0].members)
-        if (units[id].alive && units[id].type == U_HQ) hq = id;
+    // The trains work for the HQ, or once it is lost and the handover is done, for the acting
+    // commander, more slowly: nobody is left whose job is to run them.
+    const int hq = acting_hq(0);
+    const bool acting = hq >= 0 && units[hq].type != U_HQ;
+    if (acting && hq != trains_announced_)
+        push_event(EV_SUPPLY, hq, true,
+                   fmt("%s has taken over the company trains %s. Units halted near it resupply at %d%% of the "
+                       "usual rate.",
+                       units[hq].name.c_str(), place_name(units[hq].pos).c_str(), (int)(ACTING_SUPPLY_RATE * 100)));
+    trains_announced_ = acting ? hq : -1;
     stock.personnel = 0;
     for (auto &u : units) {
         if (!u.alive || u.side != SIDE_PLAYER) continue;
@@ -1505,7 +1556,7 @@ void World::update_logistics() {
         // (enemies merely being nearby doesn't stop the trucks).
         bool fighting = time_min - u.last_fired < 30 || time_min - u.last_hit < 30 || time_min - u.last_targeted < 30;
         if (hq < 0 || fighting || u.moving() || hex_distance(u.pos, units[hq].pos) > 3) continue;
-        float rate = u.resting ? 50.0f : 25.0f;
+        float rate = (u.resting ? 50.0f : 25.0f) * (acting ? ACTING_SUPPLY_RATE : 1.0f);
         float want_fuel = std::min(rate, 100.0f - u.fuel);
         double litres = want_fuel / 100.0 * ti.fuel_litres;
         if (litres > 0 && stock.diesel_l > 0) {
@@ -1820,6 +1871,11 @@ bool World::load_state(const uint8_t *data, size_t size, std::string *error) {
     groups = std::move(gs);
     events_.clear();
     rebuild_buckets();
+    // As of the last hourly logistics pass, so a load doesn't announce the acting commander again.
+    {
+        int a = acting_hq(0, time_min - time_min % 60);
+        trains_announced_ = a >= 0 && units[a].type != U_HQ ? a : -1;
+    }
     return true;
 }
 

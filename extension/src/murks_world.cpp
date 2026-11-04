@@ -292,6 +292,10 @@ Dictionary MurksWorld::get_objectives() const {
     d["losses"] = world_.stats().losses;
     d["time_minutes"] = (int64_t)world_.time_min;
     d["hq_alive"] = world_.hq_of(murks::SIDE_PLAYER) >= 0;
+    // Who runs the trains once the HQ is lost: "" while the HQ lives or during the handover.
+    const int acting = world_.acting_hq(0);
+    d["acting_hq"] = acting >= 0 && world_.units[acting].type != murks::U_HQ ? to_gd(world_.units[acting].name) : String();
+    d["handover_minutes"] = world_.handover_minutes_left(0); // -1 = nobody left to take over
     if (!world_.formations.empty()) {
         d["own_effective"] = world_.effective_combat_units(0);
         d["own_start"] = world_.formations[0].start_combat;

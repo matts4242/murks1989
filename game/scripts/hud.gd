@@ -197,8 +197,8 @@ func _build_orders(parent: Control) -> void:
 	orders_box.add_child(acts)
 	var act_defs := [["Hold", "hold", "Stop and hold position. Key H"],
 		["Fall back", "fall_back", "Withdraw about 6 km away from known enemies, or back to the HQ. Key B"],
-		["Regroup", "regroup", "Form up around the company HQ. Key Y"],
-		["Resupply", "rest", "Rest & resupply at the HQ: double refill rate, faster recovery. Key N"]]
+		["Regroup", "regroup", "Form up around the company HQ (or whoever took over from it). Key Y"],
+		["Resupply", "rest", "Rest & resupply at the HQ (or whoever took over from it): double refill rate, faster recovery. Key N"]]
 	for d in act_defs:
 		var name: String = d[1]
 		var b := _small_button(d[0], false, d[2])
@@ -698,6 +698,16 @@ func set_objectives(obj: Dictionary) -> void:
 	var os := int(obj.get("own_start", 0))
 	var oe := int(obj.get("own_effective", 0))
 	var hq_ok: bool = obj.get("hq_alive", false)
+	var hq_text := "alive"
+	if not hq_ok:
+		var acting := String(obj.get("acting_hq", ""))
+		var left := int(obj.get("handover_minutes", -1))
+		if acting != "":
+			hq_text = "lost: orders slow, %s runs the trains (half-rate resupply)" % acting
+		elif left > 0:
+			hq_text = "lost: orders slow, trains reorganising (%d min)" % left
+		else:
+			hq_text = "lost: orders slow, no resupply"
 	var t := ""
 	match int(obj.get("outcome", 0)):
 		1: t += "[color=#7fe07f][b]Victory.[/b][/color]  "
@@ -707,7 +717,7 @@ func set_objectives(obj: Dictionary) -> void:
 		"#7fe07f" if ee == 0 else "#ffc040", ee, es]
 	t += "Keep 3+ units fighting [color=%s](%d of %d)[/color]   ·   HQ [color=%s]%s[/color]   ·   kills %d, lost %d" % [
 		"#7fe07f" if oe >= 3 else "#ff6050", oe, os, "#7fe07f" if hq_ok else "#ff6050",
-		"alive" if hq_ok else "lost: orders slow, no resupply", int(obj.get("kills", 0)), int(obj.get("losses", 0))]
+		hq_text, int(obj.get("kills", 0)), int(obj.get("losses", 0))]
 	objective_label.text = t
 
 

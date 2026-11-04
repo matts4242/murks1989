@@ -274,6 +274,17 @@ public:
     bool road_step(int from_idx, int to_idx) const; // both hexes joined by a road edge
     bool line_of_sight(HexCoord a, HexCoord b, float eye, float target) const;
     int hq_of(int side) const;
+    // Losing an HQ: the trains keep running, but someone has to take them over. After a
+    // handover of HANDOVER_MIN minutes the senior surviving platoon (first in the order of
+    // battle still able to fight) acts for the HQ: resupply and regrouping go to it, at
+    // ACTING_SUPPLY_RATE of the normal rate. Command delays don't change (+25 min still applies).
+    static constexpr int HANDOVER_MIN = 60;
+    static constexpr float ACTING_SUPPLY_RATE = 0.5f;
+    // The formation's HQ if alive, else the acting commander once the handover is done at time
+    // `at` (default now), else -1.
+    int acting_hq(int formation, int64_t at = -1) const;
+    // Minutes until the handover is done (0 if done or the HQ is alive, -1 if there is no one).
+    int handover_minutes_left(int formation) const;
     static int element_count(const Unit &u); // from the equipment ("4x T-55A", "35 men") or the type
     EngagementTime engagement_time(const Unit &u) const;
     bool reachable(HexCoord a, HexCoord b) const; // same connected piece of land
@@ -326,6 +337,10 @@ private:
     bool alert_ = false; // a pause-worthy event was raised this tick
     Outcome outcome_ = OUT_ONGOING;
     std::string outcome_text_;
+    // Who the company trains were last reported working for (-1 the HQ or no one). Only used
+    // to announce a new acting commander; recomputed on load, so it is not saved.
+    int trains_announced_ = -1;
+    int dead_hq(int formation) const; // the formation's destroyed HQ, -1 if alive or none
 };
 
 } // namespace murks

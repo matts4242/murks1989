@@ -29,8 +29,8 @@ This build proves the risky technical core of the design plan (roadmap phase 1, 
 - **Command friction.** Orders take 5–30+ minutes to reach units, longer out of radio range, in combat, or when tired.
 - **Flashpoint-style combat.** Line of sight from elevation and cover, concealment in forests and towns, night spotting, fog of war with last-known positions, direct and indirect fire, morale, and standing orders that make hurt units fall back.
 - **Simulation fidelity zones.** Hot (within 10 km of an enemy), warm (10–40 km) and cold zones.
-- **A thin logistics loop.** Fuel and ammo are carried per unit and refilled from company stocks near the HQ; food is drawn daily.
-- **A scenario you can win or lose.** The 7th Guards Remnant hunts the company. It follows the freshest sighting any hostile has made and gets word of the company's whereabouts every six hours or so. You win by breaking it: none of its six fighting platoons left with 30% strength or more. You lose when fewer than three of your fighting units are left. Losing Murks HQ doesn't end the game, but orders then take 25 minutes longer and resupply stops. The contract and score sit top left; an end screen offers keep playing, load, new game or quit.
+- **A thin logistics loop.** Fuel and ammo are carried per unit and refilled from company stocks near the HQ (or, once the HQ is lost, near the platoon that took over the trains, at half rate); food is drawn daily.
+- **A scenario you can win or lose.** The 7th Guards Remnant hunts the company. It follows the freshest sighting any hostile has made and gets word of the company's whereabouts every six hours or so. You win by breaking it: none of its six fighting platoons left with 30% strength or more. You lose when fewer than three of your fighting units are left. Losing Murks HQ doesn't end the game, but orders then take 25 minutes longer, and after an hour's handover the senior platoon still able to fight (first in the order of battle, at 30% strength or more) takes over the company trains: units halted near it resupply at half the usual rate, and regroup and rest & resupply form up on it. If that platoon is lost or falls below 30%, the next one takes over. Hostile formations regroup the same way on whoever takes over from a lost HQ. The contract and score sit top left; an end screen offers keep playing, load, new game or quit.
 - **Quick save and load** (F5 / F9). A save holds the whole simulation; loading it and playing on gives exactly the same result.
 
 The map is baked from real data by `tools/bake_region.py` (see "The real map" below). If the baked file is missing, or you pass `--procedural`, the game generates a fictional map instead.
@@ -64,7 +64,7 @@ The prebuilt extension is in `game/bin/` (`libmurks.windows.template_debug.x86_6
 | M | Whole map |
 | O | Company grouping on or off. When on, it applies automatically once hexes are smaller than 14 px on screen |
 | F / Q / E / R | Right-click mode for the next order: move (hasty) / road march / deliberate / assault. After the order it goes back to move |
-| B / Y / N | Fall back / regroup on the company HQ / rest & resupply at the HQ |
+| B / Y / N | Fall back / regroup on the company HQ / rest & resupply at the HQ (or on whoever took over from it) |
 | X | Cycle fire: at will, return fire, hold fire |
 | G / V / Z | Hex grid / line of sight of the selected unit / fidelity zones |
 | P | WeGo pulse: pause each time the HQ can issue orders |
@@ -89,7 +89,7 @@ The prebuilt extension is in `game/bin/` (`libmurks.windows.template_debug.x86_6
 | Deliberate | 1.5× slower. Stays concealed in forest and towns while moving and shoots as if halted |
 | Assault | 1.15× slower. Fires at 85% on the move. Break-contact thresholds drop by 40% while advancing |
 | Fall back | Withdraws about 6 km directly away from the nearest enemy seen in the last hour, or back to the HQ if none |
-| Regroup | Forms up within 2 hexes of the company HQ (or where the HQ is heading) |
+| Regroup | Forms up within 2 hexes of the company HQ (or where the HQ is heading); with the HQ lost, on the platoon that took over from it |
 | Rest & resupply | Regroups, then rests: fuel and ammo refill at 50 points an hour instead of 25, and morale and readiness recover twice as fast |
 | Fire: return fire | Shoots only within 5 minutes of being fired at. Firing gives a unit away, so this keeps scouts hidden |
 | Fire: hold fire | Never shoots |
@@ -162,7 +162,7 @@ extension/    GDExtension binding: one class, MurksWorld, with coarse calls (who
 game/         Godot project: scripts/main.gd (input, clock), map_view.gd (streaming), overlay.gd (symbols), hud.gd
 game/data/    Baked real map (.murkz = zlib-compressed MURKSMAP)
 tools/        bake_region.py (real-data pipeline), finish_map.cpp (adds local roads)
-tests/        core_bench.cpp: headless run of map + sim with timings
+tests/        core_bench.cpp: headless run of map + sim with timings; hq_loss_test.cpp: checks the HQ-loss rules
 SConstruct    Builds the extension into game/bin/
 CMakeLists.txt  Builds the core, benchmark and finish_map on their own (handy in Visual Studio)
 ```
@@ -184,7 +184,7 @@ You only need this to change the C++ code.
    ```
 5. Restart the Godot editor, or let it hot-reload the extension.
 
-The core has no Godot dependency, so you can also open the folder in Visual Studio (CMake) and run `core_bench` to test simulation changes in seconds.
+The core has no Godot dependency, so you can also open the folder in Visual Studio (CMake) and run `core_bench` to test simulation changes in seconds (`hq_loss_test` checks the HQ-loss rules and exits non-zero on a failure).
 
 On Linux, the same `scons` works. To cross-compile Windows from Linux, use `scons platform=windows use_mingw=yes`.
 

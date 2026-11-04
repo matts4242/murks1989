@@ -145,7 +145,7 @@ func _start_world() -> void:
 	hud.set_toggle("Group", group_companies)
 	set_speed(0)
 	var obj: Dictionary = world.get_objectives()
-	hud.show_banner("Company Murks is billeted at %s. The %s is coming for you from the east.\nBreak it before it breaks you, and guard the HQ: without it orders crawl and supplies stop. Select a unit and right-click to move; Space starts the clock; F1 shows all controls." % [
+	hud.show_banner("Company Murks is billeted at %s. The %s is coming for you from the east.\nBreak it before it breaks you, and guard the HQ: without it orders crawl and supplies slow to half. Select a unit and right-click to move; Space starts the clock; F1 shows all controls." % [
 		obj.get("home", _home_name()), obj.get("enemy_name", "enemy")], 12.0)
 	_poll_events()
 	ready_to_play = true

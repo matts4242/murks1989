@@ -22,6 +22,10 @@ target_include_directories(murks_core PUBLIC core/include)
 add_executable(core_bench tests/core_bench.cpp)
 target_link_libraries(core_bench PRIVATE murks_core)
 
+# Checks the HQ-loss rules (acting commander, reduced resupply, save/load). build/hq_loss_test
+add_executable(hq_loss_test tests/hq_loss_test.cpp)
+target_link_libraries(hq_loss_test PRIVATE murks_core)
+
 # Adds local roads (and optionally rail) to a map baked by tools/bake_region.py.
 add_executable(finish_map tools/finish_map.cpp)
 target_link_libraries(finish_map PRIVATE murks_core)
