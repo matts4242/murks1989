@@ -87,6 +87,9 @@ void MurksWorld::_bind_methods() {
     ClassDB::bind_method(D_METHOD("set_default_standoff", "standoff"), &MurksWorld::set_default_standoff);
     ClassDB::bind_method(D_METHOD("get_default_standoff"), &MurksWorld::get_default_standoff);
     ClassDB::bind_method(D_METHOD("get_visible_hexes", "id"), &MurksWorld::get_visible_hexes);
+    ClassDB::bind_method(D_METHOD("get_supply"), &MurksWorld::get_supply);
+    ClassDB::bind_method(D_METHOD("set_supply_route", "active"), &MurksWorld::set_supply_route);
+    ClassDB::bind_method(D_METHOD("set_convoy_turn_back", "turn_back"), &MurksWorld::set_convoy_turn_back);
     ClassDB::bind_method(D_METHOD("poll_events"), &MurksWorld::poll_events);
     ClassDB::bind_method(D_METHOD("get_stats"), &MurksWorld::get_stats);
 }
@@ -439,8 +442,15 @@ Dictionary MurksWorld::get_unit_info(int id) const {
         d["engage_morale"] = et.f_morale;
         d["engage_ammo"] = et.f_ammo;
         d["engage_fire"] = et.f_fire;
-        static const char *kNoun[murks::U_TYPE_COUNT] = {"vehicles", "vehicles", "vehicles", "squads", "vehicles", "guns"};
+        static const char *kNoun[murks::U_TYPE_COUNT] = {"vehicles", "vehicles", "vehicles", "squads", "vehicles", "guns", "trucks"};
         d["element_noun"] = kNoun[u.type < murks::U_TYPE_COUNT ? u.type : 0];
+    }
+    if (u.type == murks::U_SUPPLY && u.id == world_.route.convoy) {
+        // The supply column runs its route on its own: the panel shows the route instead of orders.
+        d["supply_column"] = true;
+        d["convoy_status"] = to_gd(world_.convoy_status());
+        d["cargo_t"] = world_.cargo_t();
+        d["capacity_t"] = world_.column_capacity_t();
     }
     d["morale"] = u.morale;
     d["fuel"] = u.fuel;
@@ -635,6 +645,73 @@ PackedVector2Array MurksWorld::get_visible_hexes(int id) const {
     return out;
 }
 
+Dictionary MurksWorld::get_supply() const {
+    Dictionary d;
+    const murks::World &w = world_;
+    const int64_t now = w.time_min;
+    d["has_depot"] = !w.holdings.empty();
+    if (!w.holdings.empty()) {
+        const murks::Holding &h = w.holdings[w.route.holding < (int)w.holdings.size() ? std::max(0, w.route.holding) : 0];
+        d["depot_name"] = to_gd(h.name);
+        murks::Vec2 c = murks::hex_center(h.pos);
+        d["depot_pos"] = Vector2((real_t)c.x, (real_t)c.y);
+        d["depot_diesel_l"] = h.diesel_l;
+        d["depot_ammo_t"] = h.ammo_t;
+        d["depot_food_kg"] = h.food_kg;
+        d["depot_food_per_day"] = h.food_per_day;
+        d["depot_raided_ago"] = now - h.raided_at < 24 * 60 ? (int)(now - h.raided_at) : -1;
+        d["food_days_depot"] = w.food_need_per_day(true) > 0 ? h.food_kg / w.food_need_per_day(true) : -1.0;
+    }
+    // The trains run for the HQ, or for whoever took over from it.
+    const int hq = w.acting_hq(0);
+    d["trains_with"] = hq >= 0 ? to_gd(w.units[hq].name) : String();
+    if (hq >= 0) {
+        murks::Vec2 c = murks::hex_center(w.units[hq].pos);
+        d["trains_pos"] = Vector2((real_t)c.x, (real_t)c.y);
+        d["trains_at_depot"] = w.depot_near(w.units[hq].pos) >= 0;
+    }
+    d["trains_diesel_l"] = w.stock.diesel_l;
+    d["trains_ammo_t"] = w.stock.ammo_t;
+    d["trains_food_kg"] = w.stock.food_kg;
+    d["trains_diesel_cap"] = w.stock.diesel_cap;
+    d["trains_ammo_cap"] = w.stock.ammo_cap;
+    d["trains_food_cap"] = w.stock.food_cap;
+    d["trains_short_t"] = w.trains_need_t();
+    const double away = w.food_need_per_day(false);
+    d["food_days_trains"] = away > 0 ? w.stock.food_kg / away : -1.0;
+    // The supply column and its route.
+    d["route_active"] = w.route.active;
+    d["turn_back"] = w.route.turn_back;
+    d["convoy_id"] = w.route.convoy;
+    const bool alive = w.route.convoy >= 0 && w.route.convoy < (int)w.units.size() && w.units[w.route.convoy].alive;
+    d["convoy_alive"] = alive;
+    if (w.route.convoy >= 0 && w.route.convoy < (int)w.units.size()) {
+        const murks::Unit &c = w.units[w.route.convoy];
+        d["trucks"] = alive ? c.elements : 0;
+        d["trucks_max"] = c.elements_max;
+        murks::Vec2 p = murks::hex_center(c.pos);
+        d["convoy_pos"] = Vector2((real_t)p.x, (real_t)p.y);
+    }
+    static const char *kState[5] = {"parked", "loading", "outbound", "unloading", "returning"};
+    d["convoy_state"] = kState[w.route.state < 5 ? w.route.state : 0];
+    d["convoy_status"] = to_gd(w.convoy_status());
+    d["cargo_t"] = w.cargo_t();
+    d["capacity_t"] = w.column_capacity_t();
+    d["trips"] = w.route.trips;
+    d["delivered_t"] = w.route.delivered_t;
+    // Pay.
+    d["cash"] = w.stock.cash;
+    d["weekly_bill"] = w.weekly_bill();
+    d["personnel"] = w.stock.personnel;
+    d["next_payday"] = to_gd(murks::World::time_string_at(w.stock.next_payday));
+    d["payday_in_minutes"] = (int64_t)(w.stock.next_payday - now);
+    d["missed_paydays"] = w.stock.missed_paydays;
+    return d;
+}
+
+void MurksWorld::set_supply_route(bool active) { world_.set_supply_route(active); }
+void MurksWorld::set_convoy_turn_back(bool turn_back) { world_.set_convoy_turn_back(turn_back); }
+
 Array MurksWorld::poll_events() {
     Array out;
     for (const auto &e : world_.drain_events()) {
@@ -671,6 +748,7 @@ Dictionary MurksWorld::get_stats() const {
     d["diesel_l"] = world_.stock.diesel_l;
     d["ammo_t"] = world_.stock.ammo_t;
     d["food_kg"] = world_.stock.food_kg;
+    d["cash"] = world_.stock.cash;
     d["personnel"] = world_.stock.personnel;
     d["units_total"] = (int)world_.units.size();
     return d;

@@ -56,6 +56,9 @@ var targeted_seen := {}            # own unit id -> last "fired at" minute alrea
 var short_names := {}              # own unit id -> short counter label
 var groups_cache: Array = []       # own teams: {id, name, color, leader, units, shape, spacing, zone_hexes}
 var show_cmd := false              # command zones and team links for all teams, not just the selection
+var show_supply := false           # supply panel and the supply route on the map (I)
+var supply := {}                   # world.get_supply(), refreshed with the HUD
+const TYPE_SUPPLY := 6             # the supply column: runs its route on its own, takes no orders
 const SF_GROUP := 20
 const SF_ROLE := 21
 var event_log: Array = []
@@ -145,8 +148,8 @@ func _start_world() -> void:
 	hud.set_toggle("Group", group_companies)
 	set_speed(0)
 	var obj: Dictionary = world.get_objectives()
-	hud.show_banner("Company Murks is billeted at %s. The %s is coming for you from the east.\nBreak it before it breaks you, and guard the HQ: without it orders crawl and supplies slow to half. Select a unit and right-click to move; Space starts the clock; F1 shows all controls." % [
-		obj.get("home", _home_name()), obj.get("enemy_name", "enemy")], 12.0)
+	hud.show_banner("Company Murks is billeted at %s. The %s is coming for you from the east.\nBreak it before it breaks you, and guard the HQ: without it orders crawl and supplies slow to half. Your reserves sit in the depot at %s; the trains with the HQ carry a few days' worth, and the supply column brings more when they run short (I: supply panel).\nSelect a unit and right-click to move; Space starts the clock; F1 shows all controls." % [
+		obj.get("home", _home_name()), obj.get("enemy_name", "enemy"), obj.get("home", _home_name())], 14.0)
 	_poll_events()
 	ready_to_play = true
 	if autotest_dir != "":
@@ -221,6 +224,9 @@ func _process(delta: float) -> void:
 		hud.refresh(world.get_time_string(), world.is_night(), stats, Engine.get_frames_per_second(),
 			"script %.1f ms · chunks %d" % [script_ms, map_view.chunks.size()])
 		hud.set_speed(speed_index, eff != speed_index)
+		supply = world.get_supply()
+		if show_supply:
+			hud.show_supply(supply)
 		_refresh_selection_panel()
 		_check_outcome()
 	script_ms = script_ms * 0.9 + 0.1 * ((Time.get_ticks_usec() - _t_start) / 1000.0 + overlay.draw_ms)
@@ -491,6 +497,7 @@ func _on_key(key: Key) -> void:
 				_select_company_of(selected[0])
 		KEY_O: _on_toggle("Group")
 		KEY_T: _on_toggle("Command")
+		KEY_I: _on_toggle("Supply")
 		KEY_J:
 			_on_command("team_disband" if Input.is_key_pressed(KEY_SHIFT) else "team_form")
 		KEY_L: _on_command("team_select")
@@ -539,6 +546,13 @@ func _on_toggle(name: String) -> void:
 		"Auto-pause":
 			auto_pause = not auto_pause
 			hud.set_toggle(name, auto_pause)
+		"Supply":
+			show_supply = not show_supply
+			hud.set_toggle(name, show_supply)
+			hud.supply_panel.visible = show_supply
+			if show_supply:
+				supply = world.get_supply()
+				hud.show_supply(supply)
 		"Command":
 			show_cmd = not show_cmd
 			hud.set_toggle(name, show_cmd)
@@ -655,6 +669,8 @@ func _select_company_of(unit_id: int) -> void:
 	for i in snapshot.size() / stride:
 		if int(snapshot[i * stride]) == unit_id:
 			fid = int(snapshot[i * stride + 10])
+			if int(snapshot[i * stride + 2]) == TYPE_SUPPLY:
+				return # the supply column is not a company to move
 	if fid < 0:
 		return # hostile or unknown
 	var ids: Array[int] = []
@@ -673,19 +689,27 @@ func _all_own_ids() -> Array[int]:
 	return out
 
 
+## Own units in the selection that take orders (the supply column runs its route on its own).
 func _own_selected() -> Array[int]:
 	var out: Array[int] = []
 	for id in selected:
 		var info: Dictionary = world.get_unit_info(id)
-		if not info.is_empty() and int(info["side"]) == 0 and info["alive"]:
+		if not info.is_empty() and int(info["side"]) == 0 and info["alive"] and int(info["type"]) != TYPE_SUPPLY:
 			out.append(id)
 	return out
+
+
+func _column_selected() -> bool:
+	return selected.has(int(supply.get("convoy_id", -1)))
 
 
 func _order_move_to(world_pos: Vector2) -> void:
 	var own := _own_selected()
 	if own.is_empty():
-		hud.show_toast("Select one of your units first (left click).")
+		if _column_selected():
+			hud.show_toast("The supply column runs between the depot and the trains on its own. Route settings: supply panel (I).", 5.0)
+		else:
+			hud.show_toast("Select one of your units first (left click).")
 		return
 	var hex := world.world_to_hex(world_pos)
 	var lo := 1 << 30
@@ -773,6 +797,20 @@ func _on_command(name: String) -> void:
 			lo = mini(lo, world.set_standoff(id, v))
 		if not own.is_empty():
 			hud.show_toast("Stand-off %s for %d unit%s, in effect after %d+ min (command delay)." % [_standoff_name(v), own.size(), "" if own.size() == 1 else "s", lo])
+	elif name == "route_on" or name == "route_off":
+		world.set_supply_route(name == "route_on")
+		hud.show_toast("Supply route running: the column brings the trains what they are short of." if name == "route_on"
+			else "Supply route stopped: the column stays at the depot (one on its way out turns round).", 5.0)
+	elif name == "convoy_push" or name == "convoy_turn_back":
+		world.set_convoy_turn_back(name == "convoy_turn_back")
+		hud.show_toast("Supply column under fire: %s." % ("turns back to the depot" if name == "convoy_turn_back" else "pushes through to the trains"), 4.0)
+	elif name == "convoy_select":
+		var cid := int(supply.get("convoy_id", -1))
+		if supply.get("convoy_alive", false) and cid >= 0:
+			selected = [cid]
+			camera.position = unit_position(cid)
+		else:
+			hud.show_toast("The supply column has been destroyed.")
 	elif name == "team_form":
 		_form_team()
 	elif name == "team_disband":
@@ -1068,10 +1106,10 @@ func short_name(id: int) -> String:
 		return short_names[id]
 	var info: Dictionary = world.get_unit_info(id)
 	var nm := String(info.get("name", ""))
-	var abbr := {"HQ": "HQ", "Tank Plt": "Tk", "Mech Plt": "Mc", "Rifle Plt": "Rf", "Recon Sect": "Rc", "Arty Bty": "Bty"}
+	var abbr := {"HQ": "HQ", "Tank Plt": "Tk", "Mech Plt": "Mc", "Rifle Plt": "Rf", "Recon Sect": "Rc", "Arty Bty": "Bty", "Supply Column": "Sup"}
 	var tn := String(info.get("type_name", ""))
 	var s: String = abbr.get(tn, nm.substr(0, 3))
-	if s != "HQ" and s != "Bty" and nm.length() > 0 and nm[0].is_valid_int():
+	if s != "HQ" and s != "Bty" and s != "Sup" and nm.length() > 0 and nm[0].is_valid_int():
 		s = nm[0] + s
 	short_names[id] = s
 	return s
@@ -1256,6 +1294,8 @@ func _run_autotest() -> void:
 		await _shot("13_combat_effectiveness", unit_position(worn), 0.12)
 
 
+	await _shot_supply()
+
 	# Streaming test: sweep across the map at chunk zoom and record the worst frame.
 	camera.zoom = Vector2.ONE * 0.02
 	camera.position = Vector2(20000, 300000)
@@ -1274,6 +1314,51 @@ func _run_autotest() -> void:
 	for e in event_log:
 		print("  ", e["time_string"], "  ", e["text"])
 	get_tree().quit()
+
+
+## Supply line: a fresh start played like the headless playtest's active player (recon forward
+## at 07:00, the company 12 km east on a road march at 09:00, regroup at 18:00), until the supply
+## column is on the road to the trains; then the supply panel and the route.
+func _shot_supply() -> void:
+	world.setup_scenario(hostile_groups)
+	for c in [glide, fire_seen, targeted_seen]:
+		c.clear()
+	for a in [fx, wrecks, pings, event_log]:
+		a.clear()
+	selected.clear()
+	_refresh_snapshot()
+	var home: Vector2i = world.get_unit_info(0)["hex"]
+	var own := _all_own_ids()
+	var t_end := world.get_time_minutes() + 36 * 60
+	while world.get_time_minutes() < t_end:
+		var tod := world.get_time_minutes() % 1440
+		if tod == 7 * 60 or tod == 9 * 60 or tod == 18 * 60:
+			for id in own:
+				var recon := String(world.get_unit_info(id)["type_name"]) == "Recon Sect"
+				if tod == 7 * 60 and recon:
+					world.set_stance(id, 1, 1)
+					world.order_move(id, home + Vector2i(40, 0), 2)
+				elif tod == 9 * 60 and not recon:
+					world.order_move(id, home + Vector2i(25, 0), 1)
+				elif tod == 18 * 60:
+					world.order_regroup(id, false)
+		world.advance(1, 1000.0)
+		supply = world.get_supply()
+		if String(supply.get("convoy_state", "")) == "outbound" and supply.has("convoy_pos") and \
+				(supply["convoy_pos"] as Vector2).distance_to(supply["depot_pos"]) > 3000.0:
+			break
+	_poll_events()
+	print("Autotest: supply column at %s: %s" % [world.get_time_string(), supply.get("convoy_status", "?")])
+	show_supply = true
+	hud.supply_panel.visible = true
+	hud.show_supply(supply)
+	selected = [int(supply.get("convoy_id", 0))]
+	var sp: Vector2 = supply.get("convoy_pos", unit_position(0))
+	if supply.has("trains_pos"):
+		sp = (supply["depot_pos"] as Vector2).lerp(supply["trains_pos"], 0.5) + Vector2(0, 2500)
+	await _shot("16_supply_line", sp, 0.05)
+	show_supply = false
+	hud.supply_panel.visible = false
 
 
 ## Plays on a minute per frame until fire is exchanged in sight, then captures the tracers.

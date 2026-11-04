@@ -78,9 +78,12 @@ func _init() -> void:
 					if float(info["fuel"]) <= 0.0:
 						out_fuel += 1
 			var ob: Dictionary = w.get_objectives()
-			print("%s  own alive %d (avg str %.0f, fuel-out %d)  enemy fighting %d/%d  own fighting %d  contact %d min  hot %d  diesel %.0f  ammo %.1f  tick %.0f us" % [
+			var sup: Dictionary = w.get_supply()
+			print("%s  own alive %d (avg str %.0f, fuel-out %d)  enemy fighting %d/%d  own fighting %d  contact %d min  hot %d  trains %.0f L %.1f t  depot %.0f L %.1f t  column %d/%d trucks %d trips  tick %.0f us" % [
 				w.get_time_string(), own_alive, own_str / maxf(1, own_alive), out_fuel, int(ob["enemy_effective"]), int(ob["enemy_start"]),
-				int(ob["own_effective"]), contact_min, int(st["hot"]), float(st["diesel_l"]), float(st["ammo_t"]), float(st["avg_tick_us"])])
+				int(ob["own_effective"]), contact_min, int(st["hot"]), float(st["diesel_l"]), float(st["ammo_t"]),
+				float(sup.get("depot_diesel_l", 0)), float(sup.get("depot_ammo_t", 0)), int(sup.get("trucks", 0)),
+				int(sup.get("trucks_max", 0)), int(sup.get("trips", 0)), float(st["avg_tick_us"])])
 			contact_min = 0
 	var hours_with_pause := pauses_by_hour.size()
 	var total_pauses := 0
@@ -92,6 +95,9 @@ func _init() -> void:
 	print("pause-worthy events: %d over %d game hours (worst hour %d); 'no route' %d; max tick %.1f ms; wall %d ms" % [
 		total_pauses, hours_with_pause, worst_hour, no_route, max_tick_ms, Time.get_ticks_msec() - t0])
 	print("outcome: ", outcome_at if outcome_at != "" else "none")
+	var sup_end: Dictionary = w.get_supply()
+	print("supply: %d trips, %.1f t delivered; column %s; cash $%.0f" % [int(sup_end["trips"]), float(sup_end["delivered_t"]),
+		sup_end["convoy_status"], float(sup_end["cash"])])
 	for l in log_lines:
 		print("   ", l)
 	# Save / load round trip: the same two hours must play out identically after a load.

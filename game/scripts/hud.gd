@@ -49,6 +49,10 @@ var end_panel: PanelContainer
 var end_title: Label
 var end_text: RichTextLabel
 var end_load_button: Button
+var supply_panel: PanelContainer
+var supply_text: RichTextLabel
+var route_buttons: Array[Button] = []   # run, stop
+var ambush_buttons: Array[Button] = []  # push through, turn back
 
 
 func _ready() -> void:
@@ -58,6 +62,7 @@ func _ready() -> void:
 	_build_unit_panel()
 	_build_log()
 	_build_status_and_help()
+	_build_supply_panel()
 	_build_banners()
 	_build_end_screen()
 
@@ -119,8 +124,7 @@ func _build_top_bar() -> void:
 		b.pressed.connect(func() -> void: speed_pressed.emit(i))
 		row.add_child(b)
 		speed_buttons.append(b)
-	cap_label = _label("", 13, Color(1, 0.55, 0.4))
-	cap_label.custom_minimum_size.x = 150
+	cap_label = _label("", 13, Color(1, 0.55, 0.4)) # takes room only while the speed is capped
 	row.add_child(cap_label)
 
 	row.add_child(VSeparator.new())
@@ -131,7 +135,7 @@ func _build_top_bar() -> void:
 	spacer.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	row.add_child(spacer)
 
-	var toggles := [["Group", "O"], ["Command", "T"], ["Grid", "G"], ["Sight", "V"], ["Zones", "Z"], ["WeGo", "P"], ["Auto-pause", "U"]]
+	var toggles := [["Supply", "I"], ["Group", "O"], ["Command", "T"], ["Grid", "G"], ["Sight", "V"], ["Zones", "Z"], ["WeGo", "P"], ["Auto-pause", "U"]]
 	for t in toggles:
 		var b := _button(t[0], true)
 		b.tooltip_text = "Key %s" % t[1]
@@ -139,9 +143,15 @@ func _build_top_bar() -> void:
 		b.pressed.connect(func() -> void: toggle_pressed.emit(key))
 		row.add_child(b)
 		toggle_buttons[key] = b
+	# Performance readout in the bottom-right corner, out of the crowded top bar.
 	perf_label = _label("", 11, Color(0.7, 0.75, 0.7))
-	perf_label.custom_minimum_size.x = 210
-	row.add_child(perf_label)
+	perf_label.set_anchors_preset(Control.PRESET_BOTTOM_RIGHT)
+	_offsets(perf_label, -300, -36, -8, -4)
+	perf_label.grow_horizontal = Control.GROW_DIRECTION_BEGIN
+	perf_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	perf_label.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.8))
+	perf_label.add_theme_constant_override("outline_size", 4)
+	add_child(perf_label)
 
 
 func _build_unit_panel() -> void:
@@ -423,7 +433,7 @@ func _build_status_and_help() -> void:
 	help_panel = PanelContainer.new()
 	help_panel.add_theme_stylebox_override("panel", _panel_style(0.8))
 	help_panel.set_anchors_preset(Control.PRESET_BOTTOM_RIGHT)
-	_offsets(help_panel, -330, -194, -8, -8)
+	_offsets(help_panel, -330, -250, -8, -42)
 	help_panel.grow_horizontal = Control.GROW_DIRECTION_BEGIN
 	help_panel.grow_vertical = Control.GROW_DIRECTION_BEGIN
 	help_panel.visible = false  # F1
@@ -439,6 +449,7 @@ func _build_status_and_help() -> void:
 		"Space: pause    1-5: speed    .: +15 min\n" +
 		"M: whole map    G grid  V sight  Z zones\n" +
 		"P: WeGo pulse    U: auto-pause    F1: help\n" +
+		"I: supply panel (depot, trains, supply column, pay)\n" +
 		"F5: quick save    F9: quick load\n" +
 		"F2: map data credits", 13, Color(0.85, 0.88, 0.8)))
 
@@ -458,6 +469,121 @@ func _build_status_and_help() -> void:
 		"Rivers, roads, railways: Made with Natural Earth. Free vector and raster map data @ naturalearthdata.com.\n" +
 		"Place names and populations: GeoNames (geonames.org), CC BY 4.0. Some names changed to 1989 usage.\n" +
 		"Local roads are generated; borders, roads and rail are not yet corrected to 1989.", 13, Color(0.9, 0.9, 0.85)))
+
+
+## Supply panel (I): the home depot, the company trains, the supply column between them and
+## the pay chest. Route settings are standing logistics orders and apply at once.
+func _build_supply_panel() -> void:
+	supply_panel = PanelContainer.new()
+	supply_panel.add_theme_stylebox_override("panel", _panel_style(0.9))
+	supply_panel.set_anchors_preset(Control.PRESET_TOP_LEFT)
+	_offsets(supply_panel, 8, 136, 8, 136)
+	supply_panel.visible = false
+	add_child(supply_panel)
+	var col := VBoxContainer.new()
+	col.add_theme_constant_override("separation", 4)
+	supply_panel.add_child(col)
+	supply_text = RichTextLabel.new()
+	supply_text.bbcode_enabled = true
+	supply_text.fit_content = true
+	supply_text.scroll_active = false
+	supply_text.autowrap_mode = TextServer.AUTOWRAP_OFF
+	supply_text.custom_minimum_size = Vector2(600, 0)
+	supply_text.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	supply_text.add_theme_font_size_override("normal_font_size", 13)
+	supply_text.add_theme_font_size_override("bold_font_size", 14)
+	col.add_child(supply_text)
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 4)
+	col.add_child(row)
+	var rl := _label("Route", 12, Color(0.75, 0.8, 0.7))
+	rl.custom_minimum_size.x = 48
+	row.add_child(rl)
+	for d in [["Run", "route_on", "The supply column loads what the trains are short of at the depot and drives it to them, then comes back."],
+			["Stop", "route_off", "Keep the column at the depot. A column on its way out turns round."]]:
+		var b := _small_button(d[0], true, d[2])
+		var cmd: String = d[1]
+		b.pressed.connect(func() -> void: command.emit(cmd))
+		row.add_child(b)
+		route_buttons.append(b)
+	row.add_child(VSeparator.new())
+	var al := _label("Under fire", 12, Color(0.75, 0.8, 0.7))
+	al.custom_minimum_size.x = 66
+	row.add_child(al)
+	for d in [["Push through", "convoy_push", "Standing order: a column under fire drives on to the trains."],
+			["Turn back", "convoy_turn_back", "Standing order: a column under fire turns back to the depot with what it still carries."]]:
+		var b := _small_button(d[0], true, d[2])
+		var cmd: String = d[1]
+		b.pressed.connect(func() -> void: command.emit(cmd))
+		row.add_child(b)
+		ambush_buttons.append(b)
+	row.add_child(VSeparator.new())
+	var sel := _small_button("Show column", false, "Select the supply column and centre the map on it.")
+	sel.pressed.connect(func() -> void: command.emit("convoy_select"))
+	row.add_child(sel)
+
+
+func show_supply(s: Dictionary) -> void:
+	if s.is_empty():
+		return
+	var t := "[b]Supply[/b]   [color=#9fa89a](I to close)[/color]\n"
+	if s.get("has_depot", false):
+		t += "[color=#b8c0a8]Depot at %s[/color]   %s L diesel · %.1f t ammo · %s kg food   [color=#9fa89a]+%s kg food a day from the town[/color]\n" % [
+			s["depot_name"], _thousands(int(s["depot_diesel_l"])), float(s["depot_ammo_t"]), _thousands(int(s["depot_food_kg"])),
+			_thousands(int(s["depot_food_per_day"]))]
+		var raided := int(s.get("depot_raided_ago", -1))
+		if raided >= 0:
+			t += "    [color=#ff6050]Plundered %s ago. Leave a unit within 2 km of the depot to guard it.[/color]\n" % _ago(raided)
+	var with := String(s.get("trains_with", ""))
+	t += "[color=#b8c0a8]Trains[/color] %s   %s · %s · %s" % [("with " + with) if with != "" else "[color=#ff6050]nobody runs them[/color]",
+		_level(float(s["trains_diesel_l"]), float(s["trains_diesel_cap"]), "%s L" % _thousands(int(s["trains_diesel_l"]))),
+		_level(float(s["trains_ammo_t"]), float(s["trains_ammo_cap"]), "%.1f t ammo" % float(s["trains_ammo_t"])),
+		_level(float(s["trains_food_kg"]), float(s["trains_food_cap"]), "%s kg food" % _thousands(int(s["trains_food_kg"])))]
+	var fd := float(s.get("food_days_trains", -1.0))
+	if fd >= 0.0:
+		t += "   [color=#9fa89a]food for %.1f days[/color]" % fd
+	if float(s.get("trains_short_t", 0.0)) >= 0.5:
+		t += "   [color=#9fa89a]short of %.1f t[/color]" % float(s["trains_short_t"])
+	t += "\n"
+	if s.get("trains_at_depot", false):
+		t += "    [color=#9fc8ff]At the depot: the trains load from it themselves (15 t an hour).[/color]\n"
+	var tm := int(s.get("trucks_max", 0))
+	var tr := int(s.get("trucks", 0))
+	var tc := "#5fd35f" if tr >= tm else ("#ffc040" if tr * 2 >= tm else "#ff5040")
+	t += "[color=#b8c0a8]Supply column[/color]   [color=%s]%d of %d trucks[/color] (%.0f t) · %d trip%s, %.1f t delivered · route %s, %s under fire\n" % [
+		tc, tr, tm, float(s["capacity_t"]), int(s["trips"]), "" if int(s["trips"]) == 1 else "s", float(s["delivered_t"]),
+		"running" if s["route_active"] else "[color=#ffc040]stopped[/color]", "turns back" if s["turn_back"] else "pushes through"]
+	t += "    %s\n" % s["convoy_status"]
+	var mins := int(s.get("payday_in_minutes", 0))
+	var bill := float(s["weekly_bill"])
+	var cash := float(s["cash"])
+	t += "[color=#b8c0a8]Pay[/color]   [color=%s]$%s[/color] in the chest · $%s due %s (in %s) for %d men" % [
+		"#5fd35f" if cash >= bill else "#ff6050", _thousands(int(cash)), _thousands(int(bill)),
+		String(s["next_payday"]).strip_edges(), _ago(mins), int(s["personnel"])]
+	if int(s.get("missed_paydays", 0)) > 0:
+		t += "   [color=#ff6050]%d pay day%s short[/color]" % [int(s["missed_paydays"]), "" if int(s["missed_paydays"]) == 1 else "s"]
+	supply_text.text = t
+	route_buttons[0].set_pressed_no_signal(s["route_active"])
+	route_buttons[1].set_pressed_no_signal(not s["route_active"])
+	ambush_buttons[0].set_pressed_no_signal(not s["turn_back"])
+	ambush_buttons[1].set_pressed_no_signal(s["turn_back"])
+	for b in route_buttons + ambush_buttons:
+		b.disabled = not s.get("convoy_alive", false)
+
+
+## A stock against its capacity, coloured: amber under half, red under a quarter.
+func _level(v: float, cap: float, text: String) -> String:
+	var f := v / maxf(cap, 0.001)
+	var c := "#e8e8dc" if f >= 0.5 else ("#ffc040" if f >= 0.25 else "#ff5040")
+	return "[color=%s]%s[/color]" % [c, text]
+
+
+func _ago(mins: int) -> String:
+	if mins >= 1440:
+		return "%d d %d h" % [mins / 1440, (mins % 1440) / 60]
+	if mins >= 60:
+		return "%d h %02d min" % [mins / 60, mins % 60]
+	return "%d min" % mins
 
 
 func _build_banners() -> void:
@@ -500,7 +626,7 @@ func show_toast(text: String, seconds := 4.0) -> void:
 func set_speed(index: int, capped: bool) -> void:
 	for i in speed_buttons.size():
 		speed_buttons[i].set_pressed_no_signal(i == index)
-	cap_label.text = "Capped: company in contact" if capped else ""
+	cap_label.text = "Capped: in contact" if capped else ""
 
 
 func set_toggle(name: String, on: bool) -> void:
@@ -510,8 +636,10 @@ func set_toggle(name: String, on: bool) -> void:
 
 func refresh(time_text: String, night: bool, stats: Dictionary, fps: float, map_stats: String) -> void:
 	time_label.text = time_text + ("  night" if night else "")
-	stock_label.text = "Diesel %s L   Ammo %.1f t   Food %s kg   Men %d" % [
-		_thousands(int(stats["diesel_l"])), float(stats["ammo_t"]), _thousands(int(stats["food_kg"])), int(stats["personnel"])]
+	stock_label.text = "Trains: %s L · %.1f t ammo · %s kg food   $%s   %d men" % [
+		_thousands(int(stats["diesel_l"])), float(stats["ammo_t"]), _thousands(int(stats["food_kg"])),
+		_thousands(int(stats.get("cash", 0))), int(stats["personnel"])]
+	stock_label.tooltip_text = "What the company trains carry (they travel with the HQ), the cash in the chest and the men on the pay roll. Press I for the supply panel."
 	perf_label.text = "%d fps · sim %.0f us/min · %d units\nhot %d / warm %d / cold %d · %s" % [
 		int(fps), float(stats["avg_tick_us"]), int(stats["alive"]), int(stats["hot"]), int(stats["warm"]), int(stats["cold"]), map_stats]
 	var now := Time.get_ticks_msec()
@@ -562,9 +690,27 @@ func show_unit(info: Dictionary, count: int) -> void:
 		unit_text.text = t
 		return
 	orders_box.visible = true
-	t += "[b]%s[/b]   %s\n" % [info["name"], info["type_name"]]
+	t += "[b]%s[/b]   %s\n" % [info["name"], "" if info["type_name"] == info["name"] else info["type_name"]]
 	if count > 1:
 		t += "[color=#9fc8ff](+%d more selected)[/color]\n" % (count - 1)
+	if info.get("supply_column", false):
+		# The column runs its route on its own: no orders, the route instead.
+		orders_box.visible = false
+		var em := int(info["elements_max"])
+		var ea := int(info["elements_active"])
+		var pc := "#5fd35f" if ea >= em else ("#ffc040" if ea * 2 >= em else "#ff5040")
+		t += "[color=#b8c0a8]%s · %s[/color]\n%s\n\n" % [info["formation"], info["equipment"], info["location"]]
+		t += "Trucks  [color=%s]%s[/color][color=#666]%s[/color]  %d of %d\n" % [pc, "■".repeat(ea), "□".repeat(em - ea), ea, em]
+		t += "Cargo   %.1f of %.1f t\n" % [float(info["cargo_t"]), float(info["capacity_t"])]
+		t += _bar("Fuel", float(info["fuel"]))
+		t += _bar("Morale", float(info["morale"]))
+		t += "\n%s\n\n" % info["convoy_status"]
+		t += "[color=#9fa89a]Runs between the depot and the company trains on its own. Every truck knocked out loses its load. Route and standing orders: supply panel (I).[/color]\n"
+		if info.has("eta_minutes"):
+			var eta := int(info["eta_minutes"])
+			t += "Route %.1f km, about %dh%02d left\n" % [float(info["route_km"]), eta / 60, eta % 60]
+		unit_text.text = t
+		return
 	t += "[color=#b8c0a8]%s · %s[/color]\n" % [info["formation"], info["equipment"]]
 	t += "%s\n\n" % info["location"]
 	if info.has("elements_max"):

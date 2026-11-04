@@ -19,7 +19,8 @@
 
 namespace murks {
 
-enum UnitType : uint8_t { U_HQ = 0, U_TANK, U_MECH, U_INFANTRY, U_RECON, U_ARTILLERY, U_TYPE_COUNT };
+// U_SUPPLY is the supply column: trucks that shuttle between a depot and the company trains.
+enum UnitType : uint8_t { U_HQ = 0, U_TANK, U_MECH, U_INFANTRY, U_RECON, U_ARTILLERY, U_SUPPLY, U_TYPE_COUNT };
 enum Mobility : uint8_t { M_TRACKED = 0, M_WHEELED, M_FOOT };
 enum Side : int8_t { SIDE_PLAYER = 0, SIDE_HOSTILE = 1, SIDE_COUNT = 2 };
 enum OrderKind : uint8_t { O_HOLD = 0, O_MOVE, O_RETREAT, O_REGROUP, O_REST };
@@ -195,9 +196,61 @@ struct Event {
     std::string text;
 };
 
+// The company trains: the trucks that travel with the HQ and carry a few days of supply.
+// Units halted near the HQ (or whoever took over from it) draw from them. The trains are
+// refilled at a depot, or by the supply column. All doubles first: no padding in saves.
 struct CompanyStock {
-    double diesel_l = 30000, ammo_t = 60, food_kg = 6000;
+    double diesel_l = 12000, ammo_t = 24, food_kg = 2000;         // aboard the trains
+    double diesel_cap = 12000, ammo_cap = 24, food_cap = 2000;    // what their trucks can carry
+    double cash = 0;          // US dollars in the company chest
+    int64_t next_payday = 0;  // game minute of the next weekly pay day
     int personnel = 0;
+    int missed_paydays = 0;   // pay days in a row that could not be paid in full
+};
+
+// Supply line (design plan, phase 3). Values are first estimates, to be tuned against
+// historical data like the combat values.
+constexpr double TRUCK_LOAD_T = 4.5;        // Ural-4320 payload on roads, tonnes
+constexpr double DIESEL_T_PER_L = 0.00084;  // tonnes per litre of diesel
+constexpr int SUPPLY_RADIUS = 3;            // hexes: units halted this close draw from the trains or a depot
+constexpr int CONVOY_LOAD_MIN = 30;         // minutes to load or unload the supply column
+constexpr double DEPOT_LOAD_T_PER_H = 15;   // trains loading straight from a depot, tonnes an hour
+constexpr int RAID_RADIUS = 2;              // hexes: hostiles this close to an unguarded depot plunder it
+constexpr int GUARD_RADIUS = 4;             // hexes: any own unit this close (but the column) guards a depot
+constexpr double RAID_SHARE = 0.25;         // share of each store carried off per hour of raiding
+constexpr double WAGE_PER_MAN_WEEK = 50;    // US dollars
+constexpr double CONTRACT_ADVANCE = 20000;  // paid when the contract was signed (in the chest at start)
+constexpr double CONTRACT_PAYMENT = 60000;  // paid when the contract is fulfilled
+constexpr double START_CASH = 8000;         // the company's own money at start
+
+// A place the company holds. The first is the home town, whose depot keeps the reserve
+// stocks the trains and the supply column draw on, and whose market sells food to it.
+struct Holding {
+    std::string name;
+    int settlement = -1;
+    HexCoord pos;
+    int8_t side = SIDE_PLAYER;
+    double diesel_l = 0, ammo_t = 0, food_kg = 0; // depot stock
+    double food_per_day = 0;                      // delivered to the depot every morning
+    int64_t raided_at = -100000;                  // last time raiders carried off stores
+};
+
+// The supply route: the supply column shuttles from a depot to the company trains, loading
+// what the trains are short of. It is a real unit on the map, so it can be ambushed: every
+// truck knocked out loses its load.
+enum ConvoyState : uint8_t { CV_PARKED = 0, CV_LOADING, CV_OUTBOUND, CV_UNLOADING, CV_RETURNING };
+struct SupplyRoute {
+    bool active = true;       // the player runs the route
+    bool turn_back = false;   // standing order: a column under fire turns back (else it pushes through)
+    int holding = 0;          // source depot
+    int convoy = -1;          // the supply column's unit id
+    uint8_t state = CV_PARKED;
+    int64_t until = 0;        // loading / unloading done, or the next route check
+    double diesel_l = 0, ammo_t = 0, food_kg = 0; // cargo aboard
+    HexCoord dest;            // where the trains were when the column last set its route
+    int trips = 0;            // deliveries made
+    double delivered_t = 0;   // tonnes delivered in all
+    int64_t evac_next = 0;    // next check whether the column must drive out of a threatened depot
 };
 
 struct SimStats {
@@ -290,6 +343,22 @@ public:
     bool reachable(HexCoord a, HexCoord b) const; // same connected piece of land
     const SimStats &stats() const { return stats_; }
 
+    // Supply line: the home depot, the company trains and the supply column between them.
+    // Route settings are standing logistics orders and apply at once (like the company default
+    // stand-off). Stopping the route recalls the column to its depot.
+    void set_supply_route(bool active);
+    void set_convoy_turn_back(bool turn_back);
+    int depot_near(HexCoord h, int radius = SUPPLY_RADIUS) const; // own depot within radius, else -1
+    double trains_need_t() const;        // tonnes the trains are short of
+    double column_capacity_t() const;    // what the column's surviving trucks can carry
+    double cargo_t() const;              // tonnes aboard the column
+    double weekly_bill() const;          // wages due on the next pay day
+    double food_need_per_day(bool at_depot) const; // kg a day for units at a depot / with the trains
+    std::string convoy_status() const;   // one plain sentence for the supply panel
+    void convoy_hit(Unit &c, int lost);  // `lost` trucks were knocked out: their loads go with them
+    std::vector<Holding> holdings;
+    SupplyRoute route;
+
     Map map;
     std::vector<Unit> units;
     std::vector<Formation> formations;
@@ -314,6 +383,11 @@ private:
     void update_morale_and_sop();
     void update_ai();
     void update_logistics();
+    void update_convoy();
+    void convoy_set_off(Unit &c, HexCoord to, uint8_t state);
+    void convoy_unload_at_depot(Unit &c);
+    void raid_depots();
+    void pay_day();
     void update_hunters();
     void check_outcome();
     void push_event(EventKind k, int unit, bool pause, const std::string &text);

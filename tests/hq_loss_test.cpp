@@ -54,6 +54,9 @@ int main() {
     World w;
     w.generate(1989, 24, 22);
     w.setup_scenario(0); // 06:00
+    // Units next to a depot draw from it whoever runs the trains, so move the home depot out of
+    // the way (to the hostile strike group's town, 60 km east): this test is about the trains.
+    w.holdings[0].pos = w.units[w.formations[w.strike_formation()].members[0]].pos;
     const std::vector<uint8_t> start = w.save_state();
     // Order of battle: 0 HQ, 1 1st Tank, 2 2nd Tank, 3 1st Mech, ...
     const int HQ = 0, TANK1 = 1, TANK2 = 2, MECH1 = 3;

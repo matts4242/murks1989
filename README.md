@@ -2,7 +2,7 @@
 
 A one-map mercenary wargame prototype: one continuous 500 m hex map, one pausable clock, C++ simulation core running inside Godot 4 through GDExtension.
 
-This build proves the risky technical core of the design plan (roadmap phase 1, plus a first cut of phase 2):
+This build proves the risky technical core of the design plan (roadmap phases 1 and 2, plus a first cut of phase 3, company and logistics):
 
 - **One map, no battle screen.** The real Poland and East Germany, about 1,050 × 780 km in 3.8 million 500 m hexes, built from satellite elevation and land-cover data. Zooming in on a contact *is* the battle.
 - **Company grouping on the theater map.** Zoomed out, each company's nearby platoons merge into one company counter. It shows the unit count, average strength and the company name. Detached platoons keep their own counter. Spotted hostile units are grouped by proximity only, because you don't know their organisation. Overlapping counters are pushed apart, with a leader line to their true position.
@@ -29,7 +29,8 @@ This build proves the risky technical core of the design plan (roadmap phase 1, 
 - **Command friction.** Orders take 5–30+ minutes to reach units, longer out of radio range, in combat, or when tired.
 - **Flashpoint-style combat.** Line of sight from elevation and cover, concealment in forests and towns, night spotting, fog of war with last-known positions, direct and indirect fire, morale, and standing orders that make hurt units fall back.
 - **Simulation fidelity zones.** Hot (within 10 km of an enemy), warm (10–40 km) and cold zones.
-- **A thin logistics loop.** Fuel and ammo are carried per unit and refilled from company stocks near the HQ (or, once the HQ is lost, near the platoon that took over the trains, at half rate); food is drawn daily.
+- **The supply line (phase 3, first cut).** The company's stocks are split between the **trains** that travel with the HQ (a few days' worth: 12,000 L diesel, 24 t ammo, 2,000 kg food) and the **depot** at the home town (18,000 L, 36 t, 4,000 kg, the same totals as before). The town's market sells the depot food every morning. Units halted near the depot draw from it; units halted near the HQ draw from the trains (at half rate from whoever took over a lost HQ). The trains reload at the depot themselves, 15 t an hour. Away from it, the **supply column** brings them what they are short of: six Ural-4320 trucks (27 t), a real unit on the map that loads at the depot, road-marches to the trains, unloads and drives back, burning its own diesel. It can be spotted and ambushed, and every truck knocked out loses its load. An unguarded depot is plundered by any hostile that reaches it. See "Supply line" below.
+- **Wages and the contract's pay.** Wages of $50 a man are due every Friday at 18:00, from a chest that starts with the contract advance. Pay in full and morale rises a little; pay short and it falls, harder the second time. Breaking the strike group pays $60,000 on completion.
 - **A scenario you can win or lose.** The 7th Guards Remnant hunts the company. It follows the freshest sighting any hostile has made and gets word of the company's whereabouts every six hours or so. You win by breaking it: none of its six fighting platoons left with 30% strength or more. You lose when fewer than three of your fighting units are left. Losing Murks HQ doesn't end the game, but orders then take 25 minutes longer, and after an hour's handover the senior platoon still able to fight (first in the order of battle, at 30% strength or more) takes over the company trains: units halted near it resupply at half the usual rate, and regroup and rest & resupply form up on it. If that platoon is lost or falls below 30%, the next one takes over. Hostile formations regroup the same way on whoever takes over from a lost HQ. The contract and score sit top left; an end screen offers keep playing, load, new game or quit.
 - **Quick save and load** (F5 / F9). A save holds the whole simulation; loading it and playing on gives exactly the same result.
 
@@ -75,6 +76,7 @@ The prebuilt extension is in `game/bin/` (`libmurks.windows.template_debug.x86_6
 | J / Shift+J | Form a team from the selection / disband the selection's teams |
 | L | Select the team of the selected unit (double-click does the same) |
 | T | Command zones and chain-of-command lines for all units |
+| I | Supply panel: depot, trains, supply column, pay. Run or stop the supply route, and set what the column does under fire. Shows the supply route on the map |
 
 **Try this:** press Tab until **1st Recon** is selected, right-click about 30 km east, press 4 and watch. When the hostile strike group is spotted, the game pauses and the fight starts on the same map.
 
@@ -94,6 +96,30 @@ The prebuilt extension is in `game/bin/` (`libmurks.windows.template_debug.x86_6
 | Fire: return fire | Shoots only within 5 minutes of being fired at. Firing gives a unit away, so this keeps scouts hidden |
 | Fire: hold fire | Never shoots |
 | Break contact | When the unit falls back on its own: below 30% strength or morale 25 (heavy losses), below 60% or morale 45 (light losses), or only when morale drops under 8 (never) |
+
+## Supply line
+
+![Supply line](docs/screenshots/16_supply_line.png)
+
+The supply panel (I) shows each stock against what can carry it, days of food left, what the column is doing and the next pay day. The depot's hex is outlined in blue on the map (red for a day after it was plundered). With the panel open or the column selected, a dashed line runs from the depot to the trains.
+
+| Rule | Value |
+| --- | --- |
+| Trains capacity | 12,000 L diesel, 24 t ammo, 2,000 kg food (about 5 days of food) |
+| Home depot at start | 18,000 L diesel, 36 t ammo, 4,000 kg food; the town sells it 2% of its population in kg of food a day (150–1,500 kg) |
+| Who draws where | Halted and out of the fight for 30 minutes: within 1.5 km of the depot from the depot, else within 1.5 km of the trains from the trains |
+| Trains at the depot | Reload from it, 15 t an hour |
+| Food | 1.5 kg a man a day at 06:00: units at the depot eat from it, everyone else from the trains. Short: −10 morale for those who went hungry |
+| Supply column | 6 × Ural-4320, 4.5 t each, 0.4 L/km each. Takes no direct orders. Holds its fire (drivers with rifles would only give it away) and breaks contact early, like an HQ (under 60% strength or morale 45) |
+| When it sets off | The trains are more than 1.5 km from the depot and short of at least a quarter of a load (7 t with six trucks), or of half of any one stock |
+| A trip | 30 min loading, road march to the trains (re-routed every 15 min if they move on, or when it is halted), 30 min unloading, drive back. It refills its own tanks from the depot |
+| Ambush | Each truck knocked out takes its share of the cargo. Under fire it pushes through (default) or turns back (supply panel) |
+| Enemy at the depot | With known enemies within 3 km of the depot, a parked or loading column drives out with what is aboard (towards the trains if they are away, else away from the enemy) and waits. It does not drive back while they are there |
+| Raids | A hostile within 1 km of the depot, with no own unit (other than the column) within 2 km, carries off 25% of every store each hour. Locals report it; only the first report of a raid pauses the game |
+| Wages | $50 a man a week, every Friday at 18:00 from 21 April. Paid: +3 morale. Short: up to −15 morale (× 1.5 from the second time) |
+| Money | Chest at start: $8,000 of the company's own plus the $20,000 contract advance. Completion: $60,000 |
+
+These are first estimates (constants at the top of `core/include/murks/sim.hpp`, logic in `update_logistics` and `update_convoy` in `core/src/sim.cpp`), to be replaced with historical data like the combat values.
 
 ## Measured performance
 
@@ -162,7 +188,8 @@ extension/    GDExtension binding: one class, MurksWorld, with coarse calls (who
 game/         Godot project: scripts/main.gd (input, clock), map_view.gd (streaming), overlay.gd (symbols), hud.gd
 game/data/    Baked real map (.murkz = zlib-compressed MURKSMAP)
 tools/        bake_region.py (real-data pipeline), finish_map.cpp (adds local roads)
-tests/        core_bench.cpp: headless run of map + sim with timings; hq_loss_test.cpp: checks the HQ-loss rules
+tests/        core_bench.cpp: headless run of map + sim with timings; hq_loss_test.cpp: checks the HQ-loss rules;
+              supply_test.cpp: checks the supply line (depot, trains, supply column, raids, food, wages)
 SConstruct    Builds the extension into game/bin/
 CMakeLists.txt  Builds the core, benchmark and finish_map on their own (handy in Visual Studio)
 ```
@@ -184,9 +211,9 @@ You only need this to change the C++ code.
    ```
 5. Restart the Godot editor, or let it hot-reload the extension.
 
-The core has no Godot dependency, so you can also open the folder in Visual Studio (CMake) and run `core_bench` to test simulation changes in seconds (`hq_loss_test` checks the HQ-loss rules and exits non-zero on a failure).
+The core has no Godot dependency, so you can also open the folder in Visual Studio (CMake) and run `core_bench` to test simulation changes in seconds (`hq_loss_test` checks the HQ-loss rules and `supply_test` the supply line; both exit non-zero on a failure).
 
-On Linux, the same `scons` works. To cross-compile Windows from Linux, use `scons platform=windows use_mingw=yes`.
+On Linux, the same `scons` works. To cross-compile Windows from Linux, use `scons platform=windows use_mingw=yes` (GCC MinGW-w64), or with [llvm-mingw](https://github.com/mstorsjo/llvm-mingw) `scons platform=windows use_mingw=yes use_llvm=yes mingw_prefix=<llvm-mingw folder>`.
 
 ## Command-line options
 
@@ -201,7 +228,7 @@ Headless balance check (no window): `godot --headless --path game --script res:/
 ## Known limits of this proof of concept
 
 - Map data is not yet corrected to 1989 (see above). Natural Earth has main roads only; local roads are generated.
-- One scripted contract. No contract board, holdings, wages, convoys or replacements yet (design plan phases 3–4), so company ammo and diesel stocks only go down.
+- One scripted contract and one holding. The supply line has one depot and one supply column, and the town only sells food: there is no market for diesel or ammo yet, no contract board, no replacements, no truck repairs and no desertion (design plan phases 3–4), so company ammo and diesel still only go down. Next for phase 3: assigning trucks, escorts, more holdings, buying stores and recruiting.
 - Combat values follow simulated real-world performance (weapons, cover, concealment, morale), not game balance, and are not tuned to make fights even. A company defending a town against an attacker of similar size usually holds, as the attacker's rule of thumb of needing about 3:1 at the point of attack would predict.
 - Pathfinding is plain A* on hexes. Very long cross-map orders cost up to ~10 ms; next comes the hierarchical road graph and the 5 km operational layer. Routes to another piece of land (islands, across the sea) are refused at once.
 - One quick-save slot. A save only loads on the map it was made on.

@@ -47,6 +47,7 @@ func _draw() -> void:
 	if main.show_los:
 		_draw_los(xf, zoom)
 	_draw_wrecks(xf, view)
+	_draw_supply(xf, view)
 	_draw_command_links(xf)
 	_draw_orders(xf)
 	_draw_units(xf, view)
@@ -100,7 +101,7 @@ const SIGNAL := Color("#d39a17")
 const MIN_COUNTER := 32.0
 const THEATER_COUNTER := 28.0
 const COMPANY_COUNTER := 36.0
-const ECHELONS := ["coy", "plt", "plt", "plt", "sec", "btty"] # by unit type
+const ECHELONS := ["coy", "plt", "plt", "plt", "sec", "btty", "plt"] # by unit type (6: supply column)
 const TEAM_COLORS := [Color("#f2c14e"), Color("#39c0b0"), Color("#c77dff"), Color("#8bd450"),
 	Color("#ff8c42"), Color("#5ab0ff"), Color("#ff6f91"), Color("#d9d9d9")]
 
@@ -128,7 +129,7 @@ func _row_item(o: int, i: int) -> Dictionary:
 	var item := {"id": id, "side": side, "type": int(snap[o + 2]), "flags": flags, "ghost": (flags & 2) != 0,
 		"strength": snap[o + 5], "zone": int(snap[o + 6]), "morale": snap[o + 8], "order_in": snap[o + 9],
 		"roe": int(snap[o + 12]), "badge": "", "label": "", "fire": 0.0, "sel": main.selected.has(id),
-		"echelon": ECHELONS[clampi(int(snap[o + 2]), 0, 5)], "row": i,
+		"echelon": ECHELONS[clampi(int(snap[o + 2]), 0, ECHELONS.size() - 1)], "row": i,
 		"engage": snap[o + 17], "elem": int(snap[o + 18]), "elem_max": int(snap[o + 19]),
 		"team": int(snap[o + 20]), "role": int(snap[o + 21]), "tcol": int(snap[o + 22]), "standoff": int(snap[o + 24])}
 	if side == 0:
@@ -317,7 +318,7 @@ func _draw_counter(c: Vector2, s: float, it: Dictionary) -> void:
 	var so: int = it.get("standoff", -1)
 	if (roe > 0 or so > 0) and not ghost:
 		var tag := ""
-		if roe > 0:
+		if roe > 0 and int(it["type"]) != 6: # the supply column always holds its fire: no tag
 			tag = "RET FIRE" if roe == 1 else "HOLD FIRE"
 		if so > 0:
 			tag += (" " if tag != "" else "") + "S/O %.1fkm" % (so * 0.5)
@@ -378,6 +379,11 @@ func _draw_symbol(r: Rect2, type: int, ink: Color, lw: float) -> void:
 		5: # Self-propelled artillery: oval and dot
 			_stadium(r, ink, lw)
 			draw_circle(c, r.size.y * 0.12, ink)
+		6: # Supply (wheeled): a bar across the lower third, two wheels under the box
+			var y := r.position.y + r.size.y * 0.68
+			draw_line(Vector2(r.position.x, y), Vector2(r.end.x, y), ink, lw)
+			draw_circle(Vector2(r.position.x + r.size.x * 0.3, r.end.y - r.size.y * 0.14), r.size.y * 0.07, ink)
+			draw_circle(Vector2(r.position.x + r.size.x * 0.7, r.end.y - r.size.y * 0.14), r.size.y * 0.07, ink)
 
 
 ## The tracked-vehicle oval: a stadium inside the symbol box.
@@ -705,6 +711,53 @@ func _dashed_circle(c: Vector2, r: float, col: Color, w: float) -> void:
 		var a0 := TAU * k / segs
 		var a1 := TAU * (k + 1) / segs
 		draw_arc(c, r, a0, a1, 4, col, w, true)
+
+
+# --- Supply line ---------------------------------------------------------------------------
+
+## The home depot: its hex outlined in blue with "DEPOT" under it (a small diamond on the
+## theater map), red when it was plundered in the last day. With the supply panel open (I) or
+## the supply column selected, a dashed line runs from the depot to the trains.
+func _draw_supply(xf: Transform2D, view: Rect2) -> void:
+	var s: Dictionary = main.supply
+	if s.is_empty() or not s.get("has_depot", false):
+		return
+	var dp: Vector2 = xf * (s["depot_pos"] as Vector2)
+	var raided := int(s.get("depot_raided_ago", -1)) >= 0
+	var col: Color = Color("#ff6a50") if raided else (SIDE_COL[0] as Color).lightened(0.45)
+	if (main.show_supply or main._column_selected()) and s.has("trains_pos") and not s.get("trains_at_depot", false):
+		var tw: Vector2 = s["trains_pos"]
+		var tp: Vector2 = xf * tw
+		draw_dashed_line(dp, tp, Color(0.55, 0.8, 1.0, 0.8), 2.0, 10.0)
+		var km := tw.distance_to(s["depot_pos"]) / 1000.0
+		var mid := dp.lerp(tp, 0.5) + Vector2(8, -6)
+		var state := String(s.get("convoy_state", "")) if s.get("convoy_alive", false) else "no column left"
+		var t := "Supply route %.0f km · %s" % [km, state]
+		draw_string_outline(font, mid, t, HORIZONTAL_ALIGNMENT_LEFT, -1, 12, 4, Color(0, 0, 0, 0.85))
+		draw_string(font, mid, t, HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color(0.85, 0.94, 1.0))
+	if not view.has_point(dp):
+		return
+	var k := hex_px()
+	var label_at := dp
+	if k >= 9.0:
+		var pts := PackedVector2Array()
+		for i in 7:
+			var a := deg_to_rad(60.0 * i - 30.0)
+			pts.append(dp + Vector2(cos(a), sin(a)) * k * 0.94)
+		draw_polyline(pts, Color(0, 0, 0, 0.6), maxf(3.0, k * 0.12) + 2.0, true)
+		draw_polyline(pts, col, maxf(3.0, k * 0.12), true)
+		label_at = dp + Vector2(-18, k + 14)
+	else:
+		var d := 6.0
+		var dia := PackedVector2Array([dp + Vector2(0, -d), dp + Vector2(d, 0), dp + Vector2(0, d), dp + Vector2(-d, 0)])
+		draw_colored_polygon(dia, col)
+		var rim := dia.duplicate()
+		rim.append(dia[0])
+		draw_polyline(rim, Color(0, 0, 0, 0.8), 1.5, true)
+		label_at = dp + Vector2(9, 14)
+	var tag := "DEPOT" + (" (plundered)" if raided else "")
+	draw_string_outline(font, label_at, tag, HORIZONTAL_ALIGNMENT_LEFT, -1, 11, 4, Color(0, 0, 0, 0.85))
+	draw_string(font, label_at, tag, HORIZONTAL_ALIGNMENT_LEFT, -1, 11, col.lightened(0.3))
 
 
 # --- Wrecks, fire effects, hover -----------------------------------------------------------

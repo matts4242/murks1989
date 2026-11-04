@@ -111,6 +111,9 @@ public:
     void set_default_standoff(int standoff);
     int get_default_standoff() const;
     PackedVector2Array get_visible_hexes(int id) const;
+    Dictionary get_supply() const;      // depot, trains, supply column, pay
+    void set_supply_route(bool active);
+    void set_convoy_turn_back(bool turn_back);
     Array poll_events();
     Dictionary get_stats() const;
 
