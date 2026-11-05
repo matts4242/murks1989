@@ -30,6 +30,10 @@ target_link_libraries(hq_loss_test PRIVATE murks_core)
 add_executable(supply_test tests/supply_test.cpp)
 target_link_libraries(supply_test PRIVATE murks_core)
 
+# Checks forward operating bases (digging in, boosts, income, overrun). build/fob_test
+add_executable(fob_test tests/fob_test.cpp)
+target_link_libraries(fob_test PRIVATE murks_core)
+
 # Adds local roads (and optionally rail) to a map baked by tools/bake_region.py.
 add_executable(finish_map tools/finish_map.cpp)
 target_link_libraries(finish_map PRIVATE murks_core)

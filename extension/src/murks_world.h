@@ -49,6 +49,7 @@ public:
         SF_GROUP_COLOR, // own units in a team: team colour index 0..7, else -1
         SF_CMD_ZONE,  // own HQs and team leaders: zone of command in hexes, else 0
         SF_STANDOFF,  // own units: effective stand-off in hexes (0 = stay and fight), else -1
+        SF_DIG,       // own HQs digging in: minutes until the FOB is set up, else -1
         UNIT_STRIDE
     };
     enum SnapshotFlag {
@@ -114,6 +115,9 @@ public:
     Dictionary get_supply() const;      // depot, trains, supply column, pay
     void set_supply_route(bool active);
     void set_convoy_turn_back(bool turn_back);
+    bool set_route_target(int holding); // -1 the trains, else a FOB's holding index
+    int order_dig_in(int id);           // HQ digs in to set up a FOB: command delay, or -1
+    bool cancel_dig_in(int id);
     Array poll_events();
     Dictionary get_stats() const;
 

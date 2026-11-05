@@ -90,6 +90,9 @@ void MurksWorld::_bind_methods() {
     ClassDB::bind_method(D_METHOD("get_supply"), &MurksWorld::get_supply);
     ClassDB::bind_method(D_METHOD("set_supply_route", "active"), &MurksWorld::set_supply_route);
     ClassDB::bind_method(D_METHOD("set_convoy_turn_back", "turn_back"), &MurksWorld::set_convoy_turn_back);
+    ClassDB::bind_method(D_METHOD("set_route_target", "holding"), &MurksWorld::set_route_target);
+    ClassDB::bind_method(D_METHOD("order_dig_in", "id"), &MurksWorld::order_dig_in);
+    ClassDB::bind_method(D_METHOD("cancel_dig_in", "id"), &MurksWorld::cancel_dig_in);
     ClassDB::bind_method(D_METHOD("poll_events"), &MurksWorld::poll_events);
     ClassDB::bind_method(D_METHOD("get_stats"), &MurksWorld::get_stats);
 }
@@ -397,6 +400,7 @@ PackedFloat32Array MurksWorld::get_units_snapshot() const {
         q[SF_ROLE] = !grouped ? -1.0f : world_.groups[u.group].leader == u.id ? 2.0f : (u.follow ? 1.0f : 0.0f);
         q[SF_GROUP_COLOR] = grouped ? (float)world_.groups[u.group].color : -1.0f;
         q[SF_STANDOFF] = own ? (float)world_.standoff_hexes(u) : -1.0f;
+        q[SF_DIG] = own && u.order == murks::O_DIGIN ? (float)std::max<int64_t>(0, u.dig_until - now) : -1.0f;
         q[SF_CMD_ZONE] = own && (u.type == murks::U_HQ || (grouped && world_.groups[u.group].leader == u.id))
                              ? (float)world_.command_zone(u) : 0.0f;
         ++n;
@@ -474,6 +478,7 @@ Dictionary MurksWorld::get_unit_info(int id) const {
         case murks::O_RETREAT: order = "Falling back"; break;
         case murks::O_REGROUP: order = "Regrouping on HQ"; break;
         case murks::O_REST: order = u.moving() ? "Moving to rest" : "Resting"; break;
+        case murks::O_DIGIN: order = "Digging in"; break;
         default: break;
     }
     d["order"] = order;
@@ -521,10 +526,21 @@ Dictionary MurksWorld::get_unit_info(int id) const {
         d["standoff_hexes"] = world_.standoff_hexes(u);
         d["standoff_pending"] = u.pending_stance.active && u.pending_stance.standoff != u.standoff;
         if (u.pending_stance.active) d["pending_standoff"] = (int)u.pending_stance.standoff;
+        // FOBs: an HQ digging in, or why it can't here; any unit halted at a FOB gets its boosts.
+        if (u.type == murks::U_HQ) d["dig_in_problem"] = to_gd(world_.dig_in_problem(u.id));
+        d["digging_in"] = u.order == murks::O_DIGIN;
+        if (u.order == murks::O_DIGIN) {
+            d["dig_minutes_left"] = (int)std::max<int64_t>(0, u.dig_until - world_.time_min);
+            if (u.dig_town >= 0 && u.dig_town < (int)world_.map.settlements.size())
+                d["dig_town"] = to_gd(world_.map.settlements[u.dig_town].name);
+        }
+        d["dig_in_pending"] = u.pending.active && u.pending.kind == murks::O_DIGIN;
+        const int hold = world_.depot_near(u.pos);
+        if (hold >= 0 && world_.holdings[hold].kind == murks::H_FOB) d["at_fob"] = to_gd(world_.holdings[hold].name);
     }
     d["pending"] = u.pending.active;
     if (u.pending.active) {
-        static const char *kPend[5] = {"Hold", "Move", "Fall back", "Regroup", "Rest & resupply"};
+        static const char *kPend[6] = {"Hold", "Move", "Fall back", "Regroup", "Rest & resupply", "Dig in"};
         d["pending_kind"] = u.pending.kind == murks::O_MOVE && u.pending.mode != murks::MV_HASTY
                                 ? kModes[u.pending.mode]
                                 : kPend[u.pending.kind];
@@ -668,7 +684,9 @@ Dictionary MurksWorld::get_supply() const {
     if (hq >= 0) {
         murks::Vec2 c = murks::hex_center(w.units[hq].pos);
         d["trains_pos"] = Vector2((real_t)c.x, (real_t)c.y);
-        d["trains_at_depot"] = w.depot_near(w.units[hq].pos) >= 0;
+        const int th = w.depot_near(w.units[hq].pos); // the trains load from the depot or FOB they are at
+        d["trains_at_depot"] = th >= 0 && w.holdings[th].kind == murks::H_DEPOT;
+        if (th >= 0 && w.holdings[th].kind == murks::H_FOB) d["trains_at_fob"] = to_gd(w.holdings[th].name);
     }
     d["trains_diesel_l"] = w.stock.diesel_l;
     d["trains_ammo_t"] = w.stock.ammo_t;
@@ -699,6 +717,38 @@ Dictionary MurksWorld::get_supply() const {
     d["capacity_t"] = w.column_capacity_t();
     d["trips"] = w.route.trips;
     d["delivered_t"] = w.route.delivered_t;
+    // FOBs (still held or lost), and where the column delivers.
+    Array fobs;
+    for (int i = 0; i < (int)w.holdings.size(); ++i) {
+        const murks::Holding &h = w.holdings[i];
+        if (h.kind != murks::H_FOB) continue;
+        Dictionary f;
+        f["index"] = i;
+        f["name"] = to_gd(h.name);
+        murks::Vec2 c = murks::hex_center(h.pos);
+        f["pos"] = Vector2((real_t)c.x, (real_t)c.y);
+        f["lost"] = h.lost;
+        f["diesel_l"] = h.diesel_l;
+        f["ammo_t"] = h.ammo_t;
+        f["food_kg"] = h.food_kg;
+        f["diesel_cap"] = h.diesel_cap;
+        f["ammo_cap"] = h.ammo_cap;
+        f["food_cap"] = h.food_cap;
+        f["income_per_day"] = h.income_per_day;
+        f["contested_hours"] = h.contested_hours;
+        f["raided_ago"] = now - h.raided_at < 24 * 60 ? (int)(now - h.raided_at) : -1;
+        fobs.push_back(f);
+    }
+    d["fobs"] = fobs;
+    d["fob_income_per_day"] = w.fob_income_per_day();
+    d["route_target"] = w.route.target;
+    d["route_target_name"] = to_gd(w.route_target_name());
+    if (w.route.target >= 0 && w.route.target < (int)w.holdings.size()) {
+        murks::Vec2 c = murks::hex_center(w.holdings[w.route.target].pos);
+        d["route_target_pos"] = Vector2((real_t)c.x, (real_t)c.y);
+    } else if (hq >= 0) {
+        d["route_target_pos"] = d["trains_pos"];
+    }
     // Pay.
     d["cash"] = w.stock.cash;
     d["weekly_bill"] = w.weekly_bill();
@@ -711,6 +761,15 @@ Dictionary MurksWorld::get_supply() const {
 
 void MurksWorld::set_supply_route(bool active) { world_.set_supply_route(active); }
 void MurksWorld::set_convoy_turn_back(bool turn_back) { world_.set_convoy_turn_back(turn_back); }
+bool MurksWorld::set_route_target(int holding) { return world_.set_route_target(holding); }
+
+int MurksWorld::order_dig_in(int id) {
+    if (!own_unit(world_, id)) return -1;
+    world_.detach(id); // a team member digging in leaves the formation
+    return world_.order_dig_in(id);
+}
+
+bool MurksWorld::cancel_dig_in(int id) { return own_unit(world_, id) && world_.cancel_dig_in(id); }
 
 Array MurksWorld::poll_events() {
     Array out;
@@ -749,6 +808,7 @@ Dictionary MurksWorld::get_stats() const {
     d["ammo_t"] = world_.stock.ammo_t;
     d["food_kg"] = world_.stock.food_kg;
     d["cash"] = world_.stock.cash;
+    d["fob_income_per_day"] = world_.fob_income_per_day();
     d["personnel"] = world_.stock.personnel;
     d["units_total"] = (int)world_.units.size();
     return d;

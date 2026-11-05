@@ -53,6 +53,9 @@ var supply_panel: PanelContainer
 var supply_text: RichTextLabel
 var route_buttons: Array[Button] = []   # run, stop
 var ambush_buttons: Array[Button] = []  # push through, turn back
+var target_button: Button               # where the column delivers: the trains or a FOB
+var dig_button: Button                  # HQ digs in to set up a FOB
+var dig_hint: Label
 
 
 func _ready() -> void:
@@ -315,6 +318,22 @@ func _build_orders(parent: Control) -> void:
 		def_row.add_child(b)
 		default_buttons.append(b)
 
+	# Forward operating base: an HQ in a town digs in (immobile while it does) and the town
+	# becomes a FOB: limited stores, faster resupply and rest, occupation income.
+	var base_row := HBoxContainer.new()
+	orders_box.add_child(base_row)
+	var base_l := _label("Base", 12, Color(0.75, 0.8, 0.7))
+	base_l.custom_minimum_size.x = 66
+	base_row.add_child(base_l)
+	dig_button = _small_button("Dig in (FOB)", false, "")
+	dig_button.pressed.connect(func() -> void: command.emit("dig_in"))
+	base_row.add_child(dig_button)
+	dig_hint = _label("", 11, Color(0.7, 0.75, 0.68))
+	dig_hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	dig_hint.custom_minimum_size.x = 190
+	dig_hint.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	base_row.add_child(dig_hint)
+
 	orders_hint = _label("", 12, Color(0.6, 0.85, 1.0))
 	orders_hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	orders_hint.custom_minimum_size.x = 340
@@ -354,6 +373,21 @@ func set_team_state(in_team: bool, can_form: bool, shape: int, spacing: int) -> 
 	for i in spread_buttons.size():
 		spread_buttons[i].disabled = not in_team
 		spread_buttons[i].set_pressed_no_signal(in_team and SPREADS[i] == spacing)
+
+
+## Dig-in button: `state` is "none" (no HQ selected), "ready", "blocked" (reason in `why`),
+## "digging" or "pending" (the order is on its way).
+func set_dig_state(state: String, why: String, minutes: int) -> void:
+	dig_button.disabled = state == "none" or state == "blocked"
+	dig_button.text = "Stop digging in" if state == "digging" or state == "pending" else "Dig in (FOB)"
+	var tip := "An HQ in a town digs in and sets up a forward operating base: it stays put for 30 min (fresh) to 1 h (worn out); a hit or breaking contact abandons it. The FOB holds limited stores, resupplies 1.5x faster, doubles readiness recovery and pays occupation income. Shift+H"
+	dig_button.tooltip_text = tip
+	match state:
+		"none": dig_hint.text = "Select an HQ in a town."
+		"blocked": dig_hint.text = why
+		"ready": dig_hint.text = "Digs in here for about %d min." % minutes
+		"digging": dig_hint.text = "Digging in: FOB in %d min." % minutes
+		"pending": dig_hint.text = "Dig-in order on its way."
 
 
 ## Stand-off buttons: the selection's own setting (-1 mixed) and the company default.
@@ -433,7 +467,7 @@ func _build_status_and_help() -> void:
 	help_panel = PanelContainer.new()
 	help_panel.add_theme_stylebox_override("panel", _panel_style(0.8))
 	help_panel.set_anchors_preset(Control.PRESET_BOTTOM_RIGHT)
-	_offsets(help_panel, -330, -250, -8, -42)
+	_offsets(help_panel, -330, -268, -8, -42)
 	help_panel.grow_horizontal = Control.GROW_DIRECTION_BEGIN
 	help_panel.grow_vertical = Control.GROW_DIRECTION_BEGIN
 	help_panel.visible = false  # F1
@@ -450,6 +484,7 @@ func _build_status_and_help() -> void:
 		"M: whole map    G grid  V sight  Z zones\n" +
 		"P: WeGo pulse    U: auto-pause    F1: help\n" +
 		"I: supply panel (depot, trains, supply column, pay)\n" +
+		"Shift+H: HQ digs in, sets up a FOB in a town\n" +
 		"F5: quick save    F9: quick load\n" +
 		"F2: map data credits", 13, Color(0.85, 0.88, 0.8)))
 
@@ -518,6 +553,9 @@ func _build_supply_panel() -> void:
 		row.add_child(b)
 		ambush_buttons.append(b)
 	row.add_child(VSeparator.new())
+	target_button = _small_button("To: the trains", false, "Where the column delivers: the company trains, or one of your FOBs (click to cycle). A FOB is filled up to what it can hold.")
+	target_button.pressed.connect(func() -> void: command.emit("route_target_next"))
+	row.add_child(target_button)
 	var sel := _small_button("Show column", false, "Select the supply column and centre the map on it.")
 	sel.pressed.connect(func() -> void: command.emit("convoy_select"))
 	row.add_child(sel)
@@ -547,12 +585,28 @@ func show_supply(s: Dictionary) -> void:
 	t += "\n"
 	if s.get("trains_at_depot", false):
 		t += "    [color=#9fc8ff]At the depot: the trains load from it themselves (15 t an hour).[/color]\n"
+	elif s.has("trains_at_fob"):
+		t += "    [color=#9fc8ff]At FOB %s: the trains load from its stores (15 t an hour).[/color]\n" % s["trains_at_fob"]
+	for f in s.get("fobs", []):
+		if f["lost"]:
+			if int(f.get("raided_ago", -1)) >= 0:
+				t += "[color=#ff6050]FOB %s lost %s ago (overrun).[/color]\n" % [f["name"], _ago(int(f["raided_ago"]))]
+			continue
+		t += "[color=#8fe08f]FOB %s[/color]   %s · %s · %s   [color=#9fa89a]+$%s a day%s[/color]\n" % [f["name"],
+			_level(float(f["diesel_l"]), float(f["diesel_cap"]), "%s/%s L" % [_thousands(int(f["diesel_l"])), _thousands(int(f["diesel_cap"]))]),
+			_level(float(f["ammo_t"]), float(f["ammo_cap"]), "%.1f/%.0f t ammo" % [float(f["ammo_t"]), float(f["ammo_cap"])]),
+			_level(float(f["food_kg"]), float(f["food_cap"]), "%s/%s kg food" % [_thousands(int(f["food_kg"])), _thousands(int(f["food_cap"]))]),
+			_thousands(roundi(float(f["income_per_day"]))),
+			(", contested %d h today" % int(f["contested_hours"])) if int(f["contested_hours"]) > 0 else ""]
+		if int(f.get("raided_ago", -1)) >= 0:
+			t += "    [color=#ff6050]Plundered %s ago. Guard it within 2 km or lose it.[/color]\n" % _ago(int(f["raided_ago"]))
 	var tm := int(s.get("trucks_max", 0))
 	var tr := int(s.get("trucks", 0))
 	var tc := "#5fd35f" if tr >= tm else ("#ffc040" if tr * 2 >= tm else "#ff5040")
-	t += "[color=#b8c0a8]Supply column[/color]   [color=%s]%d of %d trucks[/color] (%.0f t) · %d trip%s, %.1f t delivered · route %s, %s under fire\n" % [
+	t += "[color=#b8c0a8]Supply column[/color]   [color=%s]%d of %d trucks[/color] (%.0f t) · %d trip%s, %.1f t delivered · route %s to %s, %s under fire\n" % [
 		tc, tr, tm, float(s["capacity_t"]), int(s["trips"]), "" if int(s["trips"]) == 1 else "s", float(s["delivered_t"]),
-		"running" if s["route_active"] else "[color=#ffc040]stopped[/color]", "turns back" if s["turn_back"] else "pushes through"]
+		"running" if s["route_active"] else "[color=#ffc040]stopped[/color]", s.get("route_target_name", "the trains"),
+		"turns back" if s["turn_back"] else "pushes through"]
 	t += "    %s\n" % s["convoy_status"]
 	var mins := int(s.get("payday_in_minutes", 0))
 	var bill := float(s["weekly_bill"])
@@ -560,15 +614,19 @@ func show_supply(s: Dictionary) -> void:
 	t += "[color=#b8c0a8]Pay[/color]   [color=%s]$%s[/color] in the chest · $%s due %s (in %s) for %d men" % [
 		"#5fd35f" if cash >= bill else "#ff6050", _thousands(int(cash)), _thousands(int(bill)),
 		String(s["next_payday"]).strip_edges(), _ago(mins), int(s["personnel"])]
+	if float(s.get("fob_income_per_day", 0.0)) > 0.0:
+		t += " · [color=#8fe08f]+$%s a day from occupied towns[/color]" % _thousands(roundi(float(s["fob_income_per_day"])))
 	if int(s.get("missed_paydays", 0)) > 0:
 		t += "   [color=#ff6050]%d pay day%s short[/color]" % [int(s["missed_paydays"]), "" if int(s["missed_paydays"]) == 1 else "s"]
 	supply_text.text = t
+	target_button.text = "To: " + String(s.get("route_target_name", "the trains"))
 	route_buttons[0].set_pressed_no_signal(s["route_active"])
 	route_buttons[1].set_pressed_no_signal(not s["route_active"])
 	ambush_buttons[0].set_pressed_no_signal(not s["turn_back"])
 	ambush_buttons[1].set_pressed_no_signal(s["turn_back"])
 	for b in route_buttons + ambush_buttons:
 		b.disabled = not s.get("convoy_alive", false)
+	target_button.disabled = not s.get("convoy_alive", false)
 
 
 ## A stock against its capacity, coloured: amber under half, red under a quarter.
@@ -636,9 +694,10 @@ func set_toggle(name: String, on: bool) -> void:
 
 func refresh(time_text: String, night: bool, stats: Dictionary, fps: float, map_stats: String) -> void:
 	time_label.text = time_text + ("  night" if night else "")
-	stock_label.text = "Trains: %s L · %.1f t ammo · %s kg food   $%s   %d men" % [
+	var inc := roundi(float(stats.get("fob_income_per_day", 0)))
+	stock_label.text = "Trains: %s L · %.1f t ammo · %s kg food   $%s%s   %d men" % [
 		_thousands(int(stats["diesel_l"])), float(stats["ammo_t"]), _thousands(int(stats["food_kg"])),
-		_thousands(int(stats.get("cash", 0))), int(stats["personnel"])]
+		_thousands(int(stats.get("cash", 0))), (" +%s/d" % _thousands(inc)) if inc > 0 else "", int(stats["personnel"])]
 	stock_label.tooltip_text = "What the company trains carry (they travel with the HQ), the cash in the chest and the men on the pay roll. Press I for the supply panel."
 	perf_label.text = "%d fps · sim %.0f us/min · %d units\nhot %d / warm %d / cold %d · %s" % [
 		int(fps), float(stats["avg_tick_us"]), int(stats["alive"]), int(stats["hot"]), int(stats["warm"]), int(stats["cold"]), map_stats]
@@ -705,7 +764,7 @@ func show_unit(info: Dictionary, count: int) -> void:
 		t += _bar("Fuel", float(info["fuel"]))
 		t += _bar("Morale", float(info["morale"]))
 		t += "\n%s\n\n" % info["convoy_status"]
-		t += "[color=#9fa89a]Runs between the depot and the company trains on its own. Every truck knocked out loses its load. Route and standing orders: supply panel (I).[/color]\n"
+		t += "[color=#9fa89a]Runs on its own between the depot and the company trains or a FOB. Every truck knocked out loses its load. Route, destination and standing orders: supply panel (I).[/color]\n"
 		if info.has("eta_minutes"):
 			var eta := int(info["eta_minutes"])
 			t += "Route %.1f km, about %dh%02d left\n" % [float(info["route_km"]), eta / 60, eta % 60]
@@ -734,6 +793,13 @@ func show_unit(info: Dictionary, count: int) -> void:
 	t += "\n%s   Order: %s\n" % [_situation(info), info["order"]]
 	t += "Sight %.1f km · weapons %.1f km\n" % [float(info["spot_range_km"]), float(info["weapon_range_km"])]
 	t += _standoff_text(info)
+	if info.get("digging_in", false):
+		t += "[color=#ffd84a]Digging in at %s: FOB set up in %d min. It cannot move until then.[/color]\n" % [
+			info.get("dig_town", "?"), int(info.get("dig_minutes_left", 0))]
+	elif info.get("dig_in_pending", false):
+		t += "[color=#ffd84a]Dig-in order on its way.[/color]\n"
+	if info.has("at_fob"):
+		t += "[color=#8fe08f]At FOB %s: resupply ×1.5, readiness recovers ×2[/color]\n" % info["at_fob"]
 	t += _team_line(info)
 	t += "%s · breaks contact: %s\n" % [info["roe_name"], String(info["break_contact_name"]).to_lower()]
 	t += "New orders take [b]%d min[/b] to arrive\n" % int(info["command_delay"])

@@ -61,6 +61,7 @@ var supply := {}                   # world.get_supply(), refreshed with the HUD
 const TYPE_SUPPLY := 6             # the supply column: runs its route on its own, takes no orders
 const SF_GROUP := 20
 const SF_ROLE := 21
+const SF_DIG := 25                 # minutes until an HQ digging in has its FOB, -1 if not digging
 var event_log: Array = []
 var dragging := false
 var drag_moved := false
@@ -316,6 +317,27 @@ func _update_orders_state() -> void:
 		so = v if so == -2 or so == v else -1
 	hud.set_standoff_state(so, world.get_default_standoff())
 	hud.set_orders_state(move_mode, roe, brk, pending, ("%d min" % lo) if lo == hi else ("%d-%d min" % [lo, hi]))
+	# Dig in: the first HQ in the selection.
+	var dig_state := "none"
+	var dig_why := ""
+	var dig_min := 0
+	for id in _own_selected():
+		var hi_info: Dictionary = world.get_unit_info(id)
+		if int(hi_info.get("type", -1)) != 0:
+			continue
+		if hi_info.get("digging_in", false):
+			dig_state = "digging"
+			dig_min = int(hi_info.get("dig_minutes_left", 0))
+		elif hi_info.get("dig_in_pending", false):
+			dig_state = "pending"
+		elif String(hi_info.get("dig_in_problem", "")) != "":
+			dig_state = "blocked"
+			dig_why = String(hi_info["dig_in_problem"])
+		else:
+			dig_state = "ready"
+			dig_min = _dig_minutes(float(hi_info["readiness"]))
+		break
+	hud.set_dig_state(dig_state, dig_why, dig_min)
 
 
 func effective_speed() -> int:
@@ -485,7 +507,11 @@ func _on_key(key: Key) -> void:
 		KEY_PERIOD:
 			if speed_index == 0:
 				world.advance(15, 1000.0)
-		KEY_H: _order_hold()
+		KEY_H:
+			if Input.is_key_pressed(KEY_SHIFT):
+				_on_command("dig_in")
+			else:
+				_order_hold()
 		KEY_G: _on_toggle("Grid")
 		KEY_V: _on_toggle("Sight")
 		KEY_Z: _on_toggle("Zones")
@@ -724,11 +750,18 @@ func _order_move_to(world_pos: Vector2) -> void:
 			lead_team[int(tm["leader"])] = gid
 	var movers: Array[int] = []
 	var team_names: Array[String] = []
+	var digging: Array[String] = []
 	for id in own:
 		var g := _team_of_unit(id)
 		if g >= 0 and lead_team.values().has(g) and not lead_team.has(id):
 			continue # follows its leader
+		if disp_row.has(id) and snapshot[int(disp_row[id]) * stride + SF_DIG] >= 0.0:
+			digging.append(String(world.get_unit_info(id).get("name", "?")))
+			continue # an HQ digging in stays put
 		movers.append(id)
+	if movers.is_empty() and not digging.is_empty():
+		hud.show_toast("%s is digging in and can't move until the FOB is set up. Press Dig in again (Shift+H) to stop." % ", ".join(digging), 5.0)
+		return
 	# Several movers keep their layout around the target (spread capped at 3 km),
 	# so a company moves as a company instead of piling into one hex.
 	var centroid := Vector2.ZERO
@@ -804,6 +837,21 @@ func _on_command(name: String) -> void:
 	elif name == "convoy_push" or name == "convoy_turn_back":
 		world.set_convoy_turn_back(name == "convoy_turn_back")
 		hud.show_toast("Supply column under fire: %s." % ("turns back to the depot" if name == "convoy_turn_back" else "pushes through to the trains"), 4.0)
+	elif name == "dig_in":
+		_dig_in()
+	elif name == "route_target_next":
+		# Cycle where the column delivers: the trains, then each FOB still held.
+		var options: Array[int] = [-1]
+		for f in supply.get("fobs", []):
+			if not f["lost"]:
+				options.append(int(f["index"]))
+		var cur := options.find(int(supply.get("route_target", -1)))
+		var nxt: int = options[(cur + 1) % options.size()]
+		if options.size() == 1:
+			hud.show_toast("No FOB yet: an HQ in a town digs in to set one up (Shift+H). The column delivers to the trains.", 5.0)
+		elif world.set_route_target(nxt):
+			supply = world.get_supply()
+			hud.show_toast("The supply column now delivers to %s." % supply.get("route_target_name", "?"), 4.0)
 	elif name == "convoy_select":
 		var cid := int(supply.get("convoy_id", -1))
 		if supply.get("convoy_alive", false) and cid >= 0:
@@ -838,6 +886,35 @@ func _on_command(name: String) -> void:
 			var tm := _team(teams[0])
 			hud.show_toast("%s: %s, %.1f km spread. Members take up their places." % [tm["name"], tm["shape_name"], int(tm["spacing"]) * 0.5])
 	_refresh_selection_panel()
+
+
+## The selected HQ digs in to set up a FOB in its town, or stops digging in.
+func _dig_in() -> void:
+	var hqs: Array[int] = []
+	for id in _own_selected():
+		if int(world.get_unit_info(id).get("type", -1)) == 0:
+			hqs.append(id)
+	if hqs.is_empty():
+		hud.show_toast("Select an HQ in a town to dig in and set up a FOB.", 4.0)
+		return
+	for id in hqs:
+		var info: Dictionary = world.get_unit_info(id)
+		if info.get("digging_in", false) or info.get("dig_in_pending", false):
+			world.cancel_dig_in(id)
+			hud.show_toast("%s stops digging in." % info["name"], 3.0)
+			continue
+		var why := String(info.get("dig_in_problem", ""))
+		if why != "":
+			hud.show_toast(why, 4.0)
+			continue
+		var d := world.order_dig_in(id)
+		if d >= 0:
+			hud.show_toast("%s will dig in %s: the order arrives in %d min, then it stays put for about %d min. Keep it out of the fight." % [
+				info["name"], info["location"], d, _dig_minutes(float(info["readiness"]))], 6.0)
+
+
+func _dig_minutes(readiness: float) -> int:
+	return int(round(30.0 + 30.0 * clampf((100.0 - readiness) / 100.0, 0.0, 1.0)))
 
 
 func _standoff_name(v: int) -> String:
@@ -1295,6 +1372,7 @@ func _run_autotest() -> void:
 
 
 	await _shot_supply()
+	await _shot_fob()
 
 	# Streaming test: sweep across the map at chunk zoom and record the worst frame.
 	camera.zoom = Vector2.ONE * 0.02
@@ -1357,6 +1435,75 @@ func _shot_supply() -> void:
 	if supply.has("trains_pos"):
 		sp = (supply["depot_pos"] as Vector2).lerp(supply["trains_pos"], 0.5) + Vector2(0, 2500)
 	await _shot("16_supply_line", sp, 0.05)
+	show_supply = false
+	hud.supply_panel.visible = false
+
+
+## FOB: a fresh start; the HQ and two platoons road-march to a town 8-25 km west of home, the
+## HQ digs in (shot while it does), then the supply column stocks the new FOB (shot on the way).
+func _shot_fob() -> void:
+	world.setup_scenario(hostile_groups)
+	for c in [glide, fire_seen, targeted_seen]:
+		c.clear()
+	for a in [fx, wrecks, pings, event_log]:
+		a.clear()
+	selected.clear()
+	_refresh_snapshot()
+	var home_pos: Vector2 = world.hex_to_world(world.get_unit_info(0)["hex"])
+	var town_hex := Vector2i(-1, -1)
+	var best := 1e12
+	for t in world.get_settlements(2000):
+		var p: Vector2 = t["pos"]
+		var d := p.distance_to(home_pos)
+		if p.x < home_pos.x and d > 8000.0 and d < 25000.0 and d < best:
+			var hx: Vector2i = world.world_to_hex(p)
+			if world.get_hex_info(hx).has("settlement"):
+				best = d
+				town_hex = hx
+	if town_hex.x < 0:
+		print("Autotest: no town west of home for the FOB shot")
+		return
+	var town_name := String(world.get_hex_info(town_hex)["settlement"])
+	world.order_move(0, town_hex, 1)
+	world.order_move(6, town_hex + Vector2i(1, 0), 1) # 1st Rifle
+	world.order_move(1, town_hex + Vector2i(-1, 1), 1) # 1st Tank
+	for i in 8 * 60:
+		world.advance(1, 1000.0)
+		var hq: Dictionary = world.get_unit_info(0)
+		if Vector2i(hq["hex"]) == town_hex and not hq.get("pending", false) and String(hq["order"]) == "Holding":
+			break
+	var d := world.order_dig_in(0)
+	print("Autotest: HQ at %s, dig-in order: %d min (%s)" % [town_name, d, world.get_unit_info(0).get("dig_in_problem", "")])
+	for i in 120:
+		world.advance(1, 1000.0)
+		if world.get_unit_info(0).get("digging_in", false) and int(world.get_unit_info(0).get("dig_minutes_left", 0)) <= 15:
+			break
+	_poll_events()
+	selected = [0]
+	await _shot("17_fob_dig_in", world.hex_to_world(town_hex) + Vector2(0, 600), 0.09)
+	for i in 120:
+		world.advance(1, 1000.0)
+		supply = world.get_supply()
+		if not (supply.get("fobs", []) as Array).is_empty():
+			break
+	var fobs: Array = supply.get("fobs", [])
+	if fobs.is_empty():
+		print("Autotest: no FOB came of it")
+		return
+	world.set_route_target(int(fobs[0]["index"]))
+	for i in 6 * 60:
+		world.advance(1, 1000.0)
+		supply = world.get_supply()
+		if String(supply.get("convoy_state", "")) == "outbound" and supply.has("convoy_pos") and \
+				(supply["convoy_pos"] as Vector2).distance_to(supply["depot_pos"]) > 3000.0:
+			break
+	_poll_events()
+	print("Autotest: FOB %s; column: %s" % [fobs[0]["name"], supply.get("convoy_status", "?")])
+	show_supply = true
+	hud.supply_panel.visible = true
+	hud.show_supply(supply)
+	selected = [int(supply.get("convoy_id", 0))]
+	await _shot("18_fob_supply", (supply["depot_pos"] as Vector2).lerp(fobs[0]["pos"], 0.5) + Vector2(0, 2500), 0.05)
 	show_supply = false
 	hud.supply_panel.visible = false
 

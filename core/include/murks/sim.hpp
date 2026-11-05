@@ -23,7 +23,8 @@ namespace murks {
 enum UnitType : uint8_t { U_HQ = 0, U_TANK, U_MECH, U_INFANTRY, U_RECON, U_ARTILLERY, U_SUPPLY, U_TYPE_COUNT };
 enum Mobility : uint8_t { M_TRACKED = 0, M_WHEELED, M_FOOT };
 enum Side : int8_t { SIDE_PLAYER = 0, SIDE_HOSTILE = 1, SIDE_COUNT = 2 };
-enum OrderKind : uint8_t { O_HOLD = 0, O_MOVE, O_RETREAT, O_REGROUP, O_REST };
+// O_DIGIN: an HQ digging in to set up a forward operating base (FOB) in the town it is in.
+enum OrderKind : uint8_t { O_HOLD = 0, O_MOVE, O_RETREAT, O_REGROUP, O_REST, O_DIGIN };
 // How a unit moves (Flashpoint-style move orders).
 enum MoveMode : uint8_t {
     MV_HASTY = 0,   // normal speed, fires on the move at a penalty
@@ -115,6 +116,8 @@ struct Unit {
     int last_target = -1;
     bool alive = true;
     bool out_of_fuel_reported = false;
+    int64_t dig_until = 0; // digging in (order O_DIGIN): the FOB is set up at this minute
+    int dig_town = -1;     // settlement it is digging in at
 
     int64_t seen_until[SIDE_COUNT] = {-1, -1};
     int64_t last_seen[SIDE_COUNT] = {-100000, -100000};
@@ -223,8 +226,24 @@ constexpr double CONTRACT_ADVANCE = 20000;  // paid when the contract was signed
 constexpr double CONTRACT_PAYMENT = 60000;  // paid when the contract is fulfilled
 constexpr double START_CASH = 8000;         // the company's own money at start
 
+// Forward operating bases: an HQ digs in inside a town (immobile while it does) and the town
+// becomes a holding with limited stores, faster resupply and rest, and occupation income.
+constexpr int DIG_IN_MIN_FRESH = 30;        // minutes to dig in at full readiness ...
+constexpr int DIG_IN_MIN_MAX = 60;          // ... up to an hour for a worn-out HQ
+constexpr double FOB_DIESEL_CAP = 8000;     // litres a FOB can hold
+constexpr double FOB_AMMO_CAP = 16;         // tonnes
+constexpr double FOB_FOOD_CAP = 2000;       // kg
+constexpr float FOB_SUPPLY_RATE = 1.5f;     // resupply at a FOB, x the usual rate
+constexpr float FOB_READINESS_RATE = 2.0f;  // readiness recovery at a FOB, x the usual rate
+constexpr double FOB_INCOME_PER_HEAD = 0.05; // dollars a day per resident of the occupied town
+constexpr double FOB_INCOME_MIN = 100, FOB_INCOME_MAX = 4000; // dollars a day
+constexpr int FOB_TERRITORY = 10;           // hexes (5 km): hostiles inside contest the occupation
+
+enum HoldingKind : uint8_t { H_DEPOT = 0, H_FOB };
+
 // A place the company holds. The first is the home town, whose depot keeps the reserve
-// stocks the trains and the supply column draw on, and whose market sells food to it.
+// stocks the trains and the supply column draw on, and whose market sells food to it. The
+// others are FOBs set up by digging in.
 struct Holding {
     std::string name;
     int settlement = -1;
@@ -233,6 +252,12 @@ struct Holding {
     double diesel_l = 0, ammo_t = 0, food_kg = 0; // depot stock
     double food_per_day = 0;                      // delivered to the depot every morning
     int64_t raided_at = -100000;                  // last time raiders carried off stores
+    uint8_t kind = H_DEPOT;
+    bool lost = false;                            // overrun: no longer held
+    double diesel_cap = 0, ammo_cap = 0, food_cap = 0; // what it can hold (0 = no limit)
+    double income_per_day = 0;                    // occupation income (FOBs)
+    int contested_hours = 0;                      // hours today with hostiles in its territory
+    int64_t established_at = 0;
 };
 
 // The supply route: the supply column shuttles from a depot to the company trains, loading
@@ -251,6 +276,7 @@ struct SupplyRoute {
     int trips = 0;            // deliveries made
     double delivered_t = 0;   // tonnes delivered in all
     int64_t evac_next = 0;    // next check whether the column must drive out of a threatened depot
+    int target = -1;          // where it delivers: -1 the company trains, else a FOB (holding index)
 };
 
 struct SimStats {
@@ -356,8 +382,23 @@ public:
     double food_need_per_day(bool at_depot) const; // kg a day for units at a depot / with the trains
     std::string convoy_status() const;   // one plain sentence for the supply panel
     void convoy_hit(Unit &c, int lost);  // `lost` trucks were knocked out: their loads go with them
+    // Where the column delivers: -1 the trains, or a FOB that is still held. Applies at once.
+    bool set_route_target(int holding);
+    std::string route_target_name() const; // "the trains" or "FOB <town>"
     std::vector<Holding> holdings;
     SupplyRoute route;
+
+    // FOBs. An own HQ in a town (not the home town, not one that has a FOB) can dig in: the
+    // order goes through the command delay, then the HQ stays put for dig_in_minutes() and the
+    // town becomes a FOB. A hit, or breaking contact, abandons it. While digging in the HQ
+    // takes no move, hold, fall-back or regroup orders; cancel_dig_in() stops it at once.
+    std::string dig_in_problem(int unit_id) const; // "" if the unit could dig in where it is
+    int order_dig_in(int unit_id);                 // command delay in minutes, -1 if not possible
+    bool cancel_dig_in(int unit_id);               // stops digging in (or the order on its way)
+    int dig_in_minutes(const Unit &u) const;       // 30 min fresh, up to 60 worn out
+    int town_at(HexCoord h) const;                 // settlement whose built-up area this hex is in, -1
+    int holding_at_settlement(int settlement) const; // own holding (not lost) in that town, -1
+    double fob_income_per_day() const;             // all FOBs, before contested hours
 
     Map map;
     std::vector<Unit> units;
@@ -388,6 +429,17 @@ private:
     void convoy_unload_at_depot(Unit &c);
     void raid_depots();
     void pay_day();
+    void update_dig_in();
+    void abandon_dig_in(Unit &u, const char *why);
+    void fob_income();
+    // Where the column delivers right now: the trains (with whoever runs them) or a FOB.
+    struct Dest {
+        bool ok = false;
+        HexCoord pos;
+        double *diesel = nullptr, *ammo = nullptr, *food = nullptr;
+        double diesel_cap = 0, ammo_cap = 0, food_cap = 0;
+    };
+    Dest route_dest();
     void update_hunters();
     void check_outcome();
     void push_event(EventKind k, int unit, bool pause, const std::string &text);

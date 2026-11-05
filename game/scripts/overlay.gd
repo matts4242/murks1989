@@ -131,13 +131,15 @@ func _row_item(o: int, i: int) -> Dictionary:
 		"roe": int(snap[o + 12]), "badge": "", "label": "", "fire": 0.0, "sel": main.selected.has(id),
 		"echelon": ECHELONS[clampi(int(snap[o + 2]), 0, ECHELONS.size() - 1)], "row": i,
 		"engage": snap[o + 17], "elem": int(snap[o + 18]), "elem_max": int(snap[o + 19]),
-		"team": int(snap[o + 20]), "role": int(snap[o + 21]), "tcol": int(snap[o + 22]), "standoff": int(snap[o + 24])}
+		"team": int(snap[o + 20]), "role": int(snap[o + 21]), "tcol": int(snap[o + 22]), "standoff": int(snap[o + 24]),
+		"dig": snap[o + 25]}
 	if side == 0:
 		match int(snap[o + 13]):
 			1: item["badge"] = ["M", "R", "D", "A"][clampi(int(snap[o + 11]), 0, 3)]
 			2: item["badge"] = "F"
 			3: item["badge"] = "G"
 			4: item["badge"] = "S"
+			5: item["badge"] = "E" # entrenching: digging in for a FOB
 		item["label"] = main.short_name(id)
 		var age: float = main.world.get_time_minutes() - snap[o + 16]
 		if age < 15.0:
@@ -305,10 +307,11 @@ func _draw_counter(c: Vector2, s: float, it: Dictionary) -> void:
 		var zp := c + Vector2(h + 5.0, 0)
 		draw_circle(zp, 3.5, ZONE_COLORS[int(it["zone"])])
 		draw_arc(zp, 3.5, 0, TAU, 12, INK, 1.0)
-	# Orders still travelling down the chain of command.
+	# Orders still travelling down the chain of command, or an HQ digging in for a FOB.
 	var oin: float = it["order_in"]
-	if oin >= 0.0:
-		var t := "+%d′" % int(ceil(oin))
+	var dig: float = it.get("dig", -1.0)
+	if oin >= 0.0 or dig >= 0.0:
+		var t := ("+%d′" % int(ceil(oin))) if oin >= 0.0 else ("DIG IN %d′" % int(ceil(dig)))
 		var fs := 11
 		var tw := font.get_string_size(t, HORIZONTAL_ALIGNMENT_LEFT, -1, fs).x
 		var tr := Rect2(Vector2(c.x - tw * 0.5 - 4, c.y - h - 17), Vector2(tw + 8, 14))
@@ -725,16 +728,22 @@ func _draw_supply(xf: Transform2D, view: Rect2) -> void:
 	var dp: Vector2 = xf * (s["depot_pos"] as Vector2)
 	var raided := int(s.get("depot_raided_ago", -1)) >= 0
 	var col: Color = Color("#ff6a50") if raided else (SIDE_COL[0] as Color).lightened(0.45)
-	if (main.show_supply or main._column_selected()) and s.has("trains_pos") and not s.get("trains_at_depot", false):
-		var tw: Vector2 = s["trains_pos"]
+	var show_route: bool = main.show_supply or main._column_selected()
+	var to_fob := int(s.get("route_target", -1)) >= 0
+	if show_route and s.has("route_target_pos") and (to_fob or not s.get("trains_at_depot", false)):
+		var tw: Vector2 = s["route_target_pos"]
 		var tp: Vector2 = xf * tw
 		draw_dashed_line(dp, tp, Color(0.55, 0.8, 1.0, 0.8), 2.0, 10.0)
 		var km := tw.distance_to(s["depot_pos"]) / 1000.0
 		var mid := dp.lerp(tp, 0.5) + Vector2(8, -6)
 		var state := String(s.get("convoy_state", "")) if s.get("convoy_alive", false) else "no column left"
-		var t := "Supply route %.0f km · %s" % [km, state]
+		var t := "Supply route to %s %.0f km · %s" % [s.get("route_target_name", "the trains"), km, state]
 		draw_string_outline(font, mid, t, HORIZONTAL_ALIGNMENT_LEFT, -1, 12, 4, Color(0, 0, 0, 0.85))
 		draw_string(font, mid, t, HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color(0.85, 0.94, 1.0))
+	for f in s.get("fobs", []):
+		if not f["lost"]:
+			_draw_holding(xf, view, f["pos"], "FOB " + String(f["name"]), int(f.get("raided_ago", -1)) >= 0,
+				Color("#7fd36f"), show_route)
 	if not view.has_point(dp):
 		return
 	var k := hex_px()
@@ -758,6 +767,42 @@ func _draw_supply(xf: Transform2D, view: Rect2) -> void:
 	var tag := "DEPOT" + (" (plundered)" if raided else "")
 	draw_string_outline(font, label_at, tag, HORIZONTAL_ALIGNMENT_LEFT, -1, 11, 4, Color(0, 0, 0, 0.85))
 	draw_string(font, label_at, tag, HORIZONTAL_ALIGNMENT_LEFT, -1, 11, col.lightened(0.3))
+
+
+## A FOB: its hex outlined in green (red for a day after it was plundered) with its name under
+## it, and with the supply panel open its 5 km territory, where hostiles cost it income.
+func _draw_holding(xf: Transform2D, view: Rect2, pos: Vector2, tag: String, raided: bool, base: Color, territory: bool) -> void:
+	var p: Vector2 = xf * pos
+	var col: Color = Color("#ff6a50") if raided else base
+	var k := hex_px()
+	if territory:
+		var r: float = 5000.0 * main.camera.zoom.x
+		if r > 8.0:
+			var tc := col
+			tc.a = 0.5
+			_dashed_circle(p, r, tc, 1.5)
+	if not view.has_point(p):
+		return
+	var label_at := p
+	if k >= 9.0:
+		var pts := PackedVector2Array()
+		for i in 7:
+			var a := deg_to_rad(60.0 * i - 30.0)
+			pts.append(p + Vector2(cos(a), sin(a)) * k * 0.94)
+		draw_polyline(pts, Color(0, 0, 0, 0.6), maxf(3.0, k * 0.12) + 2.0, true)
+		draw_polyline(pts, col, maxf(3.0, k * 0.12), true)
+		label_at = p + Vector2(-18, k + 14)
+	else:
+		var d := 6.0
+		var sq := PackedVector2Array([p + Vector2(-d, -d), p + Vector2(d, -d), p + Vector2(d, d), p + Vector2(-d, d)])
+		draw_colored_polygon(sq, col)
+		var rim := sq.duplicate()
+		rim.append(sq[0])
+		draw_polyline(rim, Color(0, 0, 0, 0.8), 1.5, true)
+		label_at = p + Vector2(9, 14)
+	var t := tag + (" (plundered)" if raided else "")
+	draw_string_outline(font, label_at, t, HORIZONTAL_ALIGNMENT_LEFT, -1, 11, 4, Color(0, 0, 0, 0.85))
+	draw_string(font, label_at, t, HORIZONTAL_ALIGNMENT_LEFT, -1, 11, col.lightened(0.3))
 
 
 # --- Wrecks, fire effects, hover -----------------------------------------------------------

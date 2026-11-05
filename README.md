@@ -30,6 +30,7 @@ This build proves the risky technical core of the design plan (roadmap phases 1 
 - **Flashpoint-style combat.** Line of sight from elevation and cover, concealment in forests and towns, night spotting, fog of war with last-known positions, direct and indirect fire, morale, and standing orders that make hurt units fall back.
 - **Simulation fidelity zones.** Hot (within 10 km of an enemy), warm (10–40 km) and cold zones.
 - **The supply line (phase 3, first cut).** The company's stocks are split between the **trains** that travel with the HQ (a few days' worth: 12,000 L diesel, 24 t ammo, 2,000 kg food) and the **depot** at the home town (18,000 L, 36 t, 4,000 kg, the same totals as before). The town's market sells the depot food every morning. Units halted near the depot draw from it; units halted near the HQ draw from the trains (at half rate from whoever took over a lost HQ). The trains reload at the depot themselves, 15 t an hour. Away from it, the **supply column** brings them what they are short of: six Ural-4320 trucks (27 t), a real unit on the map that loads at the depot, road-marches to the trains, unloads and drives back, burning its own diesel. It can be spotted and ambushed, and every truck knocked out loses its load. An unguarded depot is plundered by any hostile that reaches it. See "Supply line" below.
+- **Forward operating bases.** An HQ in a town can dig in (Shift+H, or Dig in in the Orders panel) and turn the town into a FOB. It stays put while it digs in: 30 minutes fresh, up to an hour worn out. The FOB holds limited stores, resupplies units halted near it 1.5 times as fast and doubles their readiness recovery. It pays occupation income every morning, less for each hour hostiles spent within 5 km. The supply column can deliver to it instead of the trains. Left unguarded it is plundered, then overrun. See "Forward operating bases" below.
 - **Wages and the contract's pay.** Wages of $50 a man are due every Friday at 18:00, from a chest that starts with the contract advance. Pay in full and morale rises a little; pay short and it falls, harder the second time. Breaking the strike group pays $60,000 on completion.
 - **A scenario you can win or lose.** The 7th Guards Remnant hunts the company. It follows the freshest sighting any hostile has made and gets word of the company's whereabouts every six hours or so. You win by breaking it: none of its six fighting platoons left with 30% strength or more. You lose when fewer than three of your fighting units are left. Losing Murks HQ doesn't end the game, but orders then take 25 minutes longer, and after an hour's handover the senior platoon still able to fight (first in the order of battle, at 30% strength or more) takes over the company trains: units halted near it resupply at half the usual rate, and regroup and rest & resupply form up on it. If that platoon is lost or falls below 30%, the next one takes over. Hostile formations regroup the same way on whoever takes over from a lost HQ. The contract and score sit top left; an end screen offers keep playing, load, new game or quit.
 - **Quick save and load** (F5 / F9). A save holds the whole simulation; loading it and playing on gives exactly the same result.
@@ -76,7 +77,8 @@ The prebuilt extension is in `game/bin/` (`libmurks.windows.template_debug.x86_6
 | J / Shift+J | Form a team from the selection / disband the selection's teams |
 | L | Select the team of the selected unit (double-click does the same) |
 | T | Command zones and chain-of-command lines for all units |
-| I | Supply panel: depot, trains, supply column, pay. Run or stop the supply route, and set what the column does under fire. Shows the supply route on the map |
+| I | Supply panel: depot, FOBs, trains, supply column, pay. Run or stop the supply route, choose where the column delivers, and set what it does under fire. Shows the supply route and FOB territories on the map |
+| Shift+H | The selected HQ digs in and sets up a FOB in the town it is in; again to stop |
 
 **Try this:** press Tab until **1st Recon** is selected, right-click about 30 km east, press 4 and watch. When the hostile strike group is spotted, the game pauses and the fight starts on the same map.
 
@@ -120,6 +122,28 @@ The supply panel (I) shows each stock against what can carry it, days of food le
 | Money | Chest at start: $8,000 of the company's own plus the $20,000 contract advance. Completion: $60,000 |
 
 These are first estimates (constants at the top of `core/include/murks/sim.hpp`, logic in `update_logistics` and `update_convoy` in `core/src/sim.cpp`), to be replaced with historical data like the combat values.
+
+## Forward operating bases
+
+![HQ digging in](docs/screenshots/17_fob_dig_in.png)
+
+![Supply column on its way to a FOB](docs/screenshots/18_fob_supply.png)
+
+Take a town by putting your HQ in it and digging in. The HQ can't move while it digs in, so keep it out of the fight, and leave a platoon to hold the town afterwards. The counter shows "DIG IN 34′" and an E badge. A FOB has a green hex outline on the map, and with the supply panel open its 5 km territory is drawn as a dashed ring.
+
+| Rule | Value |
+| --- | --- |
+| Who and where | An own HQ inside a town's built-up area. Not the home town (already the depot), one FOB per town |
+| Digging in | The order goes through the command delay. Then 30 min at full readiness, up to 60 min worn out (30 + 30 × (100 − readiness) ÷ 100). The HQ takes no move, hold, fall-back or regroup orders meanwhile; Dig in again stops it |
+| Broken off | A hit on the HQ, or breaking contact on its standing orders, abandons the dig-in |
+| Stores | Up to 8,000 L diesel, 16 t ammo, 2,000 kg food. Empty when set up; stocked by the supply column (supply panel, "To:") |
+| Resupply | Units halted within 1.5 km draw from the FOB at 1.5 × the usual rate (37.5 points an hour, 75 resting); the trains reload there at 15 t an hour |
+| Rest | Readiness recovers twice as fast at a FOB |
+| Food | Units at a FOB eat from its stores |
+| Income | $0.05 a resident a day ($100–$4,000), paid at 06:00. Each hour of the past day that a hostile spent within 5 km of the FOB costs 1/24 of it |
+| Raids | Unguarded (no own unit but the column within 2 km) with a hostile within 1 km: plundered 25% of every store, with a warning. Still unguarded at the next hour: overrun and lost with its stores; the column goes back to serving the trains |
+
+First estimates again, in `core/include/murks/sim.hpp` (`DIG_IN_*`, `FOB_*`) and `update_dig_in`, `fob_income`, `raid_depots` in `core/src/sim.cpp`.
 
 ## Measured performance
 
@@ -189,7 +213,8 @@ game/         Godot project: scripts/main.gd (input, clock), map_view.gd (stream
 game/data/    Baked real map (.murkz = zlib-compressed MURKSMAP)
 tools/        bake_region.py (real-data pipeline), finish_map.cpp (adds local roads)
 tests/        core_bench.cpp: headless run of map + sim with timings; hq_loss_test.cpp: checks the HQ-loss rules;
-              supply_test.cpp: checks the supply line (depot, trains, supply column, raids, food, wages)
+              supply_test.cpp: checks the supply line (depot, trains, supply column, raids, food, wages);
+              fob_test.cpp: checks forward operating bases (digging in, boosts, deliveries, income, overrun)
 SConstruct    Builds the extension into game/bin/
 CMakeLists.txt  Builds the core, benchmark and finish_map on their own (handy in Visual Studio)
 ```
@@ -211,7 +236,7 @@ You only need this to change the C++ code.
    ```
 5. Restart the Godot editor, or let it hot-reload the extension.
 
-The core has no Godot dependency, so you can also open the folder in Visual Studio (CMake) and run `core_bench` to test simulation changes in seconds (`hq_loss_test` checks the HQ-loss rules and `supply_test` the supply line; both exit non-zero on a failure).
+The core has no Godot dependency, so you can also open the folder in Visual Studio (CMake) and run `core_bench` to test simulation changes in seconds (`hq_loss_test` checks the HQ-loss rules, `supply_test` the supply line and `fob_test` forward operating bases; each exits non-zero on a failure).
 
 On Linux, the same `scons` works. To cross-compile Windows from Linux, use `scons platform=windows use_mingw=yes` (GCC MinGW-w64), or with [llvm-mingw](https://github.com/mstorsjo/llvm-mingw) `scons platform=windows use_mingw=yes use_llvm=yes mingw_prefix=<llvm-mingw folder>`.
 
@@ -228,7 +253,7 @@ Headless balance check (no window): `godot --headless --path game --script res:/
 ## Known limits of this proof of concept
 
 - Map data is not yet corrected to 1989 (see above). Natural Earth has main roads only; local roads are generated.
-- One scripted contract and one holding. The supply line has one depot and one supply column, and the town only sells food: there is no market for diesel or ammo yet, no contract board, no replacements, no truck repairs and no desertion (design plan phases 3–4), so company ammo and diesel still only go down. Next for phase 3: assigning trucks, escorts, more holdings, buying stores and recruiting.
+- One scripted contract. Holdings are the home depot and the FOBs you dig in; the hostile AI raids them only when it passes by, it doesn't go after them yet. The supply line has one supply column, and the home town only sells food: there is no market for diesel or ammo yet, no contract board, no replacements, no truck repairs and no desertion (design plan phases 3–4), so company ammo and diesel still only go down. Next for phase 3: assigning trucks, escorts, more holdings, buying stores and recruiting.
 - Combat values follow simulated real-world performance (weapons, cover, concealment, morale), not game balance, and are not tuned to make fights even. A company defending a town against an attacker of similar size usually holds, as the attacker's rule of thumb of needing about 3:1 at the point of attack would predict.
 - Pathfinding is plain A* on hexes. Very long cross-map orders cost up to ~10 ms; next comes the hierarchical road graph and the 5 km operational layer. Routes to another piece of land (islands, across the sea) are refused at once.
 - One quick-save slot. A save only loads on the map it was made on.
