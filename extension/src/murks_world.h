@@ -37,7 +37,8 @@ public:
         SF_FORMATION, // own units: formation (company) index; hostile units: -1 (their organisation is unknown)
         SF_MODE,      // own units: MoveMode while moving, else -1
         SF_ROE,       // own units: rules of engagement (0 free, 1 return fire, 2 hold fire), else -1
-        SF_ORDER,     // own units: OrderKind (0 hold, 1 move, 2 falling back, 3 regroup, 4 rest), else -1
+        SF_ORDER,     // own units: OrderKind (0 hold, 1 move, 2 falling back, 3 regroup, 4 rest), 5 squads
+                      // walking back to mount up, else -1
         SF_FIRED_AT,  // own or spotted units: game minute of the last shot, else -1e6 (drives fire effects)
         SF_TARGET,    // own or spotted units: id of the last unit it fired at, else -1
         SF_TARGETED,  // own units: game minute it was last fired at, else -1e6
@@ -59,6 +60,9 @@ public:
         SF_FS_BATTERY, // id of the guns it reaches (or the nearest guns when cut off), -1 none
         SF_FS_VIA,     // relayed: id of the unit on the net that passes its calls on, else -1
         SF_FS_RANGE,   // guns: range in hexes (for the range ring), else 0
+        // Mounted infantry (own units).
+        SF_CARRY,      // APC/IFV platoons: squads aboard (0 while they are out), else -1
+        SF_MOUNT_LINK, // carriers with squads out: the squad unit's id; squads on foot: their vehicles' id; else -1
         UNIT_STRIDE
     };
     enum SnapshotFlag {
@@ -110,6 +114,8 @@ public:
     int order_hold(int id);
     int order_fall_back(int id);
     int order_regroup(int id, bool rest);
+    int order_dismount(int id);
+    int order_mount(int id);
     int set_stance(int id, int roe, int break_contact);
     int estimate_command_delay(int id) const;
     int create_group(const PackedInt32Array &ids, int leader);

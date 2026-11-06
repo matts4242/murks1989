@@ -23,7 +23,8 @@ namespace murks {
 enum UnitType : uint8_t { U_HQ = 0, U_TANK, U_MECH, U_INFANTRY, U_RECON, U_ARTILLERY, U_TYPE_COUNT };
 enum Mobility : uint8_t { M_TRACKED = 0, M_WHEELED, M_FOOT };
 enum Side : int8_t { SIDE_PLAYER = 0, SIDE_HOSTILE = 1, SIDE_COUNT = 2 };
-enum OrderKind : uint8_t { O_HOLD = 0, O_MOVE, O_RETREAT, O_REGROUP, O_REST };
+// O_DISMOUNT and O_MOUNT only travel as pending orders; they never become a unit's current order.
+enum OrderKind : uint8_t { O_HOLD = 0, O_MOVE, O_RETREAT, O_REGROUP, O_REST, O_DISMOUNT, O_MOUNT };
 // How a unit moves (Flashpoint-style move orders).
 enum MoveMode : uint8_t {
     MV_HASTY = 0,   // normal speed, fires on the move at a penalty
@@ -122,6 +123,16 @@ struct Unit {
     bool alive = true;
     bool out_of_fuel_reported = false;
 
+    // Mounted infantry. An APC/IFV platoon (the carrier) has a squad unit of its own (one squad
+    // per vehicle) that rides aboard: while embarked it is off the map (alive = false) and its
+    // elements are the squads aboard. Dismounted, it is an infantry unit like any other.
+    int carrier = -1;    // squad units: the vehicles they ride in
+    int dismounts = -1;  // carriers: their squad unit
+    bool embarked = false;
+    bool mounting = false;  // squad unit walking back to its vehicles to mount up
+    int64_t mount_at = -1;  // when the mount drill finishes (both halted in the same hex), -1 none
+    int squad_men = 0;      // squad units: men per squad (display and ration count)
+
     int64_t seen_until[SIDE_COUNT] = {-1, -1};
     int64_t last_seen[SIDE_COUNT] = {-100000, -100000};
     HexCoord last_seen_pos[SIDE_COUNT];
@@ -167,6 +178,15 @@ struct FireNetLink {
     int distance = 0;         // hexes to the guns (direct, cut) or to the relay (relay)
 };
 constexpr int FIRE_RELAY_MIN = 2; // minutes a relayed call for fire adds (estimate)
+
+// APCs and IFVs by equipment name: how many troops each vehicle carries. One squad per vehicle.
+struct CarrierInfo {
+    const char *key; // whole word in Unit::equipment, as for GunInfo
+    int men;         // dismounts per vehicle
+};
+const CarrierInfo *carrier_info(const std::string &equipment);
+constexpr int DISMOUNT_MIN = 1; // minutes from halt until the squads can fight (estimate)
+constexpr int MOUNT_MIN = 2;    // minutes to load once squads and vehicles are in one hex (estimate)
 
 // Teams: subordinate groups under the company. A team has a leader (an HQ or a platoon
 // commander) who commands it within a zone; members follow the leader in a formation.
@@ -260,7 +280,16 @@ public:
     int order_move(int unit_id, HexCoord target, MoveMode mode = MV_HASTY);
     int order_hold(int unit_id);
     int order_fall_back(int unit_id);              // away from known enemies, else back to the HQ
-    int order_regroup(int unit_id, bool rest);     // to the company HQ; rest = rest & resupply there
+    int order_regroup(int unit_id, bool rest);
+    // Mounted infantry: the carrier halts and its squads get out; or the squads walk back to
+    // the (halted) vehicles and mount up. Either goes through the ordered unit's command delay.
+    // The mount order can go to the carrier or to its squads. -1 when not possible.
+    int order_dismount(int unit_id);
+    int order_mount(int unit_id);
+    bool can_dismount(const Unit &u) const; // a carrier with squads aboard
+    bool can_mount(const Unit &u) const;    // a carrier with squads out, or squads with vehicles left
+    // Gives an APC/IFV platoon its squad unit (embarked); setup_scenario does this for every U_MECH.
+    void add_dismounts(int carrier_id);     // to the company HQ; rest = rest & resupply there
     int set_stance(int unit_id, int roe, int brk); // rules of engagement / break contact
     int set_standoff(int unit_id, int standoff);   // per-unit stand-off (through the command delay)
     int standoff_hexes(const Unit &u) const;       // effective stand-off in hexes, 0 = stay and fight
@@ -371,6 +400,10 @@ private:
     HexCoord slot_for(const Group &g, int k, HexCoord center, float heading) const;
     void deploy_if_off_road(Unit &u);
     void update_combat();
+    void dismount_now(Unit &carrier);
+    void start_mount(Unit &ordered);
+    void update_mounting();
+    void bucket_insert(const Unit &u);
     void displace_battery(Unit &u);
     void update_morale_and_sop();
     void update_ai();

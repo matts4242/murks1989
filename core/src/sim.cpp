@@ -337,8 +337,11 @@ void World::setup_scenario(int extra_groups) {
         }
     }
 
+    // Squads for every APC/IFV platoon, embarked. Added last so every other unit keeps its id.
+    for (int i = 0, n = (int)units.size(); i < n; ++i)
+        if (units[i].type == U_MECH) add_dismounts(i);
     for (auto &u : units) {
-        if (u.side == SIDE_PLAYER) stock.personnel += unit_type_info(u.type).crew;
+        if (u.side == SIDE_PLAYER && u.carrier < 0) stock.personnel += unit_type_info(u.type).crew;
     }
     for (int f = 0; f < (int)formations.size(); ++f) formations[f].start_combat = effective_combat_units(f);
     push_event(EV_INFO, -1, false,
@@ -422,6 +425,25 @@ EngagementTime World::engagement_time(const Unit &u) const {
     e.acquire = e.base_acquire * e.factor;
     e.cycle = e.base_cycle * e.factor;
     return e;
+}
+
+// Troops each APC or IFV carries besides its crew (Jane's, FM 100-2-3). Squads per platoon are
+// one per vehicle; the number of men only changes the ration count and the unit panel.
+static const CarrierInfo kCarriers[] = {
+    {"BMP-1", 8}, {"BMP-2", 7}, {"BMP-3", 7}, {"BTR-50", 20}, {"BTR-50PK", 20}, {"BTR-60", 8}, {"BTR-60PB", 8},
+    {"BTR-70", 7}, {"BTR-80", 7}, {"MT-LB", 11}, {"OT-64", 15}, {"OT-62", 18},
+    {"M113", 11}, {"M113A1", 11}, {"M113A2", 11}, {"M113A3", 11}, {"M2", 6}, {"M2A1", 6}, {"Bradley", 6},
+    {"Marder", 6}, {"AMX-10P", 8}, {"VAB", 10}, {"Warrior", 7}, {"FV432", 10}, {"Fuchs", 10}, {"YPR-765", 7},
+};
+
+const CarrierInfo *carrier_info(const std::string &e) {
+    auto alnum = [](char c) { return (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'); };
+    for (const CarrierInfo &k : kCarriers) {
+        const size_t n = std::strlen(k.key);
+        for (size_t at = e.find(k.key); at != std::string::npos; at = e.find(k.key, at + 1))
+            if ((at == 0 || !alnum(e[at - 1])) && (at + n == e.size() || !alnum(e[at + n]))) return &k;
+    }
+    return nullptr;
 }
 
 int World::weapon_range(const Unit &u) {
@@ -723,6 +745,208 @@ int World::order_regroup(int unit_id, bool rest) {
     return delay;
 }
 
+bool World::can_dismount(const Unit &u) const {
+    if (!u.alive || u.dismounts < 0) return false;
+    const Unit &d = units[u.dismounts];
+    return d.embarked && d.elements > 0;
+}
+
+bool World::can_mount(const Unit &u) const {
+    if (!u.alive) return false;
+    const Unit *c = nullptr, *d = nullptr;
+    if (u.dismounts >= 0) {
+        c = &u;
+        d = &units[u.dismounts];
+    } else if (u.carrier >= 0) {
+        c = &units[u.carrier];
+        d = &u;
+    } else {
+        return false;
+    }
+    // Squads can crowd into the vehicles left, up to two squads a vehicle.
+    return c->alive && d->alive && !d->embarked && d->elements <= 2 * c->elements;
+}
+
+int World::order_dismount(int unit_id) {
+    if (unit_id < 0 || unit_id >= (int)units.size() || !can_dismount(units[unit_id])) return -1;
+    Unit &u = units[unit_id];
+    int delay = command_delay(u);
+    u.pending = {true, O_DISMOUNT, u.pos, time_min, time_min + delay, u.mode};
+    return delay;
+}
+
+int World::order_mount(int unit_id) {
+    if (unit_id < 0 || unit_id >= (int)units.size() || !can_mount(units[unit_id])) return -1;
+    Unit &u = units[unit_id];
+    int delay = command_delay(u);
+    u.pending = {true, O_MOUNT, u.pos, time_min, time_min + delay, MV_HASTY};
+    return delay;
+}
+
+// Each APC/IFV platoon gets its squad unit, embarked. Called once the scenario is spawned, so
+// every other unit keeps its id.
+void World::add_dismounts(int cid) {
+    const Unit c = units[cid];
+    const CarrierInfo *ci = carrier_info(c.equipment);
+    Unit d;
+    d.id = (int)units.size();
+    d.side = c.side;
+    d.type = U_INFANTRY;
+    d.name = c.name + " Dismounts";
+    d.squad_men = ci ? ci->men : 8;
+    d.equipment = fmt("%d squads of %d men (%s)", c.elements_max, d.squad_men, ci ? ci->key : "APC infantry");
+    d.formation = c.formation;
+    d.slot = c.slot;
+    d.pos = d.prev_pos = d.dest = c.pos;
+    d.last_seen_pos[0] = d.last_seen_pos[1] = c.pos;
+    d.morale = c.morale;
+    d.elements_max = d.elements = c.elements_max;
+    d.ai_next = c.ai_next;
+    d.carrier = cid;
+    d.embarked = true;
+    d.alive = false;
+    formations[c.formation].members.push_back(d.id);
+    units.push_back(d);
+    units[cid].dismounts = d.id;
+}
+
+void World::bucket_insert(const Unit &u) {
+    if (buckets_.empty()) return;
+    auto &b = buckets_[(size_t)(u.pos.row / BUCKET) * bucket_cols_ + u.pos.col / BUCKET];
+    if (std::find(b.begin(), b.end(), u.id) == b.end()) b.push_back(u.id);
+}
+
+static void halt(Unit &u) {
+    u.path.clear();
+    u.path_i = 0;
+    u.progress = 0;
+    u.order = O_HOLD;
+    u.dest = u.pos;
+}
+
+// The vehicles halt and the squads get out into the same hex; they can fight after the drill.
+void World::dismount_now(Unit &c) {
+    if (!can_dismount(c)) return;
+    halt(c);
+    Unit &d = units[c.dismounts];
+    d.alive = true;
+    d.embarked = false;
+    d.mounting = false;
+    d.mount_at = -1;
+    d.pos = d.prev_pos = d.dest = c.pos;
+    halt(d);
+    d.pending.active = false;
+    d.pending_stance.active = false;
+    d.mode = MV_HASTY;
+    d.roe = c.roe;
+    d.brk = c.brk;
+    d.standoff = c.standoff;
+    d.resting = false;
+    d.group = -1;
+    d.follow = false;
+    d.zone = c.zone;
+    d.hot_until = c.hot_until;
+    d.morale = c.morale; // they rode through the same fight
+    d.readiness = c.readiness;
+    d.strength = 100.0f * d.elements / d.elements_max;
+    d.acquired = -1;
+    d.fire_cooldown = DISMOUNT_MIN;
+    d.last_hit = -1000;
+    d.last_targeted = c.last_targeted;
+    for (int s = 0; s < SIDE_COUNT; ++s) {
+        d.seen_until[s] = c.seen_until[s];
+        d.last_seen[s] = c.last_seen[s];
+        d.last_seen_pos[s] = c.last_seen_pos[s];
+    }
+    bucket_insert(d);
+    if (c.side == SIDE_PLAYER)
+        push_event(EV_ORDER, d.id, false,
+                   fmt("%s dismount %s: %d squad%s on foot.", c.name.c_str(), place_name(c.pos).c_str(), d.elements,
+                       d.elements == 1 ? "" : "s"));
+}
+
+// The vehicles halt and wait; the squads walk to them (see update_mounting).
+void World::start_mount(Unit &u) {
+    if (!can_mount(u)) {
+        if (u.side == SIDE_PLAYER)
+            push_event(EV_INFO, u.id, false, fmt("%s can't mount up: not enough vehicles left.", u.name.c_str()));
+        return;
+    }
+    Unit &c = u.dismounts >= 0 ? u : units[u.carrier];
+    Unit &d = u.dismounts >= 0 ? units[u.dismounts] : u;
+    detach(c.id);
+    halt(c);
+    d.mounting = true;
+    d.mount_at = -1;
+    if (d.pos != c.pos) {
+        d.mode = MV_HASTY;
+        start_path(d, c.pos, O_MOVE, false);
+        if (!d.moving()) {
+            d.mounting = false;
+            if (d.side == SIDE_PLAYER)
+                push_event(EV_INFO, d.id, false, fmt("%s: no route back to %s.", d.name.c_str(), c.name.c_str()));
+            return;
+        }
+    }
+    if (u.side == SIDE_PLAYER)
+        push_event(EV_ORDER, d.id, false,
+                   fmt("%s mounting up: %s halts and waits, %.1f km away.", d.name.c_str(), c.name.c_str(),
+                       hex_distance(d.pos, c.pos) * 0.5));
+}
+
+void World::update_mounting() {
+    for (auto &d : units) {
+        if (!d.alive || !d.mounting) continue;
+        Unit &c = units[d.carrier];
+        if (!c.alive) {
+            d.mounting = false;
+            d.mount_at = -1;
+            if (d.side == SIDE_PLAYER)
+                push_event(EV_INFO, d.id, false, fmt("%s: the vehicles are gone, staying on foot.", d.name.c_str()));
+            continue;
+        }
+        if (d.pos == c.pos) {
+            if (d.moving()) halt(d);
+            if (c.moving()) {
+                d.mount_at = -1; // the vehicles drove off: wait for them to stop
+                continue;
+            }
+            if (d.mount_at < 0) {
+                d.mount_at = time_min + MOUNT_MIN;
+            } else if (time_min >= d.mount_at) {
+                if (d.elements > 2 * c.elements) { // vehicles lost on the way back
+                    d.mounting = false;
+                    d.mount_at = -1;
+                    continue;
+                }
+                d.alive = false;
+                d.embarked = true;
+                d.mounting = false;
+                d.mount_at = -1;
+                d.pending.active = false;
+                d.pending_stance.active = false;
+                d.acquired = -1;
+                halt(d);
+                if (d.side == SIDE_PLAYER)
+                    push_event(EV_ORDER, c.id, false,
+                               fmt("%s mounted up: %d squad%s aboard.", c.name.c_str(), d.elements,
+                                   d.elements == 1 ? "" : "s"));
+            }
+            continue;
+        }
+        d.mount_at = -1;
+        // Follow the vehicles if they moved.
+        if ((!d.moving() || hex_distance(d.dest, c.pos) >= 2) && paths_this_tick_ < MAX_PATHS_PER_TICK) {
+            start_path(d, c.pos, O_MOVE, false);
+            if (!d.moving() && d.pos != c.pos) {
+                d.mounting = false;
+                if (d.side == SIDE_PLAYER)
+                    push_event(EV_INFO, d.id, false, fmt("%s: no route back to %s.", d.name.c_str(), c.name.c_str()));
+            }
+        }
+    }
+}
+
 int World::set_stance(int unit_id, int roe, int brk) {
     if (unit_id < 0 || unit_id >= (int)units.size() || !units[unit_id].alive) return -1;
     Unit &u = units[unit_id];
@@ -766,7 +990,7 @@ int World::standoff_hexes(const Unit &u) const {
 // comes closer. An assault ignores it; team members go by their leader's.
 void World::update_standoff() {
     for (auto &u : units) {
-        if (!u.alive || u.order == O_RETREAT || u.mode == MV_ASSAULT) continue;
+        if (!u.alive || u.order == O_RETREAT || u.mode == MV_ASSAULT || u.mounting) continue;
         if (u.follow && u.group >= 0) continue;
         const int S = standoff_hexes(u);
         if (S <= 0) continue;
@@ -942,9 +1166,19 @@ void World::update_orders() {
         if (!u.pending.active || time_min < u.pending.activates_at) continue;
         if (paths_this_tick_ >= MAX_PATHS_PER_TICK) continue; // spread heavy route-finding over ticks
         u.pending.active = false;
+        OrderKind kind = u.pending.kind;
+        if (kind == O_DISMOUNT) {
+            dismount_now(u);
+            continue;
+        }
+        u.mounting = false; // any new order for squads walking back cancels it (O_MOUNT sets it again)
+        u.mount_at = -1;
+        if (kind == O_MOUNT) {
+            start_mount(u);
+            continue;
+        }
         u.mode = u.pending.mode;
         u.resting = false;
-        OrderKind kind = u.pending.kind;
         HexCoord target = u.pending.target;
         if (kind == O_REGROUP || kind == O_REST) target = regroup_point(u);
         else if (kind == O_RETREAT) target = fall_back_point(u);
@@ -990,6 +1224,7 @@ void World::tick() {
     update_orders();
     update_groups();
     update_movement();
+    update_mounting();
     if (time_min % 5 == 0) {
         rebuild_buckets();
         update_zones();
@@ -1660,6 +1895,21 @@ void World::update_combat() {
             kills = std::min(kills, t.elements);
             t.elements -= kills;
             t.strength = 100.0f * t.elements / t.elements_max;
+            if (kills > 0 && t.dismounts >= 0 && units[t.dismounts].embarked && units[t.dismounts].elements > 0) {
+                // Squads aboard a knocked-out vehicle are lost with it (an estimate: no bail-out).
+                Unit &d = units[t.dismounts];
+                const float keep = d.elements * (float)t.elements / (float)(t.elements + kills);
+                int k = (int)keep;
+                if (rng_.chance(keep - k)) ++k;
+                if (k < d.elements) {
+                    if (t.side == SIDE_PLAYER)
+                        push_event(EV_INFO, t.id, false,
+                                   fmt("%d squad%s aboard %s lost with the vehicles.", d.elements - k,
+                                       d.elements - k == 1 ? "" : "s", t.name.c_str()));
+                    d.elements = k;
+                    d.strength = 100.0f * k / d.elements_max;
+                }
+            }
             t.morale = std::max(0.0f, t.morale - kills * per_element * 0.6f);
             t.last_hit = time_min;
             if (t.elements <= 0) {
@@ -1766,7 +2016,7 @@ void World::update_ai() {
     for (auto &u : units) {
         if (!u.alive || u.side == SIDE_PLAYER || time_min < u.ai_next) continue;
         u.ai_next = time_min + 15 + rng_.range_int(0, 5);
-        if (u.pending.active || (u.order == O_RETREAT && u.moving())) continue;
+        if (u.pending.active || (u.order == O_RETREAT && u.moving()) || u.mounting) continue;
         const auto &ti = unit_type_info(u.type);
         const Formation &f = formations[u.formation];
         // Shaken, shot-up or empty units don't press forward: they pull back from anything
@@ -1792,6 +2042,27 @@ void World::update_ai() {
                 tgt = o.id;
             }
         });
+        // Mounted infantry (Soviet practice): halted within 2 km of a known enemy, the squads
+        // get out and the vehicles stay back to overwatch; with nothing seen within 5 km they
+        // mount up again before moving on.
+        // (Squads that can no longer all fit into the vehicles left go on as plain infantry.)
+        const bool squads_out = u.dismounts >= 0 && units[u.dismounts].alive && can_mount(u);
+        if (u.type == U_MECH) {
+            if (tgt >= 0 && td <= 4 && !u.moving() && can_dismount(u)) {
+                order_dismount(u.id);
+                continue;
+            }
+            if (squads_out && (tgt < 0 || td > 10) && can_mount(u) && !units[u.dismounts].pending.active) {
+                order_mount(u.id);
+                continue;
+            }
+            if (squads_out) {
+                if (u.moving() && tgt >= 0 && td < 6) order_hold(u.id);
+                continue;
+            }
+        }
+        // Squads whose vehicles are still running wait for them rather than wander off.
+        if (u.carrier >= 0 && can_mount(u) && tgt < 0) continue;
         if (tgt >= 0) {
             if (u.type == U_ARTILLERY || u.type == U_HQ || u.type == U_RECON) {
                 if (u.moving() && td < 10) order_hold(u.id);
@@ -1843,7 +2114,9 @@ void World::update_logistics() {
     for (auto &u : units) {
         if (!u.alive || u.side != SIDE_PLAYER) continue;
         const auto &ti = unit_type_info(u.type);
-        stock.personnel += (int)std::round(ti.crew * u.strength / 100.0f);
+        if (u.carrier >= 0) stock.personnel += u.squad_men * u.elements;          // squads on foot
+        else if (u.dismounts >= 0 && units[u.dismounts].alive) stock.personnel += 3 * u.elements; // crews only
+        else stock.personnel += (int)std::round(ti.crew * u.strength / 100.0f);
         // Resupply from the company train: halted near the HQ and out of the fight for 30 minutes
         // (enemies merely being nearby doesn't stop the trucks).
         bool fighting = time_min - u.last_fired < 30 || time_min - u.last_hit < 30 || time_min - u.last_targeted < 30;
@@ -1928,6 +2201,8 @@ int World::effective_combat_units(int formation) const {
     int n = 0;
     for (int id : formations[formation].members) {
         const Unit &u = units[id];
+        // A platoon's squads on foot count only once its vehicles no longer do.
+        if (u.carrier >= 0 && units[u.carrier].alive && units[u.carrier].strength >= 30.0f) continue;
         if (u.alive && u.type != U_HQ && u.type != U_ARTILLERY && u.strength >= 30.0f) ++n;
     }
     return n;
@@ -1974,7 +2249,7 @@ bool World::player_in_contact() const {
 // ------------------------------------------------------------------------------------
 
 namespace {
-constexpr char kSaveMagic[8] = {'M', 'U', 'R', 'K', 'S', 'S', 'V', '4'};
+constexpr char kSaveMagic[8] = {'M', 'U', 'R', 'K', 'S', 'S', 'V', '5'};
 
 struct SaveWriter {
     std::vector<uint8_t> b;
@@ -2033,14 +2308,23 @@ template <typename A, typename U> void io_unit(A &a, U &u) {
     uint64_t pi = u.path_i;
     a.pod(pi);
     u.path_i = (size_t)pi;
-    a.pod(u.progress); a.pod(u.step_cost); a.pod(u.order); a.pod(u.pending); a.pod(u.mode);
-    a.pod(u.roe); a.pod(u.brk); a.pod(u.pending_stance); a.pod(u.resting); a.pod(u.last_targeted);
+    a.pod(u.progress); a.pod(u.step_cost); a.pod(u.order);
+    // Field by field: whole structs would carry their (uninitialised) padding into the save.
+    a.pod(u.pending.active); a.pod(u.pending.kind); a.pod(u.pending.target); a.pod(u.pending.issued_at);
+    a.pod(u.pending.activates_at); a.pod(u.pending.mode);
+    a.pod(u.mode);
+    a.pod(u.roe); a.pod(u.brk);
+    a.pod(u.pending_stance.active); a.pod(u.pending_stance.roe); a.pod(u.pending_stance.brk);
+    a.pod(u.pending_stance.activates_at); a.pod(u.pending_stance.standoff);
+    a.pod(u.resting); a.pod(u.last_targeted);
     a.pod(u.elements_max); a.pod(u.elements); a.pod(u.acquired); a.pod(u.group); a.pod(u.follow);
     a.pod(u.standoff); a.pod(u.standoff_next);
     a.pod(u.strength); a.pod(u.morale); a.pod(u.fuel); a.pod(u.ammo); a.pod(u.readiness);
     a.pod(u.zone); a.pod(u.hot_until); a.pod(u.fire_cooldown); a.pod(u.last_fired); a.pod(u.last_hit);
     a.pod(u.last_target); a.pod(u.fire_pos_since); a.pod(u.displace_after);
     a.pod(u.alive); a.pod(u.out_of_fuel_reported);
+    a.pod(u.carrier); a.pod(u.dismounts); a.pod(u.embarked); a.pod(u.mounting); a.pod(u.mount_at);
+    a.pod(u.squad_men);
     a.pod(u.seen_until); a.pod(u.last_seen); a.pod(u.last_seen_pos); a.pod(u.ai_next);
 }
 
@@ -2075,7 +2359,7 @@ std::vector<uint8_t> World::save_state() const {
     w.pod((int32_t)map.rows());
     w.pod(time_min); w.pod(seed); w.pod(player_home);
     w.pod(rng_.state());
-    w.pod(stock);
+    w.pod(stock.diesel_l); w.pod(stock.ammo_t); w.pod(stock.food_kg); w.pod(stock.personnel);
     w.pod(stats_.kills); w.pod(stats_.losses);
     w.pod(outcome_); w.str(outcome_text_);
     w.pod(default_standoff);
@@ -2113,7 +2397,9 @@ bool World::load_state(const uint8_t *data, size_t size, std::string *error) {
     int kills = 0, losses = 0;
     Outcome oc = OUT_ONGOING;
     std::string ot;
-    r.pod(t); r.pod(sd); r.pod(home); r.pod(rs); r.pod(st); r.pod(kills); r.pod(losses); r.pod(oc); r.str(ot);
+    r.pod(t); r.pod(sd); r.pod(home); r.pod(rs);
+    r.pod(st.diesel_l); r.pod(st.ammo_t); r.pod(st.food_kg); r.pod(st.personnel);
+    r.pod(kills); r.pod(losses); r.pod(oc); r.str(ot);
     uint8_t dso = 0;
     r.pod(dso);
     std::vector<Formation> fs(r.count(4096));
@@ -2138,7 +2424,8 @@ bool World::load_state(const uint8_t *data, size_t size, std::string *error) {
         const Unit &u = us[i];
         if (u.id != i || u.formation < 0 || u.formation >= (int)fs.size() || !map.in_bounds(u.pos) ||
             u.type >= U_TYPE_COUNT || u.path_i > u.path.size() || u.elements_max <= 0 || u.elements < 0 ||
-            u.elements > u.elements_max)
+            u.elements > u.elements_max || u.carrier >= (int)us.size() || u.dismounts >= (int)us.size() ||
+            u.carrier < -1 || u.dismounts < -1)
             return fail("save is corrupt");
         for (int idx : u.path)
             if (idx < 0 || idx >= n_cells) return fail("save is corrupt");

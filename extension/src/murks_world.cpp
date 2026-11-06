@@ -74,6 +74,8 @@ void MurksWorld::_bind_methods() {
     ClassDB::bind_method(D_METHOD("order_move", "id", "hex", "mode"), &MurksWorld::order_move, DEFVAL(0));
     ClassDB::bind_method(D_METHOD("order_fall_back", "id"), &MurksWorld::order_fall_back);
     ClassDB::bind_method(D_METHOD("order_regroup", "id", "rest"), &MurksWorld::order_regroup);
+    ClassDB::bind_method(D_METHOD("order_dismount", "id"), &MurksWorld::order_dismount);
+    ClassDB::bind_method(D_METHOD("order_mount", "id"), &MurksWorld::order_mount);
     ClassDB::bind_method(D_METHOD("set_stance", "id", "roe", "break_contact"), &MurksWorld::set_stance);
     ClassDB::bind_method(D_METHOD("order_hold", "id"), &MurksWorld::order_hold);
     ClassDB::bind_method(D_METHOD("estimate_command_delay", "id"), &MurksWorld::estimate_command_delay);
@@ -391,7 +393,7 @@ PackedFloat32Array MurksWorld::get_units_snapshot() const {
         q[SF_MODE] = own && u.moving() ? (float)u.mode : -1.0f;
         q[SF_ROE] = own ? (float)u.roe : -1.0f;
         const bool shown = own || (flags & FLAG_SEEN);
-        q[SF_ORDER] = own ? (float)u.order : -1.0f;
+        q[SF_ORDER] = !own ? -1.0f : u.mounting ? 5.0f : (float)u.order;
         q[SF_FIRED_AT] = shown ? (float)u.last_fired : -1e6f;
         q[SF_TARGET] = shown ? (float)u.last_target : -1.0f;
         q[SF_TARGETED] = own ? (float)u.last_targeted : -1e6f;
@@ -416,6 +418,15 @@ PackedFloat32Array MurksWorld::get_units_snapshot() const {
         q[SF_FS_BATTERY] = -1.0f;
         q[SF_FS_VIA] = -1.0f;
         q[SF_FS_RANGE] = 0.0f;
+        q[SF_CARRY] = -1.0f;
+        q[SF_MOUNT_LINK] = -1.0f;
+        if (own && u.dismounts >= 0) {
+            const murks::Unit &dm = world_.units[u.dismounts];
+            q[SF_CARRY] = dm.embarked ? (float)dm.elements : 0.0f;
+            if (dm.alive) q[SF_MOUNT_LINK] = (float)dm.id;
+        } else if (own && u.carrier >= 0 && world_.units[u.carrier].alive) {
+            q[SF_MOUNT_LINK] = (float)u.carrier;
+        }
         if (own) {
             const int boss = world_.hq_above(u);
             q[SF_CMD_BOSS] = (float)boss;
@@ -543,6 +554,31 @@ Dictionary MurksWorld::get_unit_info(int id) const {
         if (u.type == murks::U_HQ || (grouped && world_.groups[u.group].leader == u.id))
             d["own_zone_km"] = world_.command_zone(u) * 0.5;
         d["command_link"] = command_link(u, hq);
+        // Mounted infantry.
+        d["can_dismount"] = world_.can_dismount(u);
+        d["can_mount"] = world_.can_mount(u);
+        if (u.dismounts >= 0) {
+            const murks::Unit &dm = world_.units[u.dismounts];
+            d["squads_max"] = dm.elements_max;
+            d["squad_men"] = dm.squad_men;
+            d["squads_aboard"] = dm.embarked ? dm.elements : 0;
+            d["squads_out"] = dm.alive;
+            if (dm.alive) {
+                d["squads_name"] = to_gd(dm.name);
+                d["squads_km"] = murks::hex_distance(u.pos, dm.pos) * 0.5;
+                d["squads_count"] = dm.elements;
+                d["squads_mounting"] = dm.mounting;
+            }
+        }
+        if (u.carrier >= 0) {
+            const murks::Unit &cv = world_.units[u.carrier];
+            d["carrier_id"] = u.carrier;
+            d["carrier_name"] = to_gd(cv.name);
+            d["carrier_alive"] = cv.alive;
+            d["carrier_km"] = murks::hex_distance(u.pos, cv.pos) * 0.5;
+            d["carrier_vehicles"] = cv.elements;
+            d["mounting"] = u.mounting;
+        }
         d["radio_km"] = murks::World::radio_range(u) * 0.5;
         // Fire support net.
         const murks::FireNetLink fl = world_.fire_net_link(u);
@@ -582,7 +618,8 @@ Dictionary MurksWorld::get_unit_info(int id) const {
     }
     d["pending"] = u.pending.active;
     if (u.pending.active) {
-        static const char *kPend[5] = {"Hold", "Move", "Fall back", "Regroup", "Rest & resupply"};
+        static const char *kPend[7] = {"Hold", "Move", "Fall back", "Regroup", "Rest & resupply", "Dismount",
+                                       "Mount up"};
         d["pending_kind"] = u.pending.kind == murks::O_MOVE && u.pending.mode != murks::MV_HASTY
                                 ? kModes[u.pending.mode]
                                 : kPend[u.pending.kind];
@@ -626,6 +663,14 @@ int MurksWorld::order_regroup(int id, bool rest) {
     if (!own_unit(world_, id)) return -1;
     world_.detach(id);
     return world_.order_regroup(id, rest);
+}
+int MurksWorld::order_dismount(int id) {
+    return own_unit(world_, id) ? world_.order_dismount(id) : -1;
+}
+int MurksWorld::order_mount(int id) {
+    if (!own_unit(world_, id)) return -1;
+    world_.detach(id);
+    return world_.order_mount(id);
 }
 int MurksWorld::set_stance(int id, int roe, int break_contact) {
     return own_unit(world_, id) ? world_.set_stance(id, roe, break_contact) : -1;

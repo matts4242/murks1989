@@ -202,7 +202,9 @@ func _build_orders(parent: Control) -> void:
 	var act_defs := [["Hold", "hold", "Stop and hold position. Key H"],
 		["Fall back", "fall_back", "Withdraw about 6 km away from known enemies, or back to the HQ. Key B"],
 		["Regroup", "regroup", "Form up around the company HQ (or whoever took over from it). Key Y"],
-		["Resupply", "rest", "Rest & resupply at the HQ (or whoever took over from it): double refill rate, faster recovery. Key N"]]
+		["Resupply", "rest", "Rest & resupply at the HQ (or whoever took over from it): double refill rate, faster recovery. Key N"],
+		["Dismount", "dismount", "APC/IFV platoons: the vehicles halt and the squads get out (one per vehicle), to move and fight on foot. Key , (comma)"],
+		["Mount up", "mount", "The squads walk back to their vehicles, which halt and wait, and mount up (2 min once together). Order the vehicles or the squads. Key , (comma)"]]
 	for d in act_defs:
 		var name: String = d[1]
 		var b := _small_button(d[0], false, d[2])
@@ -386,6 +388,26 @@ func _team_line(info: Dictionary) -> String:
 	return t
 
 
+## Mounted infantry: squads aboard an APC/IFV platoon, or squads on foot and their vehicles.
+func _mounted_line(info: Dictionary) -> String:
+	var mi := "[color=#c8f0a0]Squads[/color]  "
+	if info.has("squads_max"):
+		if int(info.get("squads_aboard", 0)) > 0:
+			return mi + "%d aboard (%d men each) · Dismount: , key\n" % [int(info["squads_aboard"]), int(info["squad_men"])]
+		if info.get("squads_out", false):
+			var walking := " · walking back to mount up" if info.get("squads_mounting", false) else ""
+			return mi + "%d on foot as %s, %.1f km away%s\n" % [int(info["squads_count"]), info["squads_name"], float(info["squads_km"]), walking]
+		return mi + "[color=#ff6b4a]all lost[/color]\n"
+	if info.has("carrier_name"):
+		if not info.get("carrier_alive", false):
+			return mi + "on foot: their vehicles (%s) are lost\n" % info["carrier_name"]
+		if info.get("mounting", false):
+			return mi + "walking back to %s, %.1f km, to mount up\n" % [info["carrier_name"], float(info["carrier_km"])]
+		var fits := "" if info.get("can_mount", false) else "  [color=#ff6b4a](too few vehicles left to mount)[/color]"
+		return mi + "dismounted from %s (%d vehicles), %.1f km away%s\n" % [info["carrier_name"], int(info["carrier_vehicles"]), float(info["carrier_km"]), fits]
+	return ""
+
+
 ## Fire support net (its own radio band) for one unit.
 func _fire_support_line(info: Dictionary) -> String:
 	var role := int(info.get("fs_role", -1))
@@ -449,7 +471,7 @@ func _build_status_and_help() -> void:
 	help_panel = PanelContainer.new()
 	help_panel.add_theme_stylebox_override("panel", _panel_style(0.8))
 	help_panel.set_anchors_preset(Control.PRESET_BOTTOM_RIGHT)
-	_offsets(help_panel, -330, -212, -8, -8)
+	_offsets(help_panel, -330, -230, -8, -8)
 	help_panel.grow_horizontal = Control.GROW_DIRECTION_BEGIN
 	help_panel.grow_vertical = Control.GROW_DIRECTION_BEGIN
 	help_panel.visible = false  # F1
@@ -465,6 +487,7 @@ func _build_status_and_help() -> void:
 		"Space: pause    1-5: speed    .: +15 min\n" +
 		"M: whole map    G grid  V sight  Z zones\n" +
 		"T: direct command    I: fire support net\n" +
+		", (comma): dismount / mount up\n" +
 		"P: WeGo pulse    U: auto-pause    F1: help\n" +
 		"F5: quick save    F9: quick load\n" +
 		"F2: map data credits", 13, Color(0.85, 0.88, 0.8)))
@@ -618,6 +641,7 @@ func show_unit(info: Dictionary, count: int) -> void:
 		t += "%s · range %.1f km\n" % [info["gun_name"], float(info["gun_range_km"])]
 	t += "Sight %.1f km · weapons %.1f km\n" % [float(info["spot_range_km"]), float(info["weapon_range_km"])]
 	t += _fire_support_line(info)
+	t += _mounted_line(info)
 	t += _standoff_text(info)
 	t += _team_line(info)
 	t += "%s · breaks contact: %s\n" % [info["roe_name"], String(info["break_contact_name"]).to_lower()]

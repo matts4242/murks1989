@@ -10,6 +10,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <algorithm>
 #include <cstring>
 #include <fstream>
 #include <iterator>
@@ -51,7 +52,7 @@ int main(int argc, char **argv) {
             if (u.side == SIDE_PLAYER) own.push_back(u.id);
         const HexCoord home = w.units[0].pos;
         std::string outcome = "none";
-        int contact = 0, displaced = 0, deployed = 0;
+        int contact = 0, displaced = 0, deployed = 0, squad_min = 0, squads_max = 0;
         for (int m = 0; m < days * 1440; ++m) {
             if (mode == "active") {
                 const int64_t tod = w.time_min % 1440, day = w.time_min / 1440;
@@ -69,6 +70,11 @@ int main(int argc, char **argv) {
             }
             w.tick();
             if (w.player_in_contact()) ++contact;
+            int out = 0;
+            for (const auto &u : w.units)
+                if (u.alive && u.carrier >= 0 && u.side != SIDE_PLAYER && w.formations[u.formation].hunts_player) ++out;
+            if (out > 0) ++squad_min;
+            squads_max = std::max(squads_max, out);
             for (auto &e : w.drain_events()) {
                 if (e.text.find("displaces to a new firing") != std::string::npos) ++displaced;
                 if (e.text.find("leaves road march") != std::string::npos) ++deployed;
@@ -88,10 +94,11 @@ int main(int argc, char **argv) {
             }
         const int sf = w.strike_formation();
         std::printf("seed %u %s: %s | own alive %d (avg str %.0f), 7G fighting %d/%d, kills %d losses %d, "
-                    "contact %d min, ammo %.1f t, displacements %d, deployments %d\n",
+                    "contact %d min, ammo %.1f t, displacements %d, deployments %d, 7G squads out %d min (max %d)\n",
                     w.seed, mode.c_str(), outcome.substr(0, 60).c_str(), alive, alive ? str / alive : 0.0f,
                     sf >= 0 ? w.effective_combat_units(sf) : -1, sf >= 0 ? w.formations[sf].start_combat : -1,
-                    w.stats().kills, w.stats().losses, contact, w.stock.ammo_t, displaced, deployed);
+                    w.stats().kills, w.stats().losses, contact, w.stock.ammo_t, displaced, deployed, squad_min,
+                    squads_max);
         std::fflush(stdout);
     }
     std::printf("%s over %d seeds: %d victories, %d defeats, %d undecided after %d days\n", mode.c_str(), seeds, wins,

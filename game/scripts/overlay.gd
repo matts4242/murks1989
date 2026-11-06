@@ -48,6 +48,7 @@ func _draw() -> void:
 		_draw_los(xf, zoom)
 	_draw_wrecks(xf, view)
 	_draw_command_links(xf)
+	_draw_mount_links(xf)
 	_draw_fire_links(xf)
 	_draw_orders(xf)
 	_draw_units(xf, view)
@@ -116,6 +117,8 @@ const SF_FS_STATUS := 28            # 0 cut off, 1 relayed, 2 direct
 const SF_FS_BATTERY := 29
 const SF_FS_VIA := 30
 const SF_FS_RANGE := 31             # guns: range in hexes
+const SF_CARRY := 32                # APC/IFV platoons: squads aboard (0 while out), else -1
+const SF_MOUNT_LINK := 33           # carrier <-> its squads on foot, else -1
 const HQ_INK := Color(0.95, 0.95, 0.9)
 const CMD_OUT := Color("#ffcc4d")   # outside the commander's zone
 const CMD_CUT := Color("#ff6b4a")   # courier, or no commander
@@ -148,13 +151,15 @@ func _row_item(o: int, i: int) -> Dictionary:
 		"roe": int(snap[o + 12]), "badge": "", "label": "", "fire": 0.0, "sel": main.selected.has(id),
 		"echelon": ECHELONS[clampi(int(snap[o + 2]), 0, 5)], "row": i,
 		"engage": snap[o + 17], "elem": int(snap[o + 18]), "elem_max": int(snap[o + 19]),
-		"team": int(snap[o + 20]), "role": int(snap[o + 21]), "tcol": int(snap[o + 22]), "standoff": int(snap[o + 24])}
+		"team": int(snap[o + 20]), "role": int(snap[o + 21]), "tcol": int(snap[o + 22]), "standoff": int(snap[o + 24]),
+		"carry": int(snap[o + SF_CARRY])}
 	if side == 0:
 		match int(snap[o + 13]):
 			1: item["badge"] = ["M", "R", "D", "A"][clampi(int(snap[o + 11]), 0, 3)]
 			2: item["badge"] = "F"
 			3: item["badge"] = "G"
 			4: item["badge"] = "S"
+			5: item["badge"] = "E" # squads walking back to embark
 		item["label"] = main.short_name(id)
 		var age: float = main.world.get_time_minutes() - snap[o + 16]
 		if age < 15.0:
@@ -310,7 +315,14 @@ func _draw_counter(c: Vector2, s: float, it: Dictionary) -> void:
 	elif not ghost and mor >= 0.0 and mor < 45.0:
 		draw_colored_polygon(PackedVector2Array([c + Vector2(h, -h + s * 0.02), c + Vector2(h, -h + s * 0.3),
 			c + Vector2(h - s * 0.28, -h + s * 0.02)]), Color("#ffcc4d"))
-	# Order badge: M move, R road march, D deliberate, A assault, F falling back, G regroup, S rest.
+	# Squads aboard an APC/IFV platoon: "+3" bottom right.
+	var carry: int = it.get("carry", -1)
+	if carry > 0 and s >= 22.0 and not ghost:
+		var ct := "+%d" % carry
+		var cfs := int(s * 0.24)
+		var cw := font.get_string_size(ct, HORIZONTAL_ALIGNMENT_LEFT, -1, cfs).x
+		draw_string(font, Vector2(c.x + h - s * 0.08 - cw, c.y + h - s * 0.07), ct, HORIZONTAL_ALIGNMENT_LEFT, -1, cfs, Color("#c8f0a0"))
+	# Order badge: M move, R road march, D deliberate, A assault, F falling back, G regroup, S rest, E embarking.
 	var badge: String = it["badge"]
 	if badge != "" and s >= 22.0 and not ghost:
 		var br := s * 0.17
@@ -756,6 +768,27 @@ func _commander_color(o: int, bi: int) -> Color:
 	if tcol >= 0 and int(snap[bi * main.stride + 21]) == 2:
 		return TEAM_COLORS[tcol % TEAM_COLORS.size()]
 	return HQ_INK
+
+
+## Squads on foot and their vehicles: a dotted line between them when either is selected (or
+## with the Direct command overlay on), brighter while the squads are walking back to mount up.
+func _draw_mount_links(xf: Transform2D) -> void:
+	var snap: PackedFloat32Array = main.snapshot
+	var stride: int = main.stride
+	var w := clampf(hex_px() * 0.04, 1.0, 2.5)
+	for i in snap.size() / stride:
+		var o := i * stride
+		if int(snap[o + 1]) != 0 or int(snap[o + SF_CARRY]) >= 0:
+			continue # draw each pair once, from the squads' side
+		var other := int(snap[o + SF_MOUNT_LINK])
+		if other < 0 or not main.disp_row.has(other):
+			continue
+		var id := int(snap[o])
+		if not (main.show_cmd or main.selected.has(id) or main.selected.has(other)):
+			continue
+		var col := Color("#c8f0a0")
+		col.a = 0.95 if int(snap[o + 13]) == 5 else 0.6
+		draw_dashed_line(xf * main.disp[i], xf * main.disp[int(main.disp_row[other])], col, w, 3.0)
 
 
 ## Fire support overlay (I): each battery's range ring, observers on the fire net linked to the

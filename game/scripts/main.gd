@@ -503,6 +503,7 @@ func _on_key(key: Key) -> void:
 		KEY_B: _on_command("fall_back")
 		KEY_Y: _on_command("regroup")
 		KEY_N: _on_command("rest")
+		KEY_COMMA: _on_command("mount_toggle")
 		KEY_X: _cycle_roe()
 		KEY_C, KEY_HOME:
 			if not selected.is_empty():
@@ -763,6 +764,8 @@ func _on_command(name: String) -> void:
 		_order_hold()
 	elif name == "fall_back" or name == "regroup" or name == "rest":
 		_order_group(name)
+	elif name == "dismount" or name == "mount" or name == "mount_toggle":
+		_order_mounting(name)
 	elif name.begins_with("roe_"):
 		_set_stance(name.substr(4).to_int(), -1)
 	elif name.begins_with("brk_"):
@@ -899,6 +902,47 @@ func _order_group(kind: String) -> void:
 	var what: String = {"fall_back": "Fall back", "regroup": "Regroup on the HQ", "rest": "Rest & resupply at the HQ"}[kind]
 	hud.show_toast("%s: %d unit%s, orders arrive in %s." % [what, own.size(), "" if own.size() == 1 else "s",
 		("%d min" % lo) if lo == hi else ("%d-%d min" % [lo, hi])])
+
+
+## Dismount the squads of the selected APC/IFV platoons, or mount them up again. The comma key
+## dismounts when any selected platoon has squads aboard, otherwise mounts up.
+func _order_mounting(kind: String) -> void:
+	var own := _own_selected()
+	var can_dis: Array[int] = []
+	var can_mnt: Array[int] = []
+	var carriers := {}
+	for id in own:
+		var info: Dictionary = world.get_unit_info(id)
+		if info.get("can_dismount", false):
+			can_dis.append(id)
+		if info.get("can_mount", false):
+			can_mnt.append(id)
+			if info.has("squads_max"):
+				carriers[id] = true
+	if kind == "mount_toggle":
+		kind = "dismount" if not can_dis.is_empty() else "mount"
+	var ids: Array[int] = can_dis if kind == "dismount" else can_mnt
+	if kind == "mount":
+		# One order per platoon: skip squads whose vehicles are selected too.
+		var keep: Array[int] = []
+		for id in ids:
+			var info: Dictionary = world.get_unit_info(id)
+			if carriers.has(id) or not own.has(int(info.get("carrier_id", -1))):
+				keep.append(id)
+		ids = keep
+	if ids.is_empty():
+		hud.show_toast("Nothing to dismount: select an APC or IFV platoon with squads aboard." if kind == "dismount"
+			else "Nothing to mount up: select squads on foot, or their vehicles.")
+		return
+	var lo := 1 << 30
+	var hi := 0
+	for id in ids:
+		var d: int = world.order_dismount(id) if kind == "dismount" else world.order_mount(id)
+		if d >= 0:
+			lo = mini(lo, d)
+			hi = maxi(hi, d)
+	hud.show_toast("%s: %d platoon%s, orders arrive in %s." % ["Dismount" if kind == "dismount" else "Mount up",
+		ids.size(), "" if ids.size() == 1 else "s", ("%d min" % lo) if lo == hi else ("%d-%d min" % [lo, hi])])
 
 
 func _set_stance(roe: int, brk: int) -> void:
@@ -1077,6 +1121,8 @@ func short_name(id: int) -> String:
 	var abbr := {"HQ": "HQ", "Tank Plt": "Tk", "Mech Plt": "Mc", "Rifle Plt": "Rf", "Recon Sect": "Rc", "Arty Bty": "Bty"}
 	var tn := String(info.get("type_name", ""))
 	var s: String = abbr.get(tn, nm.substr(0, 3))
+	if info.has("carrier_name"):
+		s = "McD" # a mech platoon's squads on foot
 	if s != "HQ" and s != "Bty" and nm.length() > 0 and nm[0].is_valid_int():
 		s = nm[0] + s
 	short_names[id] = s
@@ -1185,6 +1231,13 @@ func _run_autotest() -> void:
 		await _shot("18_both_overlays", unit_position(0), 0.035)
 		show_cmd = false
 		show_fs = false
+		# Mounted infantry: 1st Mech's squads get out next to their BMPs.
+		if world.order_dismount(3) >= 0:
+			for k in 40:
+				world.advance(1, 200.0)
+			selected = [3]
+			await _shot("19_dismounted", unit_position(3), 0.06)
+			selected.clear()
 	await _shot("02_region_chunks", hq, 0.016)
 	await _shot("03_whole_map_overview", world.get_world_size() * 0.5, get_viewport_rect().size.x / world.get_world_size().x * 0.95)
 
