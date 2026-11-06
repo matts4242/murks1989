@@ -420,6 +420,7 @@ PackedFloat32Array MurksWorld::get_units_snapshot() const {
         q[SF_FS_RANGE] = 0.0f;
         q[SF_CARRY] = -1.0f;
         q[SF_MOUNT_LINK] = -1.0f;
+        q[SF_SUPP] = own ? u.suppression + (u.pinned ? 1000.0f : 0.0f) : -1.0f;
         if (own && u.dismounts >= 0) {
             const murks::Unit &dm = world_.units[u.dismounts];
             q[SF_CARRY] = dm.embarked ? (float)dm.elements : 0.0f;
@@ -480,7 +481,9 @@ Dictionary MurksWorld::get_unit_info(int id) const {
         d["engage_readiness"] = et.f_readiness;
         d["engage_morale"] = et.f_morale;
         d["engage_ammo"] = et.f_ammo;
-        d["engage_fire"] = et.f_fire;
+        d["engage_supp"] = et.f_supp;
+        d["suppression"] = u.suppression;
+        d["pinned"] = u.pinned;
         d["engage_night"] = et.f_night;
         static const char *kNoun[murks::U_TYPE_COUNT] = {"vehicles", "vehicles", "vehicles", "squads", "vehicles", "guns"};
         d["element_noun"] = kNoun[u.type < murks::U_TYPE_COUNT ? u.type : 0];

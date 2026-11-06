@@ -63,6 +63,7 @@ public:
         // Mounted infantry (own units).
         SF_CARRY,      // APC/IFV platoons: squads aboard (0 while they are out), else -1
         SF_MOUNT_LINK, // carriers with squads out: the squad unit's id; squads on foot: their vehicles' id; else -1
+        SF_SUPP,       // own units: suppression 0-100, +1000 when pinned; else -1
         UNIT_STRIDE
     };
     enum SnapshotFlag {

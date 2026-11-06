@@ -46,6 +46,10 @@ target_link_libraries(fire_support_test PRIVATE murks_core)
 add_executable(dismount_test tests/dismount_test.cpp)
 target_link_libraries(dismount_test PRIVATE murks_core)
 
+# Suppression: build-up, hold, decay, pinning, armour and cover. build/suppression_test
+add_executable(suppression_test tests/suppression_test.cpp)
+target_link_libraries(suppression_test PRIVATE murks_core)
+
 # Real-map 4-day scripted runs over several seeds (needs zlib). build/playtest game/data/poland_1989.murkz 4 active 1989 8
 find_package(ZLIB)
 if(ZLIB_FOUND)

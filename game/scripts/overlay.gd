@@ -119,6 +119,7 @@ const SF_FS_VIA := 30
 const SF_FS_RANGE := 31             # guns: range in hexes
 const SF_CARRY := 32                # APC/IFV platoons: squads aboard (0 while out), else -1
 const SF_MOUNT_LINK := 33           # carrier <-> its squads on foot, else -1
+const SF_SUPP := 34                 # own units: suppression 0-100, +1000 when pinned
 const HQ_INK := Color(0.95, 0.95, 0.9)
 const CMD_OUT := Color("#ffcc4d")   # outside the commander's zone
 const CMD_CUT := Color("#ff6b4a")   # courier, or no commander
@@ -152,7 +153,7 @@ func _row_item(o: int, i: int) -> Dictionary:
 		"echelon": ECHELONS[clampi(int(snap[o + 2]), 0, 5)], "row": i,
 		"engage": snap[o + 17], "elem": int(snap[o + 18]), "elem_max": int(snap[o + 19]),
 		"team": int(snap[o + 20]), "role": int(snap[o + 21]), "tcol": int(snap[o + 22]), "standoff": int(snap[o + 24]),
-		"carry": int(snap[o + SF_CARRY])}
+		"carry": int(snap[o + SF_CARRY]), "supp": snap[o + SF_SUPP]}
 	if side == 0:
 		match int(snap[o + 13]):
 			1: item["badge"] = ["M", "R", "D", "A"][clampi(int(snap[o + 11]), 0, 3)]
@@ -315,6 +316,17 @@ func _draw_counter(c: Vector2, s: float, it: Dictionary) -> void:
 	elif not ghost and mor >= 0.0 and mor < 45.0:
 		draw_colored_polygon(PackedVector2Array([c + Vector2(h, -h + s * 0.02), c + Vector2(h, -h + s * 0.3),
 			c + Vector2(h - s * 0.28, -h + s * 0.02)]), Color("#ffcc4d"))
+	# Suppression: a bar along the top edge (amber, red when pinned) and a PIN tag.
+	var sv: float = it.get("supp", -1.0)
+	if sv >= 10.0 and not ghost:
+		var pinned := sv >= 1000.0
+		var lvl := clampf(sv - (1000.0 if pinned else 0.0), 0.0, 100.0) / 100.0
+		var bc := Color("#ff4b3a") if pinned else Color("#ffb52e")
+		draw_rect(Rect2(c.x - h, c.y - h - maxf(2.0, s * 0.07), s * lvl, maxf(2.0, s * 0.07)), bc)
+		if pinned and s >= 22.0:
+			var pfs := int(s * 0.22)
+			draw_string_outline(font, Vector2(c.x - h, c.y - h - s * 0.1), "PIN", HORIZONTAL_ALIGNMENT_LEFT, -1, pfs, 3, Color(0, 0, 0, 0.85))
+			draw_string(font, Vector2(c.x - h, c.y - h - s * 0.1), "PIN", HORIZONTAL_ALIGNMENT_LEFT, -1, pfs, bc)
 	# Squads aboard an APC/IFV platoon: "+3" bottom right.
 	var carry: int = it.get("carry", -1)
 	if carry > 0 and s >= 22.0 and not ghost:

@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <type_traits>
 
@@ -419,9 +420,9 @@ EngagementTime World::engagement_time(const Unit &u) const {
     e.f_readiness = 1.0f + (100.0f - u.readiness) / 100.0f;
     e.f_morale = 1.0f + std::max(0.0f, 60.0f - u.morale) / 60.0f;
     e.f_ammo = u.ammo >= 25.0f ? 1.0f : 1.0f + (25.0f - u.ammo) / 25.0f;
-    e.f_fire = time_min - u.last_targeted <= 5 ? 1.3f : 1.0f;
+    e.f_supp = 1.0f + u.suppression / 50.0f;
     e.f_night = is_night() ? 1.2f : 1.0f;
-    e.factor = e.f_readiness * e.f_morale * e.f_ammo * e.f_fire * e.f_night;
+    e.factor = e.f_readiness * e.f_morale * e.f_ammo * e.f_supp * e.f_night;
     e.acquire = e.base_acquire * e.factor;
     e.cycle = e.base_cycle * e.factor;
     return e;
@@ -451,6 +452,53 @@ int World::weapon_range(const Unit &u) {
     if (!ti.indirect) return ti.weapon_range;
     const GunInfo *g = gun_info(u.equipment);
     return g ? (int)(g->range_km * 2.0f) : ti.weapon_range; // whole hexes inside the range
+}
+
+float World::suppression_weight(const Unit &s) {
+    // Per element and fire cycle against soft targets in the open, in 155 mm-round equivalents:
+    // a tank's 2 rounds (0.8 each); an IFV's cannon bursts and MG; a squad's rifles and MG
+    // (about 20 five-round bursts a cycle at 0.06); a recon vehicle's MG; an HQ's escort.
+    switch (s.type) {
+        case U_TANK: return 1.6f;
+        case U_MECH: return 0.6f;
+        case U_INFANTRY: return 1.0f;
+        case U_RECON: return 0.5f;
+        case U_HQ: return 0.2f;
+        default: break;
+    }
+    // Guns: by calibre against 155 mm; rocket launchers fire a ripple of rockets each.
+    const GunInfo *g = gun_info(s.equipment);
+    if (!g) return 0.8f;
+    const float mm = (float)std::atof(g->label);
+    float w = mm > 0 ? mm / 155.0f : 0.8f;
+    if (std::strstr(g->label, "MRL")) w *= 4.0f;
+    return w;
+}
+
+void World::suppress(Unit &u, float S, int64_t hold_until) {
+    if (S <= 0) return;
+    u.suppression += (100.0f - u.suppression) * (1.0f - std::exp(-S / SUPP_S0));
+    u.suppression = std::min(100.0f, u.suppression);
+    u.supp_hold_until = std::max(u.supp_hold_until, hold_until);
+}
+
+// Suppression fades once the fire stops; soft units pin at 60 and get up again below 35.
+void World::update_suppression() {
+    for (auto &u : units) {
+        if (!u.alive) continue;
+        if (u.suppression > 0 && time_min >= u.supp_hold_until) {
+            u.suppression *= SUPP_DECAY;
+            if (u.suppression < 1.0f) u.suppression = 0;
+        }
+        const bool armored = unit_type_info(u.type).armored;
+        if (!u.pinned && !armored && u.suppression >= PIN_AT) {
+            u.pinned = true;
+            if (u.side == SIDE_PLAYER)
+                push_event(EV_UNDER_FIRE, u.id, false, fmt("%s is pinned down.", u.name.c_str()));
+        } else if (u.pinned && (armored || u.suppression < UNPIN_AT)) {
+            u.pinned = false;
+        }
+    }
 }
 
 bool World::observes(const Unit &o, const Unit &t) const {
@@ -660,6 +708,7 @@ bool World::line_of_sight(HexCoord a, HexCoord b, float eye, float target) const
 float World::effective_spot_range(const Unit &u) const {
     float r = (float)unit_type_info(u.type).spot_range;
     if (is_night()) r = std::max(2.0f, r * 0.35f);
+    if (u.pinned) r = std::max(1.0f, r * 0.5f); // heads down
     return r;
 }
 
@@ -1231,6 +1280,7 @@ void World::tick() {
     }
     update_spotting(time_min % 5 == 0);
     update_combat();
+    update_suppression();
     update_morale_and_sop();
     update_standoff();
     update_ai();
@@ -1608,6 +1658,10 @@ void World::update_movement() {
             continue;
         }
         float speed = 0.6f + 0.4f * u.readiness / 100.0f;
+        if (u.pinned) {
+            if (u.order != O_RETREAT) continue; // gone to ground: no one moves forward
+            speed *= 0.5f;                      // crawling back out of it
+        }
         u.progress += speed;
         bool halted_by_enemy = false;
         while (u.moving() && u.progress >= u.step_cost) {
@@ -1889,6 +1943,14 @@ void World::update_combat() {
                 hit = true;
                 if (rng_.chance(std::min(0.95, pk * rng_.range(0.6, 1.4)))) ++kills;
             }
+        }
+        {
+            // Suppression: the fire suppresses whether it hits or not, and keeps doing so
+            // until this shooter's next cycle; elements knocked out add to the shock.
+            float S = suppression_weight(u) * u.elements + std::min(kills, t.elements) * 1.0f;
+            if (tt.armored) S *= ti.indirect ? 0.5f : 0.3f;
+            if (th.terrain == T_FOREST || th.terrain == T_URBAN) S *= 0.6f;
+            suppress(t, S, time_min + std::max(1, minutes(et.cycle)));
         }
         if (hit) {
             const float per_element = 100.0f / t.elements_max;
@@ -2249,7 +2311,7 @@ bool World::player_in_contact() const {
 // ------------------------------------------------------------------------------------
 
 namespace {
-constexpr char kSaveMagic[8] = {'M', 'U', 'R', 'K', 'S', 'S', 'V', '5'};
+constexpr char kSaveMagic[8] = {'M', 'U', 'R', 'K', 'S', 'S', 'V', '6'};
 
 struct SaveWriter {
     std::vector<uint8_t> b;
@@ -2325,6 +2387,7 @@ template <typename A, typename U> void io_unit(A &a, U &u) {
     a.pod(u.alive); a.pod(u.out_of_fuel_reported);
     a.pod(u.carrier); a.pod(u.dismounts); a.pod(u.embarked); a.pod(u.mounting); a.pod(u.mount_at);
     a.pod(u.squad_men);
+    a.pod(u.suppression); a.pod(u.supp_hold_until); a.pod(u.pinned);
     a.pod(u.seen_until); a.pod(u.last_seen); a.pod(u.last_seen_pos); a.pod(u.ai_next);
 }
 

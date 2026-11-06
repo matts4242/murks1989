@@ -627,9 +627,14 @@ func show_unit(info: Dictionary, count: int) -> void:
 		var ef := float(info["engage_factor"])
 		var ec := "#9fc8ff" if ef < 1.25 else ("#ffc040" if ef < 1.8 else "#ff5040")
 		t += "Engagement   [color=%s]acquire %.1f min · fire every %.1f min[/color]\n" % [ec, float(info["acquire_min"]), float(info["cycle_min"])]
-		t += "[color=#b8c0a8]  readiness ×%.2f · morale ×%.2f · ammo ×%.2f · under fire ×%.2f · night ×%.2f[/color]\n" % [
-			float(info["engage_readiness"]), float(info["engage_morale"]), float(info["engage_ammo"]), float(info["engage_fire"]),
+		t += "[color=#b8c0a8]  readiness ×%.2f · morale ×%.2f · ammo ×%.2f · suppressed ×%.2f · night ×%.2f[/color]\n" % [
+			float(info["engage_readiness"]), float(info["engage_morale"]), float(info["engage_ammo"]), float(info.get("engage_supp", 1.0)),
 			float(info.get("engage_night", 1.0))]
+		var sp := float(info.get("suppression", 0.0))
+		if sp >= 1.0:
+			var scol := "#ff5040" if info.get("pinned", false) else ("#ffc040" if sp >= 30.0 else "#b8c0a8")
+			t += "Suppression  [color=%s]%d%s[/color]\n" % [scol, int(sp),
+				"  PINNED: gone to ground, won't move forward, spots at half range" if info.get("pinned", false) else ""]
 	else:
 		t += _bar("Strength", float(info["strength"]))
 	t += _bar("Morale", float(info["morale"]))

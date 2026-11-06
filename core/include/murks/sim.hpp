@@ -118,6 +118,13 @@ struct Unit {
     int last_target = -1;
     // Guns fire from one position for 15-20 minutes, then displace before counter-battery fire
     // finds them. fire_pos_since = first shot from the present position (-1 none).
+    // Suppression 0-100: fire at the unit raises it whether or not it hits; it holds while the
+    // fire goes on and fades with a ~1.4-minute half-life once it stops ("usually only effective
+    // for the duration of the fire"; artillery's lingers about 2 minutes). It slows engagement
+    // time, and soft units at 60+ are pinned: they stop moving and spot at half range.
+    float suppression = 0;
+    int64_t supp_hold_until = -1; // the incoming fire goes on until then (the shooter's cycle)
+    bool pinned = false;
     int64_t fire_pos_since = -1;
     int displace_after = 0; // minutes, drawn when the first shot from a position is fired
     bool alive = true;
@@ -149,7 +156,7 @@ struct EngagementTime {
     float f_readiness = 1; // tired crews are slower: 1 + (100 - readiness) / 100
     float f_morale = 1;    // shaken crews hesitate: 1 + max(0, 60 - morale) / 60
     float f_ammo = 1;      // below a quarter load, crews pick shots and reload from reserves: up to x2
-    float f_fire = 1;      // under fire in the last 5 minutes: x1.3
+    float f_supp = 1;      // suppression: 1 + suppression / 50, up to x3 (see Unit::suppression)
     float f_night = 1;     // at night: x1.2 (time to first round rose 10-30% at night, ARI 1978)
     float factor = 1;      // product of the factors
     float acquire = 1, cycle = 3; // minutes after the factors
@@ -178,6 +185,14 @@ struct FireNetLink {
     int distance = 0;         // hexes to the guns (direct, cut) or to the relay (relay)
 };
 constexpr int FIRE_RELAY_MIN = 2; // minutes a relayed call for fire adds (estimate)
+
+// Suppression. One fire cycle at a unit adds (100 - s) x (1 - e^(-S / SUPP_S0)), where S sums
+// the shooters' elements x their weight per element and cycle: about 1 for one 155 mm round
+// (relative suppression per round, CDEC/DTIC: 155 mm 1, 105 mm tank round 0.8, 81 mm 0.7,
+// .50 cal 5-round burst 0.06). Armour (x0.3 direct, x0.5 indirect) and cover (x0.6) shield.
+constexpr float SUPP_S0 = 3.0f;
+constexpr float SUPP_DECAY = 0.6f; // per minute once the fire has stopped (half-life ~1.4 min)
+constexpr float PIN_AT = 60.0f, UNPIN_AT = 35.0f;
 
 // APCs and IFVs by equipment name: how many troops each vehicle carries. One squad per vehicle.
 struct CarrierInfo {
@@ -363,6 +378,11 @@ public:
     // seen by someone whose call is relayed (FIRE_RELAY_MIN more). *observer: who sees it.
     int fire_call(const Unit &battery, const Unit &target, int *observer = nullptr) const;
     bool observes(const Unit &o, const Unit &t) const; // o has eyes on t now (range and sight line)
+    // Suppression one element of this shooter puts on a soft target in the open per fire cycle.
+    static float suppression_weight(const Unit &shooter);
+    float effective_spot_range(const Unit &u) const; // hexes: night and being pinned cut it
+    // Adds fire worth S suppression units at u, with the fire going on until hold_until.
+    static void suppress(Unit &u, float S, int64_t hold_until);
     // Nearest enemy this unit's side knows about (seen now or in the last 30 minutes) within
     // `radius` hexes, by its last known position; -1 none. Sets *dist when found.
     int nearest_known_enemy(const Unit &u, int radius, int *dist = nullptr) const;
@@ -372,7 +392,7 @@ public:
     // Direct-fire hit weight, calibrated with tests/attrition_test so tank against tank at 1.5 km in
     // the open kills about 0.11 tanks per firing tank-minute (Historical Values doc).
 #ifndef MURKS_DIRECT_FIRE_WEIGHT
-#define MURKS_DIRECT_FIRE_WEIGHT 0.068f
+#define MURKS_DIRECT_FIRE_WEIGHT 0.073f
 #endif
     static constexpr float DIRECT_FIRE_WEIGHT = MURKS_DIRECT_FIRE_WEIGHT;
     bool reachable(HexCoord a, HexCoord b) const; // same connected piece of land
@@ -400,6 +420,7 @@ private:
     HexCoord slot_for(const Group &g, int k, HexCoord center, float heading) const;
     void deploy_if_off_road(Unit &u);
     void update_combat();
+    void update_suppression();
     void dismount_now(Unit &carrier);
     void start_mount(Unit &ordered);
     void update_mounting();
@@ -416,7 +437,6 @@ private:
     HexCoord fall_back_point(const Unit &u) const;
     int spawn(int formation, int8_t side, UnitType type, const std::string &name, const std::string &equip,
               HexCoord near, std::vector<int> &taken);
-    float effective_spot_range(const Unit &u) const;
     template <typename F> void for_units_near(HexCoord h, int radius, F &&fn) const;
 
     Pathfinder pf_;
