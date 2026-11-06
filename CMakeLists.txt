@@ -29,3 +29,18 @@ target_link_libraries(hq_loss_test PRIVATE murks_core)
 # Adds local roads (and optionally rail) to a map baked by tools/bake_region.py.
 add_executable(finish_map tools/finish_map.cpp)
 target_link_libraries(finish_map PRIVATE murks_core)
+
+# Kill rates in a stand-up fight on flat open ground (per-hit weight calibration). build/attrition_test calibrate
+add_executable(attrition_test tests/attrition_test.cpp)
+target_link_libraries(attrition_test PRIVATE murks_core)
+
+# Checks the Historical Values rules (fire cycles, zones, radio, displacement, deployment). build/rules_test
+add_executable(rules_test tests/rules_test.cpp)
+target_link_libraries(rules_test PRIVATE murks_core)
+
+# Real-map 4-day scripted runs over several seeds (needs zlib). build/playtest game/data/poland_1989.murkz 4 active 1989 8
+find_package(ZLIB)
+if(ZLIB_FOUND)
+    add_executable(playtest tests/playtest.cpp)
+    target_link_libraries(playtest PRIVATE murks_core ZLIB::ZLIB)
+endif()

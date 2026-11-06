@@ -16,18 +16,21 @@ constexpr int BUCKET = 32;          // hexes per spatial bucket side
 constexpr int HOT_RANGE = 20;       // hexes (10 km)
 constexpr int WARM_RANGE = 80;      // hexes (40 km)
 constexpr int HOT_HOLD_MIN = 30;    // minutes a zone stays hot after contact ends
-constexpr int RADIO_RANGE = 40;     // hexes (20 km) from HQ before couriers are needed
+constexpr int RADIO_RANGE = 40;     // hexes (20 km): vehicle radio (R-123) before couriers are needed
+constexpr int RADIO_RANGE_FOOT = 12; // hexes (6 km): manpack radio (R-107) for units on foot
 constexpr int MAX_PATHS_PER_TICK = 10;
 constexpr int CONTACT_RANGE = 10;   // hexes (5 km): a hostile in sight this close caps fast-forward
 
 const UnitTypeInfo kTypes[U_TYPE_COUNT] = {
-    // name        mobility    spot wpn  fire  anti-arm armd  indir intv fuel/hex litres ammo_t crew
-    {"HQ", M_WHEELED, 8, 2, 1.0f, 0.1f, false, false, 3, 0.10f, 600, 0.4f, 25},
-    {"Tank Plt", M_TRACKED, 8, 5, 9.0f, 1.0f, true, false, 3, 0.15f, 4000, 6.0f, 16},
-    {"Mech Plt", M_TRACKED, 8, 4, 6.0f, 0.8f, true, false, 3, 0.12f, 1800, 3.0f, 30},
-    {"Rifle Plt", M_FOOT, 6, 2, 4.0f, 0.5f, false, false, 3, 0.0f, 0, 1.0f, 35},
-    {"Recon Sect", M_WHEELED, 14, 3, 2.5f, 0.25f, false, false, 3, 0.08f, 500, 0.5f, 15},
-    {"Arty Bty", M_TRACKED, 6, 30, 12.0f, 0.6f, false, true, 8, 0.12f, 2400, 18.0f, 30},
+    // name        mobility    spot wpn  fire  anti-arm armd  indir intv fuel/hex litres ammo_t crew rnds %/rnd
+    // Tanks: 1-minute cycle of 2 aimed rounds each (DIA 1976: 3 rounds in 100 s, 1 per 15-45 s
+    // short halt), 40 rounds a load (T-55 43, T-72 44). Guns: 4-minute missions (FM 100-2-1).
+    {"HQ", M_WHEELED, 8, 2, 1.0f, 0.1f, false, false, 3, 0.10f, 600, 0.4f, 25, 1, 0},
+    {"Tank Plt", M_TRACKED, 8, 5, 9.0f, 1.0f, true, false, 1, 0.15f, 4000, 6.0f, 16, 2, 2.5f},
+    {"Mech Plt", M_TRACKED, 8, 4, 6.0f, 0.8f, true, false, 3, 0.12f, 1800, 3.0f, 30, 1, 0},
+    {"Rifle Plt", M_FOOT, 6, 2, 4.0f, 0.5f, false, false, 3, 0.0f, 0, 1.0f, 35, 1, 0},
+    {"Recon Sect", M_WHEELED, 14, 3, 2.5f, 0.25f, false, false, 3, 0.08f, 500, 0.5f, 15, 1, 0},
+    {"Arty Bty", M_TRACKED, 6, 30, 12.0f, 0.6f, false, true, 4, 0.12f, 2400, 18.0f, 30, 1, 0},
 };
 
 // Minutes per hex by mobility and terrain (water, open, fields, forest, wetland, urban).
@@ -329,7 +332,7 @@ int World::element_count(const Unit &u) {
     while (i < e.size() && e[i] >= '0' && e[i] <= '9') n = n * 10 + (e[i++] - '0');
     if (n > 0 && i < e.size() && e[i] == 'x') return n;
     if (n > 0 && e.find(" men", i) != std::string::npos) return std::max(1, (int)std::lround(n / 11.0));
-    static const int kDefault[U_TYPE_COUNT] = {2, 3, 3, 3, 2, 4}; // HQ, tank, mech, infantry, recon, artillery
+    static const int kDefault[U_TYPE_COUNT] = {2, 3, 3, 3, 2, 6}; // HQ, tank, mech, infantry, recon, artillery (6-gun battery)
     return kDefault[u.type < U_TYPE_COUNT ? u.type : 0];
 }
 
@@ -337,15 +340,41 @@ EngagementTime World::engagement_time(const Unit &u) const {
     const auto &ti = unit_type_info(u.type);
     EngagementTime e;
     e.base_cycle = (float)ti.fire_interval;
-    e.base_acquire = ti.indirect ? 4.0f : 1.0f; // a fire mission is plotted and laid; direct fire picks up the target
+    // Direct fire picks up the target (first round 8-24 s for trained crews: inside one tick).
+    // A fire mission on an unplanned target: a gun platoon (up to 3 guns) 60-90 s, a battery 3-5 min.
+    e.base_acquire = !ti.indirect ? 1.0f : u.elements_max <= 3 ? 1.25f : 4.0f;
     e.f_readiness = 1.0f + (100.0f - u.readiness) / 100.0f;
     e.f_morale = 1.0f + std::max(0.0f, 60.0f - u.morale) / 60.0f;
     e.f_ammo = u.ammo >= 25.0f ? 1.0f : 1.0f + (25.0f - u.ammo) / 25.0f;
     e.f_fire = time_min - u.last_targeted <= 5 ? 1.3f : 1.0f;
-    e.factor = e.f_readiness * e.f_morale * e.f_ammo * e.f_fire;
+    e.f_night = is_night() ? 1.2f : 1.0f;
+    e.factor = e.f_readiness * e.f_morale * e.f_ammo * e.f_fire * e.f_night;
     e.acquire = e.base_acquire * e.factor;
     e.cycle = e.base_cycle * e.factor;
     return e;
+}
+
+int World::radio_range(const Unit &u) {
+    return unit_type_info(u.type).mobility == M_FOOT ? RADIO_RANGE_FOOT : RADIO_RANGE;
+}
+
+int World::nearest_known_enemy(const Unit &u, int radius, int *dist) const {
+    int best = -1, bd = radius + 1;
+    // Last known positions can lag up to 30 minutes behind; search a little wider for them.
+    for_units_near(u.pos, radius + 16, [&](const Unit &o) {
+        if (!o.alive || o.side == u.side) return;
+        HexCoord at;
+        if (seen_by(o, u.side)) at = o.pos;
+        else if (time_min - o.last_seen[u.side] <= 30) at = o.last_seen_pos[u.side];
+        else return;
+        int d = hex_distance(u.pos, at);
+        if (d < bd) {
+            bd = d;
+            best = o.id;
+        }
+    });
+    if (best >= 0 && dist) *dist = bd;
+    return best;
 }
 
 int World::hq_of(int side) const {
@@ -492,7 +521,7 @@ int World::command_delay(const Unit &u) const {
             d += 25.0f; // no HQ: orders improvised
         } else {
             int dist = hex_distance(u.pos, units[hq].pos);
-            if (dist > RADIO_RANGE) d += (dist * 0.5f) / 40.0f * 60.0f; // courier at 40 km/h
+            if (dist > radio_range(u)) d += (dist * 0.5f) / 40.0f * 60.0f; // courier at 40 km/h
             else if (dist > command_zone(units[hq])) d *= 1.5f;     // outside the zone of command: relayed
         }
     }
@@ -971,6 +1000,17 @@ HexCoord World::slot_for(const Group &g, int k, HexCoord center, float heading) 
 }
 
 void World::update_groups() {
+    // A team moving in column deploys into line once an enemy is known within 1.5 km.
+    for (int gid = 0; gid < (int)groups.size(); ++gid) {
+        Group &g = groups[gid];
+        if (!g.alive || g.shape != FS_COLUMN || g.leader < 0 || !units[g.leader].alive) continue;
+        int d = 0;
+        if (nearest_known_enemy(units[g.leader], DEPLOY_LINE_HEXES, &d) < 0) continue;
+        set_group_shape(gid, FS_LINE, -1);
+        if (g.side == SIDE_PLAYER)
+            push_event(EV_INFO, g.leader, false,
+                       fmt("%s deploys from column into line: enemy known %.1f km away.", g.name.c_str(), d * 0.5));
+    }
     for (int gid = 0; gid < (int)groups.size(); ++gid) {
         Group &g = groups[gid];
         if (!g.alive) continue;
@@ -1133,8 +1173,17 @@ void World::update_groups() {
 
 // A road column that has no more road ahead deploys: it leaves road-march mode for the
 // rest of the move (normal off-road speed, normal shooting, no longer a bunched target).
-void World::deploy_if_off_road(Unit &u) const {
+void World::deploy_if_off_road(Unit &u) {
     if (u.mode != MV_ROAD || !u.moving()) return;
+    // The column also deploys once an enemy is known within 5 km (Soviet norm: 4-6 km).
+    int d = 0;
+    if (nearest_known_enemy(u, DEPLOY_COLUMN_HEXES, &d) >= 0) {
+        u.mode = MV_HASTY;
+        if (u.side == SIDE_PLAYER)
+            push_event(EV_INFO, u.id, false,
+                       fmt("%s leaves road march and deploys: enemy known %.1f km away.", u.name.c_str(), d * 0.5));
+        return;
+    }
     int from = map.index(u.pos);
     for (size_t i = u.path_i; i < u.path.size(); ++i) {
         if (road_step(from, u.path[i])) return;
@@ -1280,6 +1329,37 @@ void World::update_spotting(bool full_pass) {
     }
 }
 
+// The battery moves 1-1.5 km to a fresh position, away from the nearest enemy it knows of when it
+// can. A standing operating procedure: no command delay.
+void World::displace_battery(Unit &u) {
+    u.fire_pos_since = -1;
+    u.acquired = -1;
+    int foe = nearest_known_enemy(u, 60);
+    HexCoord best = u.pos;
+    int best_score = -(1 << 30);
+    for (int dir = 0; dir < 6; ++dir) {
+        HexCoord h = u.pos;
+        for (int k = 0; k < 3; ++k) h = neighbor(h, (k == 1) ? (dir + 1) % 6 : dir); // 2-3 hexes out
+        if (!map.in_bounds(h) || map.at(h).terrain == T_WATER || !reachable(u.pos, h)) continue;
+        int score = foe >= 0 ? hex_distance(h, units[foe].last_seen_pos[u.side]) * 4 : 0;
+        if (map.at(h).terrain == T_FOREST || map.at(h).terrain == T_URBAN) score += 3; // cover
+        score += rng_.range_int(0, 2);
+        if (score > best_score) {
+            best_score = score;
+            best = h;
+        }
+    }
+    if (best == u.pos) return;
+    const MoveMode keep = u.mode;
+    u.mode = MV_HASTY;
+    start_path(u, best, O_MOVE, false);
+    if (!u.moving()) u.mode = keep;
+    if (u.side == SIDE_PLAYER && u.moving())
+        push_event(EV_ORDER, u.id, false,
+                   fmt("%s displaces to a new firing position after %d minutes of fire.", u.name.c_str(),
+                       u.displace_after));
+}
+
 void World::update_combat() {
     for (auto &u : units) {
         if (!u.alive || u.zone != Z_HOT) continue;
@@ -1287,10 +1367,19 @@ void World::update_combat() {
             --u.fire_cooldown;
             continue;
         }
+        const auto &ti = unit_type_info(u.type);
+        if (ti.indirect && u.fire_pos_since >= 0) {
+            // A fire assault ends after 15-20 minutes from one position, or once the guns have been
+            // silent for half an hour; then they displace before counter-battery fire arrives.
+            if (u.moving() || time_min - u.last_fired > 30) u.fire_pos_since = -1;
+            else if (time_min - u.fire_pos_since >= u.displace_after) {
+                displace_battery(u);
+                continue;
+            }
+        }
         if (u.ammo <= 0) continue;
         if (u.roe == ROE_HOLD) continue;
         if (u.roe == ROE_RETURN && time_min - u.last_targeted > 5) continue;
-        const auto &ti = unit_type_info(u.type);
         int best = -1, best_d = 1 << 30;
         for_units_near(u.pos, ti.weapon_range, [&](const Unit &t) {
             if (t.side == u.side || !t.alive || !seen_by(t, u.side)) return;
@@ -1314,8 +1403,14 @@ void World::update_combat() {
             return std::max(0, m);
         };
         if (best != u.acquired) {
+            // Guns that were just firing shift to a target within 1 km of the last one in about
+            // 2 minutes (FM 100-2-1 standard) instead of plotting a new mission.
+            float acquire = et.acquire;
+            if (ti.indirect && u.last_target >= 0 && time_min - u.last_fired <= 10 &&
+                hex_distance(units[u.last_target].pos, units[best].pos) <= 2)
+                acquire = std::min(acquire, 2.0f * et.factor);
             u.acquired = best;
-            u.fire_cooldown = minutes(et.acquire);
+            u.fire_cooldown = minutes(acquire);
             if (u.fire_cooldown > 0) continue;
         }
         Unit &t = units[best];
@@ -1340,10 +1435,15 @@ void World::update_combat() {
         if (t.moving() && t.mode == MV_ROAD) p *= 1.3f; // a column on the road is bunched up
         t.last_targeted = time_min;
         u.fire_cooldown = std::max(1, minutes(et.cycle));
-        u.ammo = std::max(0.0f, u.ammo - (ti.indirect ? 2.5f : 1.2f));
+        u.ammo = std::max(0.0f, u.ammo - (ti.ammo_per_round > 0 ? ti.ammo_per_round * ti.rounds_per_cycle
+                                                  : ti.indirect ? 2.5f : 1.2f));
         u.last_fired = time_min;
         u.last_target = t.id;
         u.readiness = std::max(20.0f, u.readiness - 0.1f);
+        if (ti.indirect && u.fire_pos_since < 0) {
+            u.fire_pos_since = time_min;
+            u.displace_after = rng_.range_int(15, 20);
+        }
         // Direct fire gives the shooter away.
         if (!ti.indirect && best_d <= std::max(8, tt.spot_range)) {
             u.seen_until[t.side] = std::max(u.seen_until[t.side], time_min + 2);
@@ -1354,17 +1454,33 @@ void World::update_combat() {
             u.last_seen_pos[t.side] = u.pos;
         }
         t.morale = std::max(0.0f, t.morale - 0.7f); // suppression
-        if (rng_.chance(p)) {
-            // Fire weight in strength points (as before), scaled by how many of the shooter's
-            // elements are still in the fight, then resolved as whole elements knocked out:
-            // each point is a 1-in-(100 / elements_max) chance of one element, so the average
-            // loss per hit is unchanged but every element is either in the fight or not.
-            float dmg = ti.firepower * (float)rng_.range(0.6, 1.4) * u.elements / (float)u.elements_max;
-            if (tt.armored) dmg *= ti.anti_armor;
+        int kills = 0;
+        bool hit = false;
+        if (ti.indirect) {
+            // A fire mission is one sheaf on the target: one hit roll, its weight in strength
+            // points (scaled by the share of guns still firing) resolved as whole elements -
+            // each point a 1-in-(100 / elements_max) chance of one element.
+            if (rng_.chance(p)) {
+                hit = true;
+                float dmg = ti.firepower * (float)rng_.range(0.6, 1.4) * u.elements / (float)u.elements_max;
+                if (tt.armored) dmg *= ti.anti_armor;
+                float expect = dmg / (100.0f / t.elements_max);
+                kills = (int)expect;
+                if (rng_.chance(expect - kills)) ++kills;
+            }
+        } else {
+            // Direct fire: every vehicle or squad still in the fight engages on its own, firing
+            // rounds_per_cycle aimed rounds. Each round has the hit chance p; a hit knocks out one element with a chance set by the shooter's
+            // firepower (x anti-armour against armour), calibrated by DIRECT_FIRE_WEIGHT.
+            float pk = ti.firepower * (tt.armored ? ti.anti_armor : 1.0f) * DIRECT_FIRE_WEIGHT;
+            for (int k = 0; k < u.elements * ti.rounds_per_cycle; ++k) {
+                if (!rng_.chance(p)) continue;
+                hit = true;
+                if (rng_.chance(std::min(0.95, pk * rng_.range(0.6, 1.4)))) ++kills;
+            }
+        }
+        if (hit) {
             const float per_element = 100.0f / t.elements_max;
-            float expect = dmg / per_element;
-            int kills = (int)expect;
-            if (rng_.chance(expect - kills)) ++kills;
             kills = std::min(kills, t.elements);
             t.elements -= kills;
             t.strength = 100.0f * t.elements / t.elements_max;
@@ -1682,7 +1798,7 @@ bool World::player_in_contact() const {
 // ------------------------------------------------------------------------------------
 
 namespace {
-constexpr char kSaveMagic[8] = {'M', 'U', 'R', 'K', 'S', 'S', 'V', '3'};
+constexpr char kSaveMagic[8] = {'M', 'U', 'R', 'K', 'S', 'S', 'V', '4'};
 
 struct SaveWriter {
     std::vector<uint8_t> b;
@@ -1747,7 +1863,8 @@ template <typename A, typename U> void io_unit(A &a, U &u) {
     a.pod(u.standoff); a.pod(u.standoff_next);
     a.pod(u.strength); a.pod(u.morale); a.pod(u.fuel); a.pod(u.ammo); a.pod(u.readiness);
     a.pod(u.zone); a.pod(u.hot_until); a.pod(u.fire_cooldown); a.pod(u.last_fired); a.pod(u.last_hit);
-    a.pod(u.last_target); a.pod(u.alive); a.pod(u.out_of_fuel_reported);
+    a.pod(u.last_target); a.pod(u.fire_pos_since); a.pod(u.displace_after);
+    a.pod(u.alive); a.pod(u.out_of_fuel_reported);
     a.pod(u.seen_until); a.pod(u.last_seen); a.pod(u.last_seen_pos); a.pod(u.ai_next);
 }
 

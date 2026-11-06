@@ -273,7 +273,7 @@ func _build_orders(parent: Control) -> void:
 	var spread_names := ["500 m", "1 km", "2 km"]
 	for i in SPREADS.size():
 		var sp: int = SPREADS[i]
-		var b := _small_button(spread_names[i], true, "Distance between formation places.")
+		var b := _small_button(spread_names[i], true, "Distance between formation places. 500 m is the doctrinal platoon spacing (300–600 m); 2 km is wider than one company's 1 km command zone.")
 		b.pressed.connect(func() -> void: command.emit("spread_%d" % sp))
 		spread_row.add_child(b)
 		spread_buttons.append(b)
@@ -577,8 +577,9 @@ func show_unit(info: Dictionary, count: int) -> void:
 		var ef := float(info["engage_factor"])
 		var ec := "#9fc8ff" if ef < 1.25 else ("#ffc040" if ef < 1.8 else "#ff5040")
 		t += "Engagement   [color=%s]acquire %.1f min · fire every %.1f min[/color]\n" % [ec, float(info["acquire_min"]), float(info["cycle_min"])]
-		t += "[color=#b8c0a8]  readiness ×%.2f · morale ×%.2f · ammo ×%.2f · under fire ×%.2f[/color]\n" % [
-			float(info["engage_readiness"]), float(info["engage_morale"]), float(info["engage_ammo"]), float(info["engage_fire"])]
+		t += "[color=#b8c0a8]  readiness ×%.2f · morale ×%.2f · ammo ×%.2f · under fire ×%.2f · night ×%.2f[/color]\n" % [
+			float(info["engage_readiness"]), float(info["engage_morale"]), float(info["engage_ammo"]), float(info["engage_fire"]),
+			float(info.get("engage_night", 1.0))]
 	else:
 		t += _bar("Strength", float(info["strength"]))
 	t += _bar("Morale", float(info["morale"]))

@@ -439,6 +439,7 @@ Dictionary MurksWorld::get_unit_info(int id) const {
         d["engage_morale"] = et.f_morale;
         d["engage_ammo"] = et.f_ammo;
         d["engage_fire"] = et.f_fire;
+        d["engage_night"] = et.f_night;
         static const char *kNoun[murks::U_TYPE_COUNT] = {"vehicles", "vehicles", "vehicles", "squads", "vehicles", "guns"};
         d["element_noun"] = kNoun[u.type < murks::U_TYPE_COUNT ? u.type : 0];
     }

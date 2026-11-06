@@ -50,6 +50,8 @@ struct UnitTypeInfo {
     float fuel_litres;   // litres for a full tank across the platoon
     float ammo_tonnes;   // tonnes for a full load
     int crew;
+    int rounds_per_cycle; // aimed rounds each element fires per fire cycle (direct fire)
+    float ammo_per_round; // % of the load per round fired; 0 = the flat per-cycle use
 };
 const UnitTypeInfo &unit_type_info(int type);
 
@@ -112,6 +114,10 @@ struct Unit {
     int fire_cooldown = 0;
     int64_t last_fired = -1000, last_hit = -1000;
     int last_target = -1;
+    // Guns fire from one position for 15-20 minutes, then displace before counter-battery fire
+    // finds them. fire_pos_since = first shot from the present position (-1 none).
+    int64_t fire_pos_since = -1;
+    int displace_after = 0; // minutes, drawn when the first shot from a position is fired
     bool alive = true;
     bool out_of_fuel_reported = false;
 
@@ -132,6 +138,7 @@ struct EngagementTime {
     float f_morale = 1;    // shaken crews hesitate: 1 + max(0, 60 - morale) / 60
     float f_ammo = 1;      // below a quarter load, crews pick shots and reload from reserves: up to x2
     float f_fire = 1;      // under fire in the last 5 minutes: x1.3
+    float f_night = 1;     // at night: x1.2 (time to first round rose 10-30% at night, ARI 1978)
     float factor = 1;      // product of the factors
     float acquire = 1, cycle = 3; // minutes after the factors
 };
@@ -140,7 +147,7 @@ struct EngagementTime {
 // commander) who commands it within a zone; members follow the leader in a formation.
 enum FormationShape : uint8_t { FS_KEEP = 0, FS_COLUMN, FS_LINE, FS_WEDGE, FS_COUNT };
 constexpr int HQ_COMMAND_ZONE = 8;     // hexes (4 km): a headquarters' zone of effective command
-constexpr int LEADER_COMMAND_ZONE = 4; // hexes (2 km): a platoon commander leading a team
+constexpr int LEADER_COMMAND_ZONE = 2; // hexes (1 km): a company area, about 0.9 km centre to corner
 
 struct Group {
     bool alive = false;
@@ -287,8 +294,24 @@ public:
     int handover_minutes_left(int formation) const;
     static int element_count(const Unit &u); // from the equipment ("4x T-55A", "35 men") or the type
     EngagementTime engagement_time(const Unit &u) const;
+    // Radio range in hexes before orders need a courier: vehicle sets (R-123) 20 km, manpack
+    // sets (R-107) for units on foot 6 km.
+    static int radio_range(const Unit &u);
+    // Nearest enemy this unit's side knows about (seen now or in the last 30 minutes) within
+    // `radius` hexes, by its last known position; -1 none. Sets *dist when found.
+    int nearest_known_enemy(const Unit &u, int radius, int *dist = nullptr) const;
+    // Doctrinal deployment distances from the nearest known enemy (Soviet norms, Isby 1981).
+    static constexpr int DEPLOY_COLUMN_HEXES = 10; // road march -> combat movement at 5 km (4-6 km)
+    static constexpr int DEPLOY_LINE_HEXES = 3;    // a team in column -> line at 1.5 km
+    // Direct-fire hit weight, calibrated with tests/attrition_test so tank against tank at 1.5 km in
+    // the open kills about 0.11 tanks per firing tank-minute (Historical Values doc).
+#ifndef MURKS_DIRECT_FIRE_WEIGHT
+#define MURKS_DIRECT_FIRE_WEIGHT 0.068f
+#endif
+    static constexpr float DIRECT_FIRE_WEIGHT = MURKS_DIRECT_FIRE_WEIGHT;
     bool reachable(HexCoord a, HexCoord b) const; // same connected piece of land
     const SimStats &stats() const { return stats_; }
+    void reseed_rng(uint64_t s) { rng_.reseed(s * 31ull + 7); } // for tests and harnesses
 
     Map map;
     std::vector<Unit> units;
@@ -309,8 +332,9 @@ private:
     void update_groups();
     void update_standoff();
     HexCoord slot_for(const Group &g, int k, HexCoord center, float heading) const;
-    void deploy_if_off_road(Unit &u) const;
+    void deploy_if_off_road(Unit &u);
     void update_combat();
+    void displace_battery(Unit &u);
     void update_morale_and_sop();
     void update_ai();
     void update_logistics();

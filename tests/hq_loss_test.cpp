@@ -108,12 +108,15 @@ int main() {
     ticks(w, 30);
     std::vector<uint8_t> s = w.save_state();
     ticks(w, 180);
-    const int ann_a = count_events(w, TAKEOVER);
+    // A new commander may take over in these three hours if the fighting gets to 1st Mech; what
+    // must not happen is 1st Mech being announced again, before or after the load.
+    const std::string again = std::string("1st Mech ") + TAKEOVER;
+    const int ann_a = count_events(w, again);
     std::vector<uint8_t> a = w.save_state();
     std::string err;
     check(w.load_state(s.data(), s.size(), &err), "load ok");
     ticks(w, 180);
-    const int ann_b = count_events(w, TAKEOVER);
+    const int ann_b = count_events(w, again);
     check(ann_a == 0 && ann_b == 0, "no repeated announcement, before or after a load");
     check(a == w.save_state(), "replay after load is identical");
 
