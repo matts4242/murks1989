@@ -55,7 +55,8 @@ var fire_seen := {}                # shooter id -> last shot minute already show
 var targeted_seen := {}            # own unit id -> last "fired at" minute already shown
 var short_names := {}              # own unit id -> short counter label
 var groups_cache: Array = []       # own teams: {id, name, color, leader, units, shape, spacing, zone_hexes}
-var show_cmd := false              # command zones and team links for all teams, not just the selection
+var show_cmd := false              # direct command overlay: every unit linked to its commander, zones, outlines
+var show_fs := false               # fire support overlay: the fire net, range rings, fire missions, outlines
 const SF_GROUP := 20
 const SF_ROLE := 21
 var event_log: Array = []
@@ -490,7 +491,8 @@ func _on_key(key: Key) -> void:
 			if not selected.is_empty():
 				_select_company_of(selected[0])
 		KEY_O: _on_toggle("Group")
-		KEY_T: _on_toggle("Command")
+		KEY_T: _on_toggle("Direct command")
+		KEY_I: _on_toggle("Fire support")
 		KEY_J:
 			_on_command("team_disband" if Input.is_key_pressed(KEY_SHIFT) else "team_form")
 		KEY_L: _on_command("team_select")
@@ -539,10 +541,14 @@ func _on_toggle(name: String) -> void:
 		"Auto-pause":
 			auto_pause = not auto_pause
 			hud.set_toggle(name, auto_pause)
-		"Command":
+		"Direct command":
 			show_cmd = not show_cmd
 			hud.set_toggle(name, show_cmd)
-			hud.show_toast("Command zones: each HQ and team leader's zone of effective command, with lines to the units it commands. Units outside their zone get orders x1.5 slower." if show_cmd else "Command zones shown for the selection only.", 6.0)
+			hud.show_toast("Direct command: every unit is outlined and linked to the HQ or team leader it takes orders from. Solid: inside the commander's zone. Amber dashes: outside it, orders ×1.5. Red dashes: beyond radio range, orders go by courier. Double white ring: the HQ." if show_cmd else "Direct command overlay off: command zones show for the selection only.", 8.0)
+		"Fire support":
+			show_fs = not show_fs
+			hud.set_toggle(name, show_fs)
+			hud.show_toast("Fire support net (its own radio band): guns ringed thick with their range, observers (HQ and recon) linked to the guns they reach, other units dashed to the observer who relays their calls (+2 min). Grey dashes: cut off, nobody can pass on their calls. Guns only fire on what someone on the net can see." if show_fs else "Fire support overlay off.", 9.0)
 
 
 func _keyboard_pan(delta: float) -> void:
@@ -1170,7 +1176,15 @@ func _run_autotest() -> void:
 		_select_team_of(pick[0])
 		await _shot("14_team_wedge", unit_position(pick[0]) + Vector2(-2000, 0), 0.05)
 		await _shot("15_team_theater", unit_position(pick[0]) + Vector2(8000, 0), 0.02)
+		selected.clear()
+		await _shot("16_direct_command", unit_position(0), 0.035)
 		show_cmd = false
+		show_fs = true
+		await _shot("17_fire_support", unit_position(0), 0.02)
+		show_cmd = true
+		await _shot("18_both_overlays", unit_position(0), 0.035)
+		show_cmd = false
+		show_fs = false
 	await _shot("02_region_chunks", hq, 0.016)
 	await _shot("03_whole_map_overview", world.get_world_size() * 0.5, get_viewport_rect().size.x / world.get_world_size().x * 0.95)
 

@@ -13,6 +13,7 @@
 #include "noise.hpp"
 #include "pathfinder.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -142,6 +143,30 @@ struct EngagementTime {
     float factor = 1;      // product of the factors
     float acquire = 1, cycle = 3; // minutes after the factors
 };
+
+// Guns and mortars by equipment name, with their maximum range firing the standard HE round
+// (no rocket-assisted or base-bleed rounds: rarely issued in 1989). A unit whose equipment names
+// none of them keeps its type's weapon range.
+struct GunInfo {
+    const char *key;   // matched as a whole word in Unit::equipment ("2S1" does not match "2S19")
+    const char *label; // "122 mm SP howitzer 2S1"
+    float range_km;
+};
+const GunInfo *gun_info(const std::string &equipment);
+
+// Fire support net: a radio band of its own for calls for fire, separate from the command net.
+// The guns, the HQ and the recon sections (the artillery observers) are on it. Anyone else
+// passes a call for fire to an observer on the net within radio range, who relays it.
+enum FireNetRole : int8_t { FN_NONE = -1, FN_GUNS = 0, FN_OBSERVER = 1, FN_CALLER = 2 };
+enum FireNetStatus : int8_t { FN_CUT = 0, FN_RELAY = 1, FN_DIRECT = 2 };
+struct FireNetLink {
+    int8_t role = FN_NONE;    // FN_NONE: the formation has no guns, so no fire net
+    int8_t status = FN_CUT;   // FN_DIRECT: on the net and within radio range of the guns
+    int battery = -1;         // the guns it reaches (nearest); when cut, the nearest guns anyway
+    int via = -1;             // FN_RELAY: the unit on the net that passes its calls on
+    int distance = 0;         // hexes to the guns (direct, cut) or to the relay (relay)
+};
+constexpr int FIRE_RELAY_MIN = 2; // minutes a relayed call for fire adds (estimate)
 
 // Teams: subordinate groups under the company. A team has a leader (an HQ or a platoon
 // commander) who commands it within a zone; members follow the leader in a formation.
@@ -297,6 +322,18 @@ public:
     // Radio range in hexes before orders need a courier: vehicle sets (R-123) 20 km, manpack
     // sets (R-107) for units on foot 6 km.
     static int radio_range(const Unit &u);
+    // Weapon range in hexes: guns by their equipment (gun_info), everything else by type.
+    static int weapon_range(const Unit &u);
+    // Fire support net (see FireNetLink). Members: guns, HQs and recon.
+    static bool on_fire_net(const Unit &u) { return u.type == U_ARTILLERY || u.type == U_HQ || u.type == U_RECON; }
+    // Two radios reach each other out to the shorter of their ranges.
+    static int net_range(const Unit &a, const Unit &b) { return std::min(radio_range(a), radio_range(b)); }
+    FireNetLink fire_net_link(const Unit &u) const;
+    // Can anyone in the battery's formation call fire on this target? -1 no one who can see it
+    // can reach the guns; 0 an observer on the net (or the guns themselves) sees it; 1 it is
+    // seen by someone whose call is relayed (FIRE_RELAY_MIN more). *observer: who sees it.
+    int fire_call(const Unit &battery, const Unit &target, int *observer = nullptr) const;
+    bool observes(const Unit &o, const Unit &t) const; // o has eyes on t now (range and sight line)
     // Nearest enemy this unit's side knows about (seen now or in the last 30 minutes) within
     // `radius` hexes, by its last known position; -1 none. Sets *dist when found.
     int nearest_known_enemy(const Unit &u, int radius, int *dist = nullptr) const;

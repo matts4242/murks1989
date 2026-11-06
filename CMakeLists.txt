@@ -38,6 +38,10 @@ target_link_libraries(attrition_test PRIVATE murks_core)
 add_executable(rules_test tests/rules_test.cpp)
 target_link_libraries(rules_test PRIVATE murks_core)
 
+# Gun ranges by equipment and the fire support net. build/fire_support_test
+add_executable(fire_support_test tests/fire_support_test.cpp)
+target_link_libraries(fire_support_test PRIVATE murks_core)
+
 # Real-map 4-day scripted runs over several seeds (needs zlib). build/playtest game/data/poland_1989.murkz 4 active 1989 8
 find_package(ZLIB)
 if(ZLIB_FOUND)

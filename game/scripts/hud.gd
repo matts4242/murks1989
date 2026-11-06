@@ -131,10 +131,14 @@ func _build_top_bar() -> void:
 	spacer.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	row.add_child(spacer)
 
-	var toggles := [["Group", "O"], ["Command", "T"], ["Grid", "G"], ["Sight", "V"], ["Zones", "Z"], ["WeGo", "P"], ["Auto-pause", "U"]]
+	var toggles := [["Group", "O"], ["Direct command", "T"], ["Fire support", "I"], ["Grid", "G"], ["Sight", "V"], ["Zones", "Z"], ["WeGo", "P"], ["Auto-pause", "U"]]
 	for t in toggles:
 		var b := _button(t[0], true)
 		b.tooltip_text = "Key %s" % t[1]
+		if t[0] == "Direct command":
+			b.tooltip_text = "Key T. Outline and link every unit to the HQ or team leader it takes orders from: solid inside the zone, amber outside it (orders ×1.5), red by courier."
+		elif t[0] == "Fire support":
+			b.tooltip_text = "Key I. The fire support radio net: guns with their range rings, observers on the net, who relays whose calls for fire, and who is cut off."
 		var key: String = t[0]
 		b.pressed.connect(func() -> void: toggle_pressed.emit(key))
 		row.add_child(b)
@@ -375,7 +379,29 @@ func _team_line(info: Dictionary) -> String:
 		var inz: bool = info["in_zone"]
 		t += "Answers to %s, %.1f km away: [color=%s]%s[/color]\n" % [info["hq_name"], float(info["hq_dist_km"]),
 			"#9fc8ff" if inz else "#ffc040", ("inside its %.1f km zone" % float(info["hq_zone_km"])) if inz else ("outside its %.1f km zone, orders ×1.5" % float(info["hq_zone_km"]))]
+		if int(info.get("command_link", 1)) == 3:
+			t += "[color=#ff6b4a]Beyond radio range (%.0f km): orders go by courier[/color]\n" % float(info.get("radio_km", 20.0))
+	elif int(info.get("command_link", -1)) == 0:
+		t += "[color=#ff6b4a]No HQ to take orders from: orders improvised (+25 min)[/color]\n"
 	return t
+
+
+## Fire support net (its own radio band) for one unit.
+func _fire_support_line(info: Dictionary) -> String:
+	var role := int(info.get("fs_role", -1))
+	if role < 0:
+		return ""
+	var fs := "[color=#ff6f3c]Fire support[/color]  "
+	var status := int(info.get("fs_status", 0))
+	if role == 0:
+		return fs + "guns: %d observers on the net, %d relayed, %d cut off\n" % [int(info.get("fs_direct_count", 0)),
+			int(info.get("fs_relay_count", 0)), int(info.get("fs_cut_count", 0))]
+	if status == 2:
+		return fs + "observer on the net, %s %.1f km away\n" % [info.get("fs_battery", "guns"), float(info.get("fs_battery_km", 0.0))]
+	if status == 1:
+		return fs + "calls fire through %s (%.1f km), +%d min\n" % [info.get("fs_via", "?"), float(info.get("fs_via_km", 0.0)), int(info.get("fs_relay_min", 2))]
+	return fs + "[color=#ff6b4a]cut off[/color]: %s %.1f km away, nobody on the net within radio range (%.0f km)\n" % [
+		info.get("fs_battery", "guns"), float(info.get("fs_battery_km", 0.0)), float(info.get("radio_km", 20.0))]
 
 
 func _build_log() -> void:
@@ -423,7 +449,7 @@ func _build_status_and_help() -> void:
 	help_panel = PanelContainer.new()
 	help_panel.add_theme_stylebox_override("panel", _panel_style(0.8))
 	help_panel.set_anchors_preset(Control.PRESET_BOTTOM_RIGHT)
-	_offsets(help_panel, -330, -194, -8, -8)
+	_offsets(help_panel, -330, -212, -8, -8)
 	help_panel.grow_horizontal = Control.GROW_DIRECTION_BEGIN
 	help_panel.grow_vertical = Control.GROW_DIRECTION_BEGIN
 	help_panel.visible = false  # F1
@@ -438,6 +464,7 @@ func _build_status_and_help() -> void:
 		"B: fall back  Y: regroup  N: resupply  X: fire\n" +
 		"Space: pause    1-5: speed    .: +15 min\n" +
 		"M: whole map    G grid  V sight  Z zones\n" +
+		"T: direct command    I: fire support net\n" +
 		"P: WeGo pulse    U: auto-pause    F1: help\n" +
 		"F5: quick save    F9: quick load\n" +
 		"F2: map data credits", 13, Color(0.85, 0.88, 0.8)))
@@ -587,7 +614,10 @@ func show_unit(info: Dictionary, count: int) -> void:
 	t += _bar("Ammo", float(info["ammo"]))
 	t += _bar("Readiness", float(info["readiness"]))
 	t += "\n%s   Order: %s\n" % [_situation(info), info["order"]]
+	if info.has("gun_name"):
+		t += "%s · range %.1f km\n" % [info["gun_name"], float(info["gun_range_km"])]
 	t += "Sight %.1f km · weapons %.1f km\n" % [float(info["spot_range_km"]), float(info["weapon_range_km"])]
+	t += _fire_support_line(info)
 	t += _standoff_text(info)
 	t += _team_line(info)
 	t += "%s · breaks contact: %s\n" % [info["roe_name"], String(info["break_contact_name"]).to_lower()]

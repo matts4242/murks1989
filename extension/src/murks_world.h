@@ -49,6 +49,16 @@ public:
         SF_GROUP_COLOR, // own units in a team: team colour index 0..7, else -1
         SF_CMD_ZONE,  // own HQs and team leaders: zone of command in hexes, else 0
         SF_STANDOFF,  // own units: effective stand-off in hexes (0 = stay and fight), else -1
+        // Direct command overlay (own units): who it takes orders from, and how they reach it.
+        SF_CMD_BOSS,  // id of the HQ or team leader it answers to, -1 none
+        SF_CMD_LINK,  // -1 top of the chain (an HQ), 0 no commander (orders improvised), 1 inside the
+                      // commander's zone, 2 outside it (orders x1.5), 3 beyond radio range (courier)
+        // Fire support overlay (own units; see murks::FireNetLink).
+        SF_FS_ROLE,    // -1 no fire net, 0 guns, 1 observer on the net, 2 calls fire through a relay
+        SF_FS_STATUS,  // 0 cut off, 1 relayed, 2 direct
+        SF_FS_BATTERY, // id of the guns it reaches (or the nearest guns when cut off), -1 none
+        SF_FS_VIA,     // relayed: id of the unit on the net that passes its calls on, else -1
+        SF_FS_RANGE,   // guns: range in hexes (for the range ring), else 0
         UNIT_STRIDE
     };
     enum SnapshotFlag {
@@ -93,6 +103,7 @@ public:
     String load_state(const PackedByteArray &bytes); // "" on success, else the reason
 
     PackedFloat32Array get_units_snapshot() const;
+    int command_link(const murks::Unit &u, int boss) const;
     int get_unit_stride() const { return UNIT_STRIDE; }
     Dictionary get_unit_info(int id) const;
     int order_move(int id, Vector2i hex, int mode = 0);

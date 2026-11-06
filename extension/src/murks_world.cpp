@@ -333,6 +333,19 @@ Vector2 MurksWorld::unit_world_pos(const murks::Unit &u) const {
     return Vector2((real_t)a.x, (real_t)a.y);
 }
 
+// -1 top of the chain, 0 no commander, 1 inside the zone, 2 outside it, 3 beyond radio range:
+// the same tests as World::command_delay.
+int MurksWorld::command_link(const murks::Unit &u, int boss) const {
+    const bool member = u.group >= 0 && u.group < (int)world_.groups.size() && world_.groups[u.group].alive &&
+                        world_.groups[u.group].leader != u.id;
+    if (u.type == murks::U_HQ && !member) return -1;
+    if (boss < 0) return 0;
+    const murks::Unit &h = world_.units[boss];
+    const int dist = murks::hex_distance(u.pos, h.pos);
+    if (dist > murks::World::radio_range(u)) return 3;
+    return dist > world_.command_zone(h) ? 2 : 1;
+}
+
 PackedFloat32Array MurksWorld::get_units_snapshot() const {
     PackedFloat32Array out;
     const auto &units = world_.units;
@@ -396,6 +409,24 @@ PackedFloat32Array MurksWorld::get_units_snapshot() const {
         q[SF_STANDOFF] = own ? (float)world_.standoff_hexes(u) : -1.0f;
         q[SF_CMD_ZONE] = own && (u.type == murks::U_HQ || (grouped && world_.groups[u.group].leader == u.id))
                              ? (float)world_.command_zone(u) : 0.0f;
+        q[SF_CMD_BOSS] = -1.0f;
+        q[SF_CMD_LINK] = -1.0f;
+        q[SF_FS_ROLE] = -1.0f;
+        q[SF_FS_STATUS] = 0.0f;
+        q[SF_FS_BATTERY] = -1.0f;
+        q[SF_FS_VIA] = -1.0f;
+        q[SF_FS_RANGE] = 0.0f;
+        if (own) {
+            const int boss = world_.hq_above(u);
+            q[SF_CMD_BOSS] = (float)boss;
+            q[SF_CMD_LINK] = (float)command_link(u, boss);
+            const murks::FireNetLink fl = world_.fire_net_link(u);
+            q[SF_FS_ROLE] = (float)fl.role;
+            q[SF_FS_STATUS] = (float)fl.status;
+            q[SF_FS_BATTERY] = (float)fl.battery;
+            q[SF_FS_VIA] = (float)fl.via;
+            q[SF_FS_RANGE] = fl.role == murks::FN_GUNS ? (float)murks::World::weapon_range(u) : 0.0f;
+        }
         ++n;
     }
     out.resize(n * UNIT_STRIDE);
@@ -455,7 +486,11 @@ Dictionary MurksWorld::get_unit_info(int id) const {
     d["location"] = to_gd(world_.place_name(u.pos));
     d["hex"] = Vector2i(u.pos.col, u.pos.row);
     d["spot_range_km"] = ti.spot_range * 0.5 * (world_.is_night() ? 0.35 : 1.0);
-    d["weapon_range_km"] = ti.weapon_range * 0.5;
+    d["weapon_range_km"] = murks::World::weapon_range(u) * 0.5;
+    if (const murks::GunInfo *g = ti.indirect ? murks::gun_info(u.equipment) : nullptr) {
+        d["gun_name"] = g->label;
+        d["gun_range_km"] = g->range_km;
+    }
     static const char *kModes[4] = {"Hasty", "Road march", "Deliberate", "Assault"};
     static const char *kRoe[3] = {"Fire at will", "Return fire", "Hold fire"};
     static const char *kBrk[3] = {"Heavy losses", "Light losses", "Never"};
@@ -507,6 +542,38 @@ Dictionary MurksWorld::get_unit_info(int id) const {
         }
         if (u.type == murks::U_HQ || (grouped && world_.groups[u.group].leader == u.id))
             d["own_zone_km"] = world_.command_zone(u) * 0.5;
+        d["command_link"] = command_link(u, hq);
+        d["radio_km"] = murks::World::radio_range(u) * 0.5;
+        // Fire support net.
+        const murks::FireNetLink fl = world_.fire_net_link(u);
+        d["fs_role"] = (int)fl.role;
+        if (fl.role != murks::FN_NONE) {
+            d["fs_status"] = (int)fl.status;
+            if (fl.battery >= 0) {
+                d["fs_battery"] = to_gd(world_.units[fl.battery].name);
+                d["fs_battery_km"] = murks::hex_distance(u.pos, world_.units[fl.battery].pos) * 0.5;
+            }
+            if (fl.via >= 0) {
+                d["fs_via"] = to_gd(world_.units[fl.via].name);
+                d["fs_via_km"] = fl.distance * 0.5;
+            }
+            d["fs_relay_min"] = murks::FIRE_RELAY_MIN;
+            if (fl.role == murks::FN_GUNS) {
+                int obs = 0, relayed = 0, cut = 0;
+                for (int id : world_.formations[u.formation].members) {
+                    const murks::Unit &m = world_.units[id];
+                    if (!m.alive || id == u.id) continue;
+                    const murks::FireNetLink ml = world_.fire_net_link(m);
+                    if (ml.role == murks::FN_GUNS || ml.role == murks::FN_NONE) continue;
+                    if (ml.status == murks::FN_DIRECT) ++obs;
+                    else if (ml.status == murks::FN_RELAY) ++relayed;
+                    else ++cut;
+                }
+                d["fs_direct_count"] = obs;
+                d["fs_relay_count"] = relayed;
+                d["fs_cut_count"] = cut;
+            }
+        }
         // Stand-off: the unit's own setting (255 = company default, 254 = weapon range, 0 = fight).
         d["standoff_setting"] = (int)u.standoff;
         d["standoff_hexes"] = world_.standoff_hexes(u);

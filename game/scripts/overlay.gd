@@ -48,8 +48,10 @@ func _draw() -> void:
 		_draw_los(xf, zoom)
 	_draw_wrecks(xf, view)
 	_draw_command_links(xf)
+	_draw_fire_links(xf)
 	_draw_orders(xf)
 	_draw_units(xf, view)
+	_draw_net_outlines()
 	_draw_fx(xf)
 	_draw_pings(xf)
 	_draw_hover(xf)
@@ -103,6 +105,22 @@ const COMPANY_COUNTER := 36.0
 const ECHELONS := ["coy", "plt", "plt", "plt", "sec", "btty"] # by unit type
 const TEAM_COLORS := [Color("#f2c14e"), Color("#39c0b0"), Color("#c77dff"), Color("#8bd450"),
 	Color("#ff8c42"), Color("#5ab0ff"), Color("#ff6f91"), Color("#d9d9d9")]
+
+# Snapshot fields for the command overlays (MurksWorld::SnapshotField).
+const SF_FIRED_AT := 14
+const SF_TARGET := 15
+const SF_CMD_BOSS := 25
+const SF_CMD_LINK := 26             # -1 top, 0 no commander, 1 in zone, 2 outside (x1.5), 3 courier
+const SF_FS_ROLE := 27              # -1 no fire net, 0 guns, 1 observer on the net, 2 calls through a relay
+const SF_FS_STATUS := 28            # 0 cut off, 1 relayed, 2 direct
+const SF_FS_BATTERY := 29
+const SF_FS_VIA := 30
+const SF_FS_RANGE := 31             # guns: range in hexes
+const HQ_INK := Color(0.95, 0.95, 0.9)
+const CMD_OUT := Color("#ffcc4d")   # outside the commander's zone
+const CMD_CUT := Color("#ff6b4a")   # courier, or no commander
+const FS_COL := Color("#ff6f3c")    # fire support net (artillery scarlet)
+const FS_CUT := Color("#a8a8a8")    # cut off from the fire net
 
 
 func grouping_active() -> bool:
@@ -669,9 +687,11 @@ func _draw_command_links(xf: Transform2D) -> void:
 	var w := clampf(hex_px() * 0.045, 1.0, 3.0)
 	var dash := clampf(hex_px() * 0.24, 4.0, 14.0)
 	var zones := {} # row -> colour of the zone ring to draw
+	if all:
+		_draw_all_command_links(xf, w, dash, zones)
 	for i in n:
 		var o := i * stride
-		if int(snap[o + 1]) != 0:
+		if all or int(snap[o + 1]) != 0:
 			continue
 		var id := int(snap[o])
 		var team := int(snap[o + 20])
@@ -697,6 +717,197 @@ func _draw_command_links(xf: Transform2D) -> void:
 		var col: Color = zones[row]
 		col.a = 0.8
 		_dashed_circle(xf * main.disp[row], r, col, 2.0)
+
+
+## Direct command overlay (T): every own unit linked to the HQ or team leader it takes orders
+## from - solid inside the commander's zone, amber dashes outside it (orders x1.5), red short
+## dashes beyond radio range (orders go by courier). Fills `zones` with the commanders' rings.
+func _draw_all_command_links(xf: Transform2D, w: float, dash: float, zones: Dictionary) -> void:
+	var snap: PackedFloat32Array = main.snapshot
+	var stride: int = main.stride
+	for i in snap.size() / stride:
+		var o := i * stride
+		if int(snap[o + 1]) != 0:
+			continue
+		var boss := int(snap[o + SF_CMD_BOSS])
+		if boss < 0 or not main.disp_row.has(boss):
+			continue
+		var bi: int = main.disp_row[boss]
+		var col := _commander_color(o, bi)
+		var a: Vector2 = xf * main.disp[i]
+		var b: Vector2 = xf * main.disp[bi]
+		match int(snap[o + SF_CMD_LINK]):
+			1:
+				var c1 := col
+				c1.a = 0.85
+				draw_line(a, b, c1, w + 0.5, true)
+			2:
+				draw_dashed_line(a, b, CMD_OUT, w + 0.5, dash)
+			3:
+				draw_dashed_line(a, b, CMD_CUT, w + 0.5, dash * 0.5)
+		zones[bi] = col
+
+
+## The commander's colour for the unit at snapshot offset o: the team colour when it answers to
+## its team leader (row bi), white for the company HQ.
+func _commander_color(o: int, bi: int) -> Color:
+	var snap: PackedFloat32Array = main.snapshot
+	var tcol := int(snap[o + 22])
+	if tcol >= 0 and int(snap[bi * main.stride + 21]) == 2:
+		return TEAM_COLORS[tcol % TEAM_COLORS.size()]
+	return HQ_INK
+
+
+## Fire support overlay (I): each battery's range ring, observers on the fire net linked to the
+## guns they reach, relayed callers linked to the observer who passes their calls on, and each
+## battery's current fire mission. A selected battery shows its range ring even without it.
+func _draw_fire_links(xf: Transform2D) -> void:
+	var snap: PackedFloat32Array = main.snapshot
+	var stride: int = main.stride
+	var all: bool = main.show_fs
+	var zoom: float = main.camera.zoom.x
+	var w := clampf(hex_px() * 0.045, 1.0, 3.0)
+	var dash := clampf(hex_px() * 0.24, 4.0, 14.0)
+	var now: float = main.world.get_time_minutes()
+	for i in snap.size() / stride:
+		var o := i * stride
+		if int(snap[o + 1]) != 0:
+			continue
+		var role := int(snap[o + SF_FS_ROLE])
+		if role < 0:
+			continue
+		var a: Vector2 = xf * main.disp[i]
+		if role == 0:
+			if not (all or main.selected.has(int(snap[o]))):
+				continue
+			var r: float = snap[o + SF_FS_RANGE] * 500.0 * zoom
+			if r >= 6.0:
+				var rc := FS_COL
+				rc.a = 0.75
+				_dashed_circle(a, r, rc, 2.0)
+				var tag := "%s  %.1f km" % [main.short_name(int(snap[o])), snap[o + SF_FS_RANGE] * 0.5]
+				var tp := a + Vector2(-font.get_string_size(tag, HORIZONTAL_ALIGNMENT_LEFT, -1, 11).x * 0.5, -r - 4.0)
+				draw_string_outline(font, tp, tag, HORIZONTAL_ALIGNMENT_LEFT, -1, 11, 3, Color(0, 0, 0, 0.85))
+				draw_string(font, tp, tag, HORIZONTAL_ALIGNMENT_LEFT, -1, 11, FS_COL)
+			# The current fire mission: guns to the target of their last rounds.
+			var tid := int(snap[o + SF_TARGET])
+			if all and tid >= 0 and now - snap[o + SF_FIRED_AT] <= 5.0 and main.disp_row.has(tid):
+				var b: Vector2 = xf * main.disp[int(main.disp_row[tid])]
+				var mc := FS_COL
+				mc.a = 0.9
+				draw_line(a, b, mc, w + 1.0, true)
+				var dir := (b - a).normalized()
+				var nrm := Vector2(-dir.y, dir.x)
+				var tip := b - dir * maxf(8.0, counter_size() * 0.5)
+				draw_colored_polygon(PackedVector2Array([tip, tip - dir * 10.0 + nrm * 5.0, tip - dir * 10.0 - nrm * 5.0]), mc)
+			continue
+		if not all:
+			continue
+		var status := int(snap[o + SF_FS_STATUS])
+		if status == 2:
+			var bat := int(snap[o + SF_FS_BATTERY])
+			if bat >= 0 and main.disp_row.has(bat):
+				var c2 := FS_COL
+				c2.a = 0.7
+				draw_line(a, xf * main.disp[int(main.disp_row[bat])], c2, w, true)
+		elif status == 1:
+			var via := int(snap[o + SF_FS_VIA])
+			if via >= 0 and main.disp_row.has(via):
+				draw_dashed_line(a, xf * main.disp[int(main.disp_row[via])], FS_COL, w, dash * 0.4)
+
+
+## Highlight outlines around each own counter for the command overlays that are on: the direct
+## command ring (commander's colour; amber dashed outside the zone, red dashed by courier or with
+## no commander, a double white ring on the HQ) and, further out, the fire support ring (scarlet:
+## thick on the guns, solid on observers on the net, dashed when relayed, grey dashed when cut
+## off). Needs the counters' places, so it runs after _draw_units (not on the grouped theater map).
+func _draw_net_outlines() -> void:
+	if not (main.show_cmd or main.show_fs) or drawn.is_empty():
+		return
+	var snap: PackedFloat32Array = main.snapshot
+	var stride: int = main.stride
+	for dc in drawn:
+		if int(dc["side"]) != 0 or not main.disp_row.has(int(dc["id"])):
+			continue
+		var row: int = main.disp_row[int(dc["id"])]
+		var o := row * stride
+		if (int(snap[o + 7]) & 2) != 0:
+			continue
+		var rect: Rect2 = dc["rect"]
+		var s := rect.size.x
+		var c := rect.get_center()
+		var rad := maxf(1.5, s * 0.11)
+		var lw := maxf(1.5, s * 0.06)
+		if main.show_cmd:
+			var ring := _rrect(c, s * 1.38, rad * 1.6)
+			var boss := int(snap[o + SF_CMD_BOSS])
+			var col := HQ_INK
+			if boss >= 0 and main.disp_row.has(boss):
+				col = _commander_color(o, int(main.disp_row[boss]))
+			var link := int(snap[o + SF_CMD_LINK])
+			if link < 0:
+				_outline(ring, HQ_INK, lw * 1.3)
+				_outline(_rrect(c, s * 1.52, rad * 1.8), HQ_INK, lw * 0.6)
+			elif link == 0:
+				_dashed_poly(ring, CMD_CUT, lw, maxf(2.0, s * 0.06))
+				_net_tag(rect, true, "NO HQ", CMD_CUT)
+			elif link == 1:
+				_outline(ring, col, lw)
+			elif link == 2:
+				_dashed_poly(ring, CMD_OUT, lw, maxf(3.0, s * 0.14))
+				_net_tag(rect, true, "×1.5", CMD_OUT)
+			else:
+				_dashed_poly(ring, CMD_CUT, lw, maxf(2.0, s * 0.07))
+				_net_tag(rect, true, "COURIER", CMD_CUT)
+		if main.show_fs:
+			var role := int(snap[o + SF_FS_ROLE])
+			if role < 0:
+				continue
+			var fr := _rrect(c, s * (1.66 if main.show_cmd else 1.38), rad * 2.0)
+			var status := int(snap[o + SF_FS_STATUS])
+			if role == 0:
+				_outline(fr, FS_COL, lw * 1.6)
+				_net_tag(rect, false, "GUNS", FS_COL)
+			elif status == 2:
+				_outline(fr, FS_COL, lw)
+				_net_tag(rect, false, "FO", FS_COL)
+			elif status == 1:
+				_dashed_poly(fr, FS_COL, lw * (1.0 if role == 1 else 0.7), maxf(3.0, s * 0.12))
+			else:
+				_dashed_poly(fr, FS_CUT, lw * 0.8, maxf(2.0, s * 0.06))
+				_net_tag(rect, false, "NO FS", FS_CUT)
+
+
+## A small tag beside a counter: command tags top right, fire support tags bottom right.
+func _net_tag(rect: Rect2, top: bool, text: String, col: Color) -> void:
+	if rect.size.x < 28.0:
+		return
+	var p := Vector2(rect.end.x + rect.size.x * 0.3, rect.position.y + 4.0 if top else rect.end.y + 2.0)
+	draw_string_outline(font, p, text, HORIZONTAL_ALIGNMENT_LEFT, -1, 10, 3, Color(0, 0, 0, 0.85))
+	draw_string(font, p, text, HORIZONTAL_ALIGNMENT_LEFT, -1, 10, col)
+
+
+## A closed polygon drawn as a dashed line that runs on round the corners.
+func _dashed_poly(pts: PackedVector2Array, col: Color, w: float, dash: float) -> void:
+	var on := true
+	var left := dash
+	var n := pts.size()
+	for k in n:
+		var a: Vector2 = pts[k]
+		var b: Vector2 = pts[(k + 1) % n]
+		var seg := a.distance_to(b)
+		if seg < 0.001:
+			continue
+		var t := 0.0
+		while t < seg:
+			var step := minf(left, seg - t)
+			if on:
+				draw_line(a.lerp(b, t / seg), a.lerp(b, (t + step) / seg), col, w, true)
+			t += step
+			left -= step
+			if left <= 0.0001:
+				on = not on
+				left = dash
 
 
 func _dashed_circle(c: Vector2, r: float, col: Color, w: float) -> void:

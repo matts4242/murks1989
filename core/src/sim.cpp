@@ -80,6 +80,76 @@ GenStats World::generate(uint32_t s, int chunks_x, int chunks_y) {
     return st;
 }
 
+// Maximum range with the standard HE round, from FM 100-2-3 (1991), Jane's and the makers' data.
+// Rocket-assisted rounds (2S1 21.9 km, 2S3 24 km, M109A2 23.5 km, ...) are left out: few were
+// issued, and a 1989 company would not have them.
+static const GunInfo kGuns[] = {
+    // Warsaw Pact howitzers and guns
+    {"2S1", "122 mm SP howitzer 2S1", 15.3},
+    {"D-30", "122 mm howitzer D-30", 15.4},
+    {"D-30A", "122 mm howitzer D-30A", 15.4},
+    {"M-30", "122 mm howitzer M-30", 11.8},
+    {"M1938", "122 mm howitzer M-30", 11.8},
+    {"2S3", "152 mm SP howitzer 2S3", 18.5},
+    {"D-20", "152 mm gun-howitzer D-20", 17.4},
+    {"ML-20", "152 mm gun-howitzer ML-20", 17.2},
+    {"D-1", "152 mm howitzer D-1", 12.4},
+    {"DANA", "152 mm SP howitzer vz. 77 DANA", 18.7},
+    {"2S19", "152 mm SP howitzer 2S19", 24.7},
+    {"2A65", "152 mm howitzer 2A65", 24.7},
+    {"2S5", "152 mm SP gun 2S5", 27.0},
+    {"2A36", "152 mm gun 2A36", 27.0},
+    {"2S7", "203 mm SP gun 2S7", 37.5},
+    // Rocket launchers
+    {"BM-21", "122 mm MRL BM-21", 20.4},
+    {"RM-70", "122 mm MRL RM-70", 20.4},
+    {"BM-27", "220 mm MRL BM-27", 35.0},
+    // Mortars and gun-mortars
+    {"2S9", "120 mm SP gun-mortar 2S9", 8.8},
+    {"2S4", "240 mm SP mortar 2S4", 9.6},
+    {"2S12", "120 mm mortar 2S12", 7.1},
+    {"2B11", "120 mm mortar 2B11", 7.1},
+    {"M-1943", "120 mm mortar M-1943", 5.7},
+    {"PM-43", "120 mm mortar M-1943", 5.7},
+    {"2B9", "82 mm automatic mortar 2B9", 4.3},
+    {"2B14", "82 mm mortar 2B14", 4.3},
+    {"M-37", "82 mm mortar M-37", 3.0},
+    // NATO
+    {"M109", "155 mm SP howitzer M109", 14.6},
+    {"M109A1", "155 mm SP howitzer M109A1", 18.1},
+    {"M109A2", "155 mm SP howitzer M109A2", 18.1},
+    {"M109A3", "155 mm SP howitzer M109A3", 18.1},
+    {"M110", "203 mm SP howitzer M110", 16.8},
+    {"M110A2", "203 mm SP howitzer M110A2", 22.9},
+    {"M198", "155 mm howitzer M198", 18.1},
+    {"M114", "155 mm howitzer M114", 14.6},
+    {"FH-70", "155 mm howitzer FH-70", 24.0},
+    {"FH70", "155 mm howitzer FH-70", 24.0},
+    {"M101", "105 mm howitzer M101", 11.3},
+    {"M102", "105 mm howitzer M102", 11.5},
+    {"L118", "105 mm light gun L118", 17.2},
+    {"M270", "227 mm MLRS M270", 32.0},
+    {"MLRS", "227 mm MLRS M270", 32.0},
+    {"LARS", "110 mm MRL LARS", 14.0},
+    {"L16", "81 mm mortar L16", 5.7},
+    {"M252", "81 mm mortar M252", 5.6},
+    {"M29", "81 mm mortar M29", 4.6},
+    {"M30", "107 mm mortar M30", 6.8},
+};
+
+const GunInfo *gun_info(const std::string &e) {
+    auto alnum = [](char c) { return (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'); };
+    for (const GunInfo &g : kGuns) {
+        const size_t n = std::strlen(g.key);
+        for (size_t at = e.find(g.key); at != std::string::npos; at = e.find(g.key, at + 1)) {
+            const bool start = at == 0 || !alnum(e[at - 1]);
+            const bool end = at + n == e.size() || !alnum(e[at + n]);
+            if (start && end) return &g;
+        }
+    }
+    return nullptr;
+}
+
 bool World::load_map(const uint8_t *data, size_t size) {
     if (!map.load_from_memory(data, size)) return false;
     attach_map();
@@ -354,6 +424,103 @@ EngagementTime World::engagement_time(const Unit &u) const {
     return e;
 }
 
+int World::weapon_range(const Unit &u) {
+    const UnitTypeInfo &ti = unit_type_info(u.type);
+    if (!ti.indirect) return ti.weapon_range;
+    const GunInfo *g = gun_info(u.equipment);
+    return g ? (int)(g->range_km * 2.0f) : ti.weapon_range; // whole hexes inside the range
+}
+
+bool World::observes(const Unit &o, const Unit &t) const {
+    if (!o.alive || o.zone == Z_COLD) return false;
+    const int d = hex_distance(o.pos, t.pos);
+    return d <= (int)effective_spot_range(o) && line_of_sight(o.pos, t.pos, 3.0f, 2.5f);
+}
+
+FireNetLink World::fire_net_link(const Unit &u) const {
+    FireNetLink l;
+    if (!u.alive || u.formation < 0 || u.formation >= (int)formations.size()) return l;
+    const auto &members = formations[u.formation].members;
+    // Nearest guns of the formation, and whether m reaches them on the fire net.
+    auto guns_for = [&](const Unit &m, int &bat, int &dist) {
+        bat = -1;
+        dist = 1 << 30;
+        bool reach = false;
+        for (int id : members) {
+            const Unit &b = units[id];
+            if (!b.alive || b.type != U_ARTILLERY) continue;
+            const int d = hex_distance(m.pos, b.pos);
+            const bool r = d <= net_range(m, b);
+            if ((r && !reach) || (r == reach && d < dist)) {
+                bat = id;
+                dist = d;
+                reach = r;
+            }
+        }
+        return reach;
+    };
+    int bat, dist;
+    const bool reach = guns_for(u, bat, dist);
+    if (bat < 0) return l; // no guns: no fire net
+    if (u.type == U_ARTILLERY) {
+        l.role = FN_GUNS;
+        l.status = FN_DIRECT;
+        l.battery = u.id;
+        return l;
+    }
+    l.role = on_fire_net(u) ? FN_OBSERVER : FN_CALLER;
+    l.battery = bat;
+    l.distance = dist;
+    if (l.role == FN_OBSERVER && reach) {
+        l.status = FN_DIRECT;
+        return l;
+    }
+    // Relay: the nearest unit on the net within radio range that reaches the guns itself.
+    int best = 1 << 30;
+    for (int id : members) {
+        const Unit &m = units[id];
+        if (id == u.id || !m.alive || !on_fire_net(m)) continue;
+        const int d = hex_distance(u.pos, m.pos);
+        if (d > net_range(u, m) || d >= best) continue;
+        int mb = id, md = 0;
+        if (m.type != U_ARTILLERY && !guns_for(m, mb, md)) continue;
+        best = d;
+        l.status = FN_RELAY;
+        l.via = id;
+        l.battery = mb;
+        l.distance = d;
+    }
+    return l;
+}
+
+int World::fire_call(const Unit &b, const Unit &t, int *observer) const {
+    if (b.formation < 0 || b.formation >= (int)formations.size()) return -1;
+    const auto &members = formations[b.formation].members;
+    auto reaches_guns = [&](const Unit &m) {
+        return m.id == b.id || (on_fire_net(m) && hex_distance(m.pos, b.pos) <= net_range(m, b));
+    };
+    int best = -1;
+    for (int id : members) {
+        const Unit &o = units[id];
+        if (!observes(o, t)) continue;
+        if (reaches_guns(o)) {
+            if (observer) *observer = id;
+            return 0;
+        }
+        if (best >= 0) continue;
+        for (int mid : members) {
+            const Unit &m = units[mid];
+            if (mid == id || !m.alive || !on_fire_net(m)) continue;
+            if (hex_distance(o.pos, m.pos) <= net_range(o, m) && reaches_guns(m)) {
+                best = 1;
+                if (observer) *observer = id;
+                break;
+            }
+        }
+    }
+    return best;
+}
+
 int World::radio_range(const Unit &u) {
     return unit_type_info(u.type).mobility == M_FOOT ? RADIO_RANGE_FOOT : RADIO_RANGE;
 }
@@ -590,7 +757,7 @@ int World::set_standoff(int unit_id, int standoff) {
 int World::standoff_hexes(const Unit &u) const {
     uint8_t v = u.standoff == STANDOFF_DEFAULT ? (u.side == SIDE_PLAYER ? default_standoff : 0) : u.standoff;
     if (v == STANDOFF_DEFAULT) v = 0;
-    if (v == STANDOFF_WEAPONS) return unit_type_info(u.type).weapon_range;
+    if (v == STANDOFF_WEAPONS) return weapon_range(u);
     return v;
 }
 
@@ -1273,12 +1440,15 @@ void World::update_zones() {
     for (auto &u : units) {
         if (!u.alive) continue;
         int best = 1 << 30;
-        for_units_near(u.pos, WARM_RANGE, [&](const Unit &o) {
+        // Guns that reach further than the hot zone run the full model whenever an enemy is
+        // inside their range, so they can fire to their full range.
+        const int reach = std::max(HOT_RANGE, weapon_range(u));
+        for_units_near(u.pos, std::max(WARM_RANGE, reach), [&](const Unit &o) {
             if (o.side == u.side || !o.alive) return;
             int d = hex_distance(u.pos, o.pos);
             if (d < best) best = d;
         });
-        if (best <= HOT_RANGE) u.hot_until = time_min + HOT_HOLD_MIN;
+        if (best <= reach) u.hot_until = time_min + HOT_HOLD_MIN;
         if (time_min < u.hot_until) u.zone = Z_HOT;
         else if (best <= WARM_RANGE) u.zone = Z_WARM;
         else u.zone = Z_COLD;
@@ -1380,15 +1550,20 @@ void World::update_combat() {
         if (u.ammo <= 0) continue;
         if (u.roe == ROE_HOLD) continue;
         if (u.roe == ROE_RETURN && time_min - u.last_targeted > 5) continue;
-        int best = -1, best_d = 1 << 30;
-        for_units_near(u.pos, ti.weapon_range, [&](const Unit &t) {
+        int best = -1, best_d = 1 << 30, best_call = 0;
+        const int range = weapon_range(u);
+        for_units_near(u.pos, range, [&](const Unit &t) {
             if (t.side == u.side || !t.alive || !seen_by(t, u.side)) return;
             int d = hex_distance(u.pos, t.pos);
-            if (d > ti.weapon_range || d >= best_d) return;
+            if (d > range || d >= best_d) return;
             // Same sight line as spotting: whatever a unit can see in range, it can shoot at.
             if (!ti.indirect && !line_of_sight(u.pos, t.pos, 3.0f, 2.5f)) return;
+            // Guns fire only on what someone who can call fire on the fire net can see.
+            int call = 0;
+            if (ti.indirect && (call = fire_call(u, t)) < 0) return;
             best = t.id;
             best_d = d;
+            best_call = call;
         });
         if (best < 0) {
             u.acquired = -1;
@@ -1409,6 +1584,7 @@ void World::update_combat() {
             if (ti.indirect && u.last_target >= 0 && time_min - u.last_fired <= 10 &&
                 hex_distance(units[u.last_target].pos, units[best].pos) <= 2)
                 acquire = std::min(acquire, 2.0f * et.factor);
+            if (best_call > 0) acquire += FIRE_RELAY_MIN; // the call is passed on by an observer
             u.acquired = best;
             u.fire_cooldown = minutes(acquire);
             if (u.fire_cooldown > 0) continue;
@@ -1634,7 +1810,7 @@ void World::update_ai() {
         const int *off = slot_offsets[u.slot % 12];
         HexCoord goal{obj.col + off[0], obj.row + off[1]};
         if (!map.in_bounds(goal) || map.at(goal).terrain == T_WATER) goal = obj;
-        if (f.hunts_player && ((u.type == U_ARTILLERY && hex_distance(u.pos, obj) <= 16) ||
+        if (f.hunts_player && ((u.type == U_ARTILLERY && hex_distance(u.pos, obj) <= std::min(16, weapon_range(u) * 2 / 3)) ||
                                (u.type == U_HQ && hex_distance(u.pos, obj) <= 10))) {
             // Guns stand off about 8 km and fire from there; the HQ stays out of the fight.
             if (u.moving()) order_hold(u.id);
