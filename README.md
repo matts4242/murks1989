@@ -6,11 +6,11 @@ This build proves the risky technical core of the design plan (roadmap phase 1, 
 
 - **One map, no battle screen.** The real Poland and East Germany, about 1,050 × 780 km in 3.8 million 500 m hexes, built from satellite elevation and land-cover data. Zooming in on a contact *is* the battle.
 - **Company grouping on the theater map.** Zoomed out, each company's nearby platoons merge into one company counter. It shows the unit count, average strength and the company name. Detached platoons keep their own counter. Spotted hostile units are grouped by proximity only, because you don't know their organisation. Overlapping counters are pushed apart, with a leader line to their true position.
-- **Command panel.** The selection window (one unit or a whole company) has an Orders section:
-  - **Move modes.** Move, road march, deliberate or assault. The mode decides what a right-click orders.
-  - **Group orders.** Hold, fall back, regroup on the HQ, and rest & resupply.
-  - **Rules of engagement.** Fire at will, return fire only, or hold fire.
-  - **Break contact.** At heavy losses, at light losses, or never.
+- **Menus.** Every order and setting can be picked from a menu, and every menu item shows its key:
+  - **Right-click order menu.** Right-click a hex with your units selected and a menu opens at the cursor: Move, Road march, Deliberate move or Assault *here*, then Hold, Fall back, Regroup, Rest & resupply, Dismount / Mount up, and submenus for Fire, Break contact, Stand-off, Company default stand-off and Team (form, disband, select, formation, spread). Its title says who gets the order and how far away the hex is, with the terrain; a hostile counter under the cursor is named ("only an assault goes in"). With nothing selected it offers map commands. F / Q / E / R (or the panel's move buttons) arm one order instead, so the next right-click sends it at once with no menu; Esc disarms.
+  - **Menu bar.** Game (new game, quick save and load, pause menu, quit), View (the six overlays as checkboxes, centre, next unit, whole map), Time (speeds, step 15 minutes, WeGo pulse, auto-pause), Orders (the same orders as the right-click menu, for the selection) and Help (controls, the contract briefing, map credits). The clock, speed buttons and company stocks sit beside it.
+  - **Command panel.** The selection window (one unit, a team or a whole company) shows the unit's state, then the orders: move buttons that arm the next right-click; Hold, Fall back, Regroup, Resupply and Dismount / Mount up; dropdowns for Fire, Break contact, Stand-off, Company default, Formation and Spread ("Mixed" when the selection differs); and a Team menu. The Orders header folds the section away.
+  - **Title screen and pause menu.** The game opens on a title screen with the contract briefing: New campaign, Continue from the quick save, Controls, Map data credits, Quit. Esc in play opens the pause menu, which stops the clock and gives it back at the same speed on Resume: quick save and load, controls, briefing, credits, new game, quit to title or desktop.
 
   Every order and setting goes down the chain of command and arrives after the command delay. Counters show road-march, deliberate, assault and fire tags.
 - **Counters and movement in the Forward Defense style.** Each unit is a square counter in its side's colour (NATO blue, hostile red) with a white NATO symbol box and echelon marks (dots for sections and platoons, a bar for a company or battery). Own counters show how many elements are in the fight bottom-left (white when all are, yellow from half, red below half), one pip under the counter per vehicle, gun or squad (hollow once knocked out), and a short name when zoomed in. They also show an order badge top-left (M move, R road march, D deliberate, A assault, F falling back, G regroup, S rest); a yellow corner flag when morale is shaken (under 45) and white hatching when broken (under 25) or falling back; and a bar along the top while under fire, red when just hit. Orders still on their way show a yellow "+12′" tag. A unit sits in the hex the simulation has it in; when it moves a hex the counter glides there in a quarter second. Counters grow to fill the hex when zoomed in, units sharing a hex fan out diagonally inside it, and each can be clicked. Last-seen positions are faded with a dashed outline and "?".
@@ -43,6 +43,10 @@ This build proves the risky technical core of the design plan (roadmap phase 1, 
 
 The map is baked from real data by `tools/bake_region.py` (see "The real map" below). If the baked file is missing, or you pass `--procedural`, the game generates a fictional map instead.
 
+![Right-click order menu](docs/screenshots/21_order_menu.png)
+
+![Title screen](docs/screenshots/20_title_screen.png)
+
 ![Whole map](docs/screenshots/03_whole_map_overview.png)
 
 ![Company at Sulechów](docs/screenshots/01_company_close.png)
@@ -61,7 +65,8 @@ The prebuilt extension is in `game/bin/` (`libmurks.windows.template_debug.x86_6
 | --- | --- |
 | Left click | Select unit (Shift adds to the selection). On the theater map, clicking a company counter selects the whole group |
 | Double-click a unit / K | Select its whole company. The panel shows averages, men, contact status and a roster |
-| Right click | Move the selected units to that hex. A company keeps its layout, with spread capped at 3 km. Orders arrive after the command delay |
+| Right click | Order menu for the selection at that hex (with an armed order: send it at once). A company moved together keeps its layout, with spread capped at 3 km. Orders arrive after the command delay |
+| Esc | Close a dialog; cancel an armed order; otherwise open or close the pause menu |
 | Left or middle drag, WASD / arrows | Pan |
 | Mouse wheel | Zoom |
 | Space | Pause / resume |
@@ -71,13 +76,13 @@ The prebuilt extension is in `game/bin/` (`libmurks.windows.template_debug.x86_6
 | Tab / C | Next unit / centre on the selection |
 | M | Whole map |
 | O | Company grouping on or off. When on, it applies automatically once hexes are smaller than 14 px on screen |
-| F / Q / E / R | Right-click mode for the next order: move (hasty) / road march / deliberate / assault. After the order it goes back to move |
+| F / Q / E / R | Arm the next right-click: move (hasty) / road march / deliberate / assault, sent at once without the menu. After the order the right-click opens the menu again |
 | B / Y / N | Fall back / regroup on the company HQ / rest & resupply at the HQ (or on whoever took over from it) |
 | X | Cycle fire: at will, return fire, hold fire |
 | G / V / Z | Hex grid / line of sight of the selected unit / fidelity zones |
 | P | WeGo pulse: pause each time the HQ can issue orders |
 | U | Auto-pause on contacts and losses |
-| F1 | Show / hide all controls |
+| F1 | Show / hide the controls dialog |
 | F2 | Map data credits |
 | F5 / F9 | Quick save / quick load (one slot, in Godot's user folder) |
 | J / Shift+J | Form a team from the selection / disband the selection's teams |
@@ -205,6 +210,7 @@ Pass these after `--` when launching Godot:
 - `--groups=N`: number of hostile bands (default 24, about 212 units). Use 60 or more as a stress test.
 - `--procedural`: ignore the baked map and generate a fictional one.
 - `--autotest=DIR`: scripted run that saves screenshots and timing to `DIR`, then quits.
+- `--uitest`: scripted check of the menus (title screen, right-click menu, armed orders, Esc and the pause menu, dropdowns, View and Orders menus): pushes real input events and menu picks, checks what reaches the simulation, prints PASS / FAIL lines and exits non-zero on a failure. Needs a window (on a Linux server: `xvfb-run godot --path game -- --uitest`).
 
 Headless balance check (no window): `godot --headless --path game --script res://tests/playtest.gd -- 4 active` (or `passive`). It plays the scenario for N days and prints contact time, losses, supplies, the outcome and a save/load replay check.
 

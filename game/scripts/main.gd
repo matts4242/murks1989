@@ -32,8 +32,12 @@ var next_pulse := -1
 var show_los := false
 var show_zones := false
 var group_companies := true
-var move_mode := 0                 # what right-click orders: 0 hasty, 1 road march, 2 deliberate, 3 assault
-const MODE_NAMES := ["Move", "Road march", "Deliberate move", "Assault"]        # theater map: merge each company's nearby units into one counter
+var move_mode := -1                # armed right-click order: -1 none (right-click opens the order menu), 0 hasty, 1 road march, 2 deliberate, 3 assault
+const MODE_NAMES := ["Move", "Road march", "Deliberate move", "Assault"]
+static var skip_title := false     # New game from the menus: reload straight into play, past the title screen
+var menu_world_pos := Vector2.ZERO # where the right-click order menu was opened (world units)
+var resume_speed := 0              # speed to go back to when the pause menu closes
+var briefing_text := ""
 var formation_names := {}          # formation id -> name (own companies)
 var selected: Array[int] = []
 var snapshot := PackedFloat32Array()
@@ -71,6 +75,7 @@ var autotest_dir := ""
 var hostile_groups := HOSTILE_GROUPS
 var force_procedural := false
 var outcome_shown := 0             # outcome already announced with the end screen (0 none)
+var uitest := false                # --uitest: scripted check of the menus, then quit
 
 
 func _ready() -> void:
@@ -81,6 +86,8 @@ func _ready() -> void:
 			hostile_groups = a.substr(9).to_int()
 		elif a == "--procedural":
 			force_procedural = true
+		elif a == "--uitest":
+			uitest = true
 
 	camera = Camera2D.new()
 	add_child(camera)
@@ -108,7 +115,9 @@ func _ready() -> void:
 	hud.toggle_pressed.connect(_on_toggle)
 	hud.hold_pressed.connect(_order_hold)
 	hud.command.connect(_on_command)
+	hud.menu_action.connect(_on_menu_action)
 	hud.end_choice.connect(_on_end_choice)
+	hud.save_path = SAVE_FILE
 	hud.event_clicked.connect(func(p: Vector2) -> void: camera.position = p)
 
 	# Let the loading text draw before the heavy work starts.
@@ -146,12 +155,34 @@ func _start_world() -> void:
 	hud.set_toggle("Group", group_companies)
 	set_speed(0)
 	var obj: Dictionary = world.get_objectives()
-	hud.show_banner("Company Murks is billeted at %s. The %s is coming for you from the east.\nBreak it before it breaks you, and guard the HQ: without it orders crawl and supplies slow to half. Select a unit and right-click to move; Space starts the clock; F1 shows all controls." % [
-		obj.get("home", _home_name()), obj.get("enemy_name", "enemy")], 12.0)
+	briefing_text = "Company Murks is billeted at %s. The %s is coming for you from the east.\nBreak it before it breaks you, and guard the HQ: without it orders crawl and supplies slow to half." % [
+		obj.get("home", _home_name()), obj.get("enemy_name", "enemy")]
 	_poll_events()
 	ready_to_play = true
 	if autotest_dir != "":
 		_run_autotest()
+	elif uitest:
+		hud.show_title(_title_briefing())
+		_run_uitest()
+	elif skip_title:
+		skip_title = false
+		_begin_campaign()
+	else:
+		hud.show_title(_title_briefing())
+
+
+func _title_briefing() -> String:
+	var obj: Dictionary = world.get_objectives()
+	return ("[b]The contract[/b]\nCompany Murks is billeted at [color=#ffd98a]%s[/color], 14 April 1989. The [color=#ff9a80]%s[/color] is coming " +
+		"for you from the east. Break it: none of its %d fighting platoons left at 30%% strength or more. Keep three of " +
+		"your own platoons fighting, and guard the HQ: without it orders crawl and supplies slow to half.") % [
+		obj.get("home", _home_name()), obj.get("enemy_name", "enemy"), int(obj.get("enemy_start", 6))]
+
+
+## Leaves the title screen: the clock is still paused; the briefing says how to start.
+func _begin_campaign() -> void:
+	hud.hide_title()
+	hud.show_banner(briefing_text + "\nSelect a unit and right-click the map for orders. Space starts the clock; Esc opens the menu; F1 shows all controls.", 12.0)
 
 
 ## Baked maps are a MURKSMAP file compressed with zlib: "MURKSZ01", u64 raw size, data.
@@ -182,7 +213,8 @@ func _process(delta: float) -> void:
 	if not ready_to_play:
 		return
 	var _t_start := Time.get_ticks_usec()
-	_keyboard_pan(delta)
+	if not hud.is_modal():
+		_keyboard_pan(delta)
 
 	var eff := effective_speed()
 	if eff > 0:
@@ -292,6 +324,7 @@ func _update_orders_state() -> void:
 		lo = mini(lo, int(info["command_delay"]))
 		hi = maxi(hi, int(info["command_delay"]))
 	if roe == -2:
+		hud.set_has_own(false)
 		hud.set_team_state(false, false, -1, -1)
 		return
 	var teams := _selected_teams()
@@ -303,7 +336,15 @@ func _update_orders_state() -> void:
 			continue
 		shape = int(tm["shape"]) if shape == -1 or shape == int(tm["shape"]) else -2
 		spacing = int(tm["spacing"]) if spacing == -1 or spacing == int(tm["spacing"]) else -2
-	hud.set_team_state(not teams.is_empty(), _own_selected().size() >= 2, shape, spacing)
+	var team_name := String(_team(teams[0]).get("name", "")) if teams.size() == 1 else ""
+	hud.set_team_state(not teams.is_empty(), _own_selected().size() >= 2, shape, spacing, team_name)
+	var can_dis := false
+	var can_mnt := false
+	for id in _own_selected():
+		var mi: Dictionary = world.get_unit_info(id)
+		can_dis = can_dis or bool(mi.get("can_dismount", false))
+		can_mnt = can_mnt or bool(mi.get("can_mount", false))
+	hud.set_mount_state(can_dis, can_mnt)
 	var so := -2
 	for id in _own_selected():
 		var inf: Dictionary = world.get_unit_info(id)
@@ -434,6 +475,13 @@ func unit_position(id: int) -> Vector2:
 func _unhandled_input(event: InputEvent) -> void:
 	if not ready_to_play:
 		return
+	if hud.is_modal():
+		# Title screen or pause menu: only Esc and the help keys get through.
+		if event is InputEventKey and event.pressed and not event.echo:
+			var k := (event as InputEventKey).keycode
+			if k in [KEY_ESCAPE, KEY_F1, KEY_F2]:
+				_on_key(k)
+		return
 	if event is InputEventMouseButton:
 		var mb := event as InputEventMouseButton
 		if mb.button_index == MOUSE_BUTTON_WHEEL_UP and mb.pressed:
@@ -456,7 +504,11 @@ func _unhandled_input(event: InputEvent) -> void:
 					_click_select(mb.position, mb.shift_pressed)
 				dragging = false
 		elif mb.button_index == MOUSE_BUTTON_RIGHT and mb.pressed:
-			_order_move_to(get_global_mouse_position())
+			# An armed order (F/Q/E/R or the panel) goes at once; otherwise the order menu opens.
+			if move_mode >= 0 and not _own_selected().is_empty():
+				_order_move_to(_screen_to_world(mb.position))
+			else:
+				_open_order_menu(mb.position)
 	elif event is InputEventMouseMotion:
 		var mm := event as InputEventMouseMotion
 		if dragging:
@@ -477,9 +529,7 @@ func _on_key(key: Key) -> void:
 		KEY_3: set_speed(3)
 		KEY_4: set_speed(4)
 		KEY_5: set_speed(5)
-		KEY_PERIOD:
-			if speed_index == 0:
-				world.advance(15, 1000.0)
+		KEY_PERIOD: _step_15()
 		KEY_H: _order_hold()
 		KEY_G: _on_toggle("Grid")
 		KEY_V: _on_toggle("Sight")
@@ -487,9 +537,7 @@ func _on_key(key: Key) -> void:
 		KEY_P: _on_toggle("WeGo")
 		KEY_U: _on_toggle("Auto-pause")
 		KEY_TAB: _select_next()
-		KEY_K:
-			if not selected.is_empty():
-				_select_company_of(selected[0])
+		KEY_K: _on_command("select_company")
 		KEY_O: _on_toggle("Group")
 		KEY_T: _on_toggle("Direct command")
 		KEY_I: _on_toggle("Fire support")
@@ -505,14 +553,11 @@ func _on_key(key: Key) -> void:
 		KEY_N: _on_command("rest")
 		KEY_COMMA: _on_command("mount_toggle")
 		KEY_X: _cycle_roe()
-		KEY_C, KEY_HOME:
-			if not selected.is_empty():
-				camera.position = unit_position(selected[0])
-		KEY_M:
-			camera.position = world.get_world_size() * 0.5
-			camera.zoom = Vector2.ONE * clampf(get_viewport_rect().size.x / world.get_world_size().x * 0.95, ZOOM_MIN, ZOOM_MAX)
-		KEY_F1: hud.help_panel.visible = not hud.help_panel.visible
-		KEY_F2: hud.credits_panel.visible = not hud.credits_panel.visible
+		KEY_C, KEY_HOME: _on_menu_action("centre")
+		KEY_M: _on_menu_action("whole_map")
+		KEY_ESCAPE: _on_escape()
+		KEY_F1: hud.toggle_help()
+		KEY_F2: hud.toggle_credits()
 		KEY_F5: quick_save()
 		KEY_F9: quick_load()
 
@@ -550,6 +595,141 @@ func _on_toggle(name: String) -> void:
 			show_fs = not show_fs
 			hud.set_toggle(name, show_fs)
 			hud.show_toast("Fire support net (its own radio band): guns ringed thick with their range, observers (HQ and recon) linked to the guns they reach, other units dashed to the observer who relays their calls (+2 min). Grey dashes: cut off, nobody can pass on their calls. Guns only fire on what someone on the net can see." if show_fs else "Fire support overlay off.", 9.0)
+
+
+# --- Menus ------------------------------------------------------------------------------
+
+## Game-level actions from the menu bar, the title screen and the pause menu.
+func _on_menu_action(name: String) -> void:
+	match name:
+		"start": _begin_campaign()
+		"continue":
+			if FileAccess.file_exists(SAVE_FILE):
+				hud.hide_title()
+				quick_load()
+		"new_game":
+			skip_title = true
+			get_tree().reload_current_scene()
+		"title":
+			skip_title = false
+			get_tree().reload_current_scene()
+		"quit": get_tree().quit()
+		"save": quick_save()
+		"load":
+			if FileAccess.file_exists(SAVE_FILE):
+				hud.hide_pause()
+				hud.hide_title()
+				resume_speed = 0
+			quick_load()
+		"resume": _close_pause()
+		"pause_menu": _open_pause()
+		"help": hud.toggle_help()
+		"credits": hud.toggle_credits()
+		"briefing": hud.show_banner(briefing_text, 10.0)
+		"centre":
+			if not selected.is_empty():
+				camera.position = unit_position(selected[0])
+		"whole_map":
+			camera.position = world.get_world_size() * 0.5
+			camera.zoom = Vector2.ONE * clampf(get_viewport_rect().size.x / world.get_world_size().x * 0.95, ZOOM_MIN, ZOOM_MAX)
+		"next_unit": _select_next()
+		"step": _step_15()
+
+
+## Esc: close a dialog, else cancel an armed order, else open or close the pause menu.
+func _on_escape() -> void:
+	if hud.close_dialog() or hud.title_screen.visible:
+		return
+	if hud.pause_screen.visible:
+		_close_pause()
+	elif move_mode >= 0:
+		move_mode = -1
+		hud.show_toast("Armed order cancelled: right-click opens the order menu again.", 2.5)
+	else:
+		_open_pause()
+
+
+func _open_pause() -> void:
+	resume_speed = speed_index
+	if speed_index > 0:
+		set_speed(0)
+	hud.show_pause(world.get_time_string())
+
+
+func _close_pause() -> void:
+	hud.hide_pause()
+	if resume_speed > 0:
+		set_speed(resume_speed)
+	resume_speed = 0
+
+
+func _step_15() -> void:
+	if speed_index == 0:
+		world.advance(15, 1000.0)
+	else:
+		hud.show_toast("Pause first (Space), then step 15 minutes.", 2.5)
+
+
+## Right-click: the order menu for the selection, aimed at the hex under the cursor. With
+## nothing of ours selected it offers the map commands only.
+func _open_order_menu(screen_pos: Vector2) -> void:
+	menu_world_pos = _screen_to_world(screen_pos)
+	var own := _own_selected()
+	if own.is_empty():
+		hud.set_has_own(false)
+	else:
+		_update_orders_state()
+	var ctx := {}
+	var hex := world.world_to_hex(menu_world_pos)
+	var hi: Dictionary = world.get_hex_info(hex)
+	var where := "off the map"
+	if not hi.is_empty():
+		var bits: Array[String] = [String(hi["terrain"]), "%d m" % int(hi["elevation"])]
+		if hi.get("major_road", false): bits.append("main road")
+		elif hi.get("road", false): bits.append("road")
+		if hi.get("bridge", false): bits.append("bridge")
+		if hi.has("settlement"): bits.append(String(hi["settlement"]))
+		where = " · ".join(bits)
+	if own.is_empty():
+		ctx["title"] = "Map"
+		ctx["info"] = where
+	else:
+		var first: Dictionary = world.get_unit_info(own[0])
+		var nm := String(first.get("name", "?"))
+		var teams := _selected_teams()
+		var company := _whole_company(own)
+		if company != "":
+			nm = company
+		elif teams.size() == 1 and own.size() == (_team(teams[0]).get("units", PackedInt32Array()) as PackedInt32Array).size():
+			nm = String(_team(teams[0])["name"])
+		elif own.size() > 1:
+			nm = "%s +%d" % [nm, own.size() - 1]
+		ctx["title"] = "Orders: " + nm
+		ctx["info"] = "%.1f km away · %s" % [unit_position(own[0]).distance_to(menu_world_pos) / 1000.0, where]
+		ctx["can_move"] = not hi.is_empty()
+	# A hostile counter under the cursor: only an assault may go into its hex.
+	for i in range(overlay.drawn.size() - 1, -1, -1):
+		var dc: Dictionary = overlay.drawn[i]
+		if int(dc["side"]) != 0 and (dc["rect"] as Rect2).grow(3.0).has_point(screen_pos):
+			var ei: Dictionary = world.get_unit_info(int(dc["id"]))
+			ctx["enemy"] = "Hostile %s here: only an assault goes in" % String(ei.get("name", "unit"))
+			break
+	hud.open_order_menu(screen_pos, ctx)
+
+
+## The company's name if `ids` is exactly one whole company (two or more units), else "".
+func _whole_company(ids: Array[int]) -> String:
+	if ids.size() < 2 or not disp_row.has(ids[0]):
+		return ""
+	var fid := int(snapshot[int(disp_row[ids[0]]) * stride + 10])
+	for id in ids:
+		if not disp_row.has(id) or int(snapshot[int(disp_row[id]) * stride + 10]) != fid:
+			return ""
+	var members := 0
+	for i in snapshot.size() / stride:
+		if int(snapshot[i * stride + 10]) == fid:
+			members += 1
+	return formation_name(fid, ids[0]) if members == ids.size() else ""
 
 
 func _keyboard_pan(delta: float) -> void:
@@ -694,6 +874,7 @@ func _order_move_to(world_pos: Vector2) -> void:
 	if own.is_empty():
 		hud.show_toast("Select one of your units first (left click).")
 		return
+	var mode := maxi(move_mode, 0)
 	var hex := world.world_to_hex(world_pos)
 	var lo := 1 << 30
 	var hi := 0
@@ -723,23 +904,23 @@ func _order_move_to(world_pos: Vector2) -> void:
 		var target := hex
 		if movers.size() > 1:
 			# A road march closes up into a column; other moves keep a 3 km spread.
-			var offset := (unit_position(id) - centroid).limit_length(1000.0 if move_mode == 1 else 3000.0)
+			var offset := (unit_position(id) - centroid).limit_length(1000.0 if mode == 1 else 3000.0)
 			target = world.world_to_hex(world_pos + offset)
 		var d := -1
 		if lead_team.has(id):
-			d = world.order_group_move(lead_team[id], target, move_mode)
+			d = world.order_group_move(lead_team[id], target, mode)
 			if d < 0:
-				d = world.order_group_move(lead_team[id], hex, move_mode)
+				d = world.order_group_move(lead_team[id], hex, mode)
 			if d >= 0:
 				var tm := _team(lead_team[id])
 				team_names.append("%s (%s, %d units)" % [tm["name"], String(tm["shape_name"]).to_lower(), (tm["units"] as PackedInt32Array).size()])
 				sent += (tm["units"] as PackedInt32Array).size() - 1
 		else:
-			d = world.order_move(id, target, move_mode)
+			d = world.order_move(id, target, mode)
 			if d < 0:
-				d = world.order_move(id, hex + SLOT_OFFSETS[k % SLOT_OFFSETS.size()], move_mode)
+				d = world.order_move(id, hex + SLOT_OFFSETS[k % SLOT_OFFSETS.size()], mode)
 			if d < 0:
-				d = world.order_move(id, hex, move_mode)
+				d = world.order_move(id, hex, mode)
 		if d >= 0:
 			sent += 1
 			lo = mini(lo, d)
@@ -750,16 +931,27 @@ func _order_move_to(world_pos: Vector2) -> void:
 	pings.append({"pos": world.hex_to_world(hex), "t": Time.get_ticks_msec(), "color": Color(0.6, 0.85, 1.0)})
 	var when := ("%d min" % lo) if lo == hi else ("%d-%d min" % [lo, hi])
 	var teams_txt := (" Moving in formation: %s." % ", ".join(team_names)) if not team_names.is_empty() else ""
-	hud.show_toast("%s ordered for %d unit%s. Orders take effect in %s (command delay).%s" % [MODE_NAMES[move_mode], sent, "" if sent == 1 else "s", when, teams_txt])
-	# A move mode applies to one order: the next right-click is a plain move again.
-	move_mode = 0
+	hud.show_toast("%s ordered for %d unit%s. Orders take effect in %s (command delay).%s" % [MODE_NAMES[mode], sent, "" if sent == 1 else "s", when, teams_txt])
+	# An armed order applies once: the next right-click opens the order menu again.
+	move_mode = -1
 
 
 ## Orders from the command panel (and their keys).
 func _on_command(name: String) -> void:
-	if name.begins_with("mode_"):
+	if name.begins_with("move_here_"):
+		# From the right-click menu: this order, to the hex the menu was opened on.
+		move_mode = name.substr(10).to_int()
+		_order_move_to(menu_world_pos)
+	elif name.begins_with("mode_"):
 		move_mode = name.substr(5).to_int()
-		hud.show_toast("Right-click the map to order: %s." % MODE_NAMES[move_mode], 3.0)
+		hud.show_toast("Next right-click sends: %s. Esc cancels." % MODE_NAMES[move_mode], 3.0)
+	elif name == "disarm":
+		move_mode = -1
+	elif name == "centre_here":
+		camera.position = menu_world_pos
+	elif name == "select_company":
+		if not selected.is_empty():
+			_select_company_of(selected[0])
 	elif name == "hold":
 		_order_hold()
 	elif name == "fall_back" or name == "regroup" or name == "rest":
@@ -1190,6 +1382,150 @@ func quick_load() -> void:
 	hud.show_toast("Loaded the quick save (%s). Paused." % world.get_time_string(), 4.0)
 
 
+# --- Automated check of the menus: real input events and menu picks, checked against the sim. ---
+
+func _run_uitest() -> void:
+	var res := [0, 0] # passed, failed
+	var check := func(ok: bool, what: String) -> void:
+		res[0 if ok else 1] += 1
+		print("UITEST %s  %s" % ["PASS" if ok else "FAIL", what])
+	var vs := get_viewport_rect().size
+	await _frames(3)
+
+	check.call(hud.title_screen.visible and hud.is_modal(), "title screen up at start")
+	_push_key(KEY_SPACE)
+	await _frames(2)
+	check.call(speed_index == 0, "Space does nothing behind the title screen")
+	hud.menu_action.emit("start")
+	await _frames(2)
+	check.call(not hud.title_screen.visible and not hud.is_modal(), "New campaign leaves the title screen")
+
+	# Right-click a hex with the whole company selected: the order menu opens; pick Road march here.
+	_select_company_of(0)
+	var own := _own_selected()
+	_push_click(MOUSE_BUTTON_RIGHT, vs * Vector2(0.3, 0.45))
+	await _frames(3)
+	check.call(hud.order_popup.visible, "right-click opens the order menu")
+	check.call(_menu_pick(hud.order_popup, "Road march here"), "order menu has Road march here")
+	hud.order_popup.hide()
+	var all_road := true
+	for id in own:
+		var inf: Dictionary = world.get_unit_info(id)
+		all_road = all_road and inf.get("pending", false) and String(inf.get("pending_kind", "")) == "Road march"
+	check.call(all_road and own.size() >= 5, "Road march here reaches all %d units of the company" % own.size())
+	check.call(move_mode == -1, "nothing armed after a menu order")
+
+	# Arm an assault with R: the next right-click sends it at once, no menu.
+	selected = [1]
+	_push_key(KEY_R)
+	await _frames(1)
+	check.call(move_mode == 3, "R arms an assault")
+	_push_click(MOUSE_BUTTON_RIGHT, vs * Vector2(0.25, 0.3))
+	await _frames(3)
+	var inf1: Dictionary = world.get_unit_info(1)
+	check.call(not hud.order_popup.visible and String(inf1.get("pending_kind", "")) == "Assault", "armed right-click sends the assault without a menu")
+	check.call(move_mode == -1, "the armed order is used up")
+
+	# Esc: cancels an armed order first, then opens and closes the pause menu (clock stops, resumes).
+	_push_key(KEY_Q)
+	_push_key(KEY_ESCAPE)
+	await _frames(1)
+	check.call(move_mode == -1 and not hud.pause_screen.visible, "Esc cancels an armed road march")
+	set_speed(2)
+	_push_key(KEY_ESCAPE)
+	await _frames(1)
+	check.call(hud.pause_screen.visible and speed_index == 0, "Esc opens the pause menu and stops the clock")
+	_push_key(KEY_ESCAPE)
+	await _frames(1)
+	check.call(not hud.pause_screen.visible and speed_index == 2, "Esc again resumes at the same speed")
+	set_speed(0)
+
+	# Panel dropdowns send the same commands as the keys.
+	hud.roe_opt.item_selected.emit(2)
+	inf1 = world.get_unit_info(1)
+	check.call(inf1.get("stance_pending", false) and int(inf1.get("pending_roe", -1)) == 2, "Fire dropdown: hold fire on its way")
+	hud.standoff_opt.item_selected.emit(3) # 2 km
+	inf1 = world.get_unit_info(1)
+	check.call(int(inf1.get("pending_standoff", -1)) == 4, "Stand-off dropdown: 2 km on its way")
+
+	# Menu bar: View > Hex grid toggles the grid.
+	var grid_was: bool = map_view.show_grid
+	var view := hud.menu_buttons["View"] as MenuButton
+	view.show_popup()
+	await _frames(2)
+	check.call(_menu_pick(view.get_popup(), "Hex grid"), "View menu has Hex grid")
+	view.get_popup().hide()
+	check.call(map_view.show_grid != grid_was, "View > Hex grid toggles the grid")
+
+	# Orders menu > Team > Form team, then the Formation dropdown sets wedge.
+	selected = [1, 2, 3]
+	_update_orders_state()
+	var om := hud.menu_buttons["Orders"] as MenuButton
+	om.show_popup()
+	await _frames(2)
+	var team_sub := _submenu_of(om.get_popup(), "Team")
+	check.call(team_sub != null and _menu_pick(team_sub, "Form team from the selection"), "Orders > Team > Form team")
+	om.get_popup().hide()
+	var teams := _selected_teams()
+	check.call(teams.size() == 1, "a team is formed from three units")
+	_update_orders_state()
+	hud.shape_opt.item_selected.emit(3)
+	check.call(teams.size() == 1 and int(_team(teams[0]).get("shape", -1)) == 3, "Formation dropdown: wedge")
+
+	# Right-click menu with nothing selected: map commands only.
+	selected.clear()
+	_push_click(MOUSE_BUTTON_RIGHT, vs * Vector2(0.5, 0.5))
+	await _frames(3)
+	var has_move := false
+	for i in hud.order_popup.item_count:
+		has_move = has_move or hud.order_popup.get_item_text(i).ends_with(" here") and hud.order_popup.get_item_text(i) != "Centre the map here"
+	check.call(hud.order_popup.visible and not has_move, "nothing selected: map menu without move orders")
+	hud.order_popup.hide()
+
+	print("UITEST done: %d passed, %d failed" % [res[0], res[1]])
+	get_tree().quit(1 if res[1] > 0 else 0)
+
+
+func _frames(n: int) -> void:
+	for i in n:
+		await get_tree().process_frame
+
+
+func _push_key(k: Key) -> void:
+	for down in [true, false]:
+		var ev := InputEventKey.new()
+		ev.keycode = k
+		ev.physical_keycode = k
+		ev.pressed = down
+		get_viewport().push_input(ev)
+
+
+func _push_click(button: MouseButton, pos: Vector2) -> void:
+	for down in [true, false]:
+		var ev := InputEventMouseButton.new()
+		ev.button_index = button
+		ev.pressed = down
+		ev.position = pos
+		ev.global_position = pos
+		get_viewport().push_input(ev)
+
+
+## Picks the menu item labelled `text` as a click would; false if there is none or it is disabled.
+func _menu_pick(pm: PopupMenu, text: String) -> bool:
+	for i in pm.item_count:
+		if pm.get_item_text(i) == text and not pm.is_item_disabled(i):
+			pm.id_pressed.emit(pm.get_item_id(i))
+			return true
+	return false
+
+
+func _submenu_of(pm: PopupMenu, prefix: String) -> PopupMenu:
+	for i in pm.item_count:
+		if pm.get_item_text(i).begins_with(prefix) and pm.get_item_submenu_node(i) != null:
+			return pm.get_item_submenu_node(i)
+	return null
+
+
 # --- Automated check: scripted run that saves screenshots, then quits. ---------------------
 
 func _run_autotest() -> void:
@@ -1201,6 +1537,28 @@ func _run_autotest() -> void:
 	show_zones = false
 
 	await _shot("01_company_close", hq, 0.07)
+	# Menus: the title screen, the right-click order menu, the menu bar, a dropdown, the pause menu, controls.
+	hud.show_title(_title_briefing())
+	await _shot("20_title_screen", hq, 0.05)
+	hud.hide_title()
+	_select_company_of(0)
+	await _shot("21_order_menu", hq, 0.05, func() -> void:
+		_open_order_menu(get_viewport_rect().size * Vector2(0.36, 0.42)))
+	hud.order_popup.hide()
+	selected = [1]
+	await _shot("22_view_menu", hq, 0.05, func() -> void:
+		(hud.menu_buttons["View"] as MenuButton).show_popup())
+	(hud.menu_buttons["View"] as MenuButton).get_popup().hide()
+	await _shot("23_standoff_dropdown", hq, 0.05, func() -> void:
+		hud.standoff_opt.show_popup())
+	hud.standoff_opt.get_popup().hide()
+	_open_pause()
+	await _shot("24_pause_menu", hq, 0.05)
+	_close_pause()
+	hud.toggle_help()
+	await _shot("25_controls", hq, 0.05)
+	hud.toggle_help()
+	selected = [0]
 
 	# Teams: lock four live combat units under the first as leader, wedge at 1 km, march west.
 	var pick: Array[int] = []
@@ -1368,7 +1726,8 @@ func _shot_fire(name: String, zoom: float) -> void:
 	print("Autotest: saved %s with %d effects live" % [name, fx.size()])
 
 
-func _shot(name: String, pos: Vector2, zoom: float) -> void:
+## `before_capture`, if given, runs once the view has settled (e.g. to open a menu).
+func _shot(name: String, pos: Vector2, zoom: float, before_capture := Callable()) -> void:
 	camera.position = pos
 	camera.zoom = Vector2.ONE * zoom
 	_refresh_snapshot()
@@ -1378,6 +1737,10 @@ func _shot(name: String, pos: Vector2, zoom: float) -> void:
 		hud.refresh(world.get_time_string(), world.is_night(), world.get_stats(), Engine.get_frames_per_second(), "chunks %d" % map_view.chunks.size())
 		_refresh_selection_panel()
 		await get_tree().process_frame
+	if before_capture.is_valid():
+		before_capture.call()
+		for i in 4:
+			await get_tree().process_frame
 	await RenderingServer.frame_post_draw
 	var img := get_viewport().get_texture().get_image()
 	img.save_png(autotest_dir.path_join(name + ".png"))

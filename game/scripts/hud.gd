@@ -1,50 +1,112 @@
 class_name Hud
 extends Control
-## Interface built in code: top bar (clock, speed, stocks, toggles),
-## unit panel, event log, hover status line, help and banners.
+## Interface built in code, all under one Theme:
+## - menu bar (Game, View, Time, Orders, Help) with the clock, speeds and stocks;
+## - unit panel: status text, order buttons and dropdowns for fire, break contact,
+##   stand-off, formation and spread, and a Team menu;
+## - right-click order menu at the cursor (the same orders, aimed at that hex);
+## - title screen, Esc pause menu, controls and map-credits dialogs, end screen;
+## - event log, hover status line, banners and toasts.
+## Every menu item sends the same command as its key, so menus, panel and keys never disagree.
 
 signal speed_pressed(index: int)
 signal toggle_pressed(name: String)
 signal hold_pressed
-signal command(name: String)        # order buttons in the unit / company panel
+signal command(name: String)        # orders: panel, Orders menu, right-click menu (same names the keys use)
+signal menu_action(name: String)    # game level: start, continue, new_game, title, quit, save, load, resume, ...
 signal event_clicked(pos: Vector2)
 signal end_choice(choice: String)    # end screen: continue / load / restart / quit
 
+const TEXT := Color(0.92, 0.92, 0.86)
+const MUTED := Color(0.72, 0.77, 0.68)
+const AMBER := Color(1.0, 0.86, 0.5)
+const HINT := Color(0.6, 0.85, 1.0)
+
+# Stand-off choices: [label, value]; 255 = company default, 254 = the unit's weapon range, else hexes.
+const STANDOFFS := [["Default", 255], ["Fight", 0], ["1 km", 2], ["2 km", 4], ["3 km", 6], ["Weapon range", 254]]
+const TEAM_COLORS := [Color("#f2c14e"), Color("#39c0b0"), Color("#c77dff"), Color("#8bd450"),
+	Color("#ff8c42"), Color("#5ab0ff"), Color("#ff6f91"), Color("#d9d9d9")]
+const SPREADS := [1, 2, 4] # hexes between formation slots: 500 m, 1 km, 2 km
+const SPREAD_NAMES := ["500 m", "1 km", "2 km"]
+const MOVES := [
+	["Move", KEY_F, "Hasty move: normal speed, shoots on the move at a penalty."],
+	["Road march", KEY_Q, "Fast on roads, slow off them. Shoots badly; a bunched column is easy to hit."],
+	["Deliberate move", KEY_E, "Slow (x1.5 time). Stays concealed in cover and shoots as if halted."],
+	["Assault", KEY_R, "Slightly slower. Presses the attack and may enter enemy-held hexes; breaks contact only at heavier losses."]]
+const ROES := [["At will", "Engage anything in range and sight."],
+	["Return fire", "Only shoot back when fired upon. Good for scouts and ambushes."],
+	["Hold fire", "Never fire. Stays hidden; will not defend itself."]]
+const BREAKS := [["Heavy loss", "Fall back on its own below 30% strength or morale 25."],
+	["Light loss", "Fall back early: below 60% strength or morale 45. Preserves the company."],
+	["Never", "Hold on until morale collapses (below 8)."]]
+const SHAPES := [["Keep", "Hold the team's present layout around its leader."],
+	["Column", "One behind the other along the line of march."],
+	["Line", "Abreast of the leader, across the line of march."],
+	["Wedge", "A V behind the leader: the leader at the point."]]
+# Overlay toggles in the View and Time menus: [toggle name, menu label, key].
+const VIEW_TOGGLES := [["Group", "Company grouping on the theater map", KEY_O],
+	["Direct command", "Direct command: who takes orders from whom", KEY_T],
+	["Fire support", "Fire support net and gun ranges", KEY_I],
+	["Grid", "Hex grid", KEY_G], ["Sight", "Line of sight of the selected unit", KEY_V],
+	["Zones", "Simulation fidelity zones", KEY_Z]]
+const SPEED_ITEMS := [["Pause", KEY_SPACE], ["1 min per second", KEY_1], ["5 min per second", KEY_2],
+	["30 min per second", KEY_3], ["2 hours per second", KEY_4], ["Max", KEY_5]]
+
 var main: Node
+var save_path := ""                 # quick save file, set by main (enables Continue / Quick load)
+
+# Top bar
 var time_label: Label
 var speed_buttons: Array[Button] = []
 var cap_label: Label
 var stock_label: Label
 var perf_label: Label
-var toggle_buttons := {}
+var menu_buttons := {}              # "Game" / "View" / ... -> MenuButton
+var toggle_state := {}              # toggle name -> on
+var speed_index := 0
+
+# Unit panel
 var unit_panel: PanelContainer
 var unit_text: RichTextLabel
-var hold_button: Button
 var orders_box: VBoxContainer
+var orders_body: VBoxContainer
+var orders_toggle: Button
+var delay_label: Label
 var mode_buttons: Array[Button] = []
-var roe_buttons: Array[Button] = []
-var brk_buttons: Array[Button] = []
+var mount_button: Button
+var roe_opt: OptionButton
+var brk_opt: OptionButton
+var standoff_opt: OptionButton
+var default_opt: OptionButton
+var shape_opt: OptionButton
+var spread_opt: OptionButton
+var team_menu: MenuButton
 var orders_hint: Label
-var team_buttons: Array[Button] = []    # form, disband, select
-var shape_buttons: Array[Button] = []
-var spread_buttons: Array[Button] = []
-var standoff_buttons: Array[Button] = []
-var default_buttons: Array[Button] = []
-# Stand-off choices: [label, value]; 255 = company default, 254 = the unit's weapon range, else hexes.
-const STANDOFFS := [["Default", 255], ["Fight", 0], ["1 km", 2], ["2 km", 4], ["3 km", 6], ["Wpn", 254]]
-const TEAM_COLORS := [Color("#f2c14e"), Color("#39c0b0"), Color("#c77dff"), Color("#8bd450"),
-	Color("#ff8c42"), Color("#5ab0ff"), Color("#ff6f91"), Color("#d9d9d9")]
-const SPREADS := [1, 2, 4] # hexes between formation slots: 500 m, 1 km, 2 km
+# What the selection can do and how it is set, for the dropdowns and both order menus.
+# roe / brk / shape / spacing / standoff: -1 mixed across the selection.
+var ord := {"has_own": false, "mode": -1, "roe": 0, "brk": 0, "pending": false, "delay": "",
+	"in_team": false, "can_form": false, "shape": -1, "spacing": -1, "team": "",
+	"standoff": 255, "default_standoff": 0, "can_dismount": false, "can_mount": false}
+
+var order_popup: PopupMenu          # right-click menu
 var log_box: VBoxContainer
 var status_label: Label
-var help_panel: PanelContainer
-var credits_panel: PanelContainer
+var objective_label: RichTextLabel
 var banner: Label
 var banner_until := 0
 var toast: Label
 var toast_until := 0
 var loading: Label
-var objective_label: RichTextLabel
+
+# Dialogs and screens
+var help_panel: Control
+var credits_panel: Control
+var title_screen: Control
+var title_brief: RichTextLabel
+var title_continue: Button
+var pause_screen: Control
+var pause_time: Label
+var pause_load: Button
 var end_panel: PanelContainer
 var end_title: Label
 var end_text: RichTextLabel
@@ -54,25 +116,96 @@ var end_load_button: Button
 func _ready() -> void:
 	mouse_filter = Control.MOUSE_FILTER_IGNORE
 	set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	theme = _make_theme()
 	_build_top_bar()
 	_build_unit_panel()
 	_build_log()
-	_build_status_and_help()
+	_build_status()
 	_build_banners()
 	_build_end_screen()
+	_build_pause_menu()
+	_build_title_screen()
+	help_panel = _build_dialog("Controls", _controls_body())
+	credits_panel = _build_dialog("Map data credits", _credits_body())
+	order_popup = _new_popup()
+	add_child(order_popup)
+	_build_loading()
 
 
-func _panel_style(alpha := 0.86) -> StyleBoxFlat:
+# --- Look ----------------------------------------------------------------------------
+
+func _box(bg: Color, border: Color, radius := 3, pad := Vector4(8, 4, 8, 4)) -> StyleBoxFlat:
 	var sb := StyleBoxFlat.new()
-	sb.bg_color = Color(0.07, 0.08, 0.07, alpha)
-	sb.border_color = Color(0.45, 0.5, 0.4, 0.6)
+	sb.bg_color = bg
+	sb.border_color = border
 	sb.set_border_width_all(1)
-	sb.set_corner_radius_all(4)
-	sb.content_margin_left = 10
-	sb.content_margin_right = 10
-	sb.content_margin_top = 6
-	sb.content_margin_bottom = 6
+	sb.set_corner_radius_all(radius)
+	sb.content_margin_left = pad.x
+	sb.content_margin_top = pad.y
+	sb.content_margin_right = pad.z
+	sb.content_margin_bottom = pad.w
 	return sb
+
+
+func _panel_style(alpha := 0.88) -> StyleBoxFlat:
+	return _box(Color(0.07, 0.08, 0.07, alpha), Color(0.45, 0.5, 0.4, 0.6), 4, Vector4(10, 6, 10, 6))
+
+
+## One theme for every panel, button, dropdown, menu and tooltip: dark olive, amber when on.
+func _make_theme() -> Theme:
+	var th := Theme.new()
+	th.default_font_size = 14
+	th.set_stylebox("panel", "PanelContainer", _panel_style())
+	var bn := _box(Color(0.12, 0.14, 0.11, 0.96), Color(0.3, 0.34, 0.26))
+	var bh := _box(Color(0.19, 0.22, 0.16, 0.98), Color(0.55, 0.6, 0.44))
+	var bp := _box(Color(0.3, 0.28, 0.15, 0.98), Color(0.9, 0.76, 0.38))
+	var bd := _box(Color(0.1, 0.11, 0.1, 0.6), Color(0.18, 0.2, 0.18))
+	var clear := _box(Color(0, 0, 0, 0), Color(0, 0, 0, 0))
+	for t in ["Button", "OptionButton", "MenuButton"]:
+		th.set_stylebox("normal", t, clear if t == "MenuButton" else bn)
+		th.set_stylebox("hover", t, bh)
+		th.set_stylebox("pressed", t, bp)
+		th.set_stylebox("hover_pressed", t, bp)
+		th.set_stylebox("disabled", t, clear if t == "MenuButton" else bd)
+		th.set_stylebox("focus", t, StyleBoxEmpty.new())
+		th.set_color("font_color", t, TEXT)
+		th.set_color("font_hover_color", t, Color(1, 1, 0.94))
+		th.set_color("font_pressed_color", t, AMBER)
+		th.set_color("font_hover_pressed_color", t, AMBER)
+		th.set_color("font_focus_color", t, TEXT)
+		th.set_color("font_disabled_color", t, Color(0.45, 0.48, 0.43))
+	th.set_stylebox("panel", "PopupMenu", _box(Color(0.08, 0.09, 0.08, 0.98), Color(0.5, 0.55, 0.42), 4, Vector4(4, 6, 4, 6)))
+	th.set_stylebox("hover", "PopupMenu", _box(Color(0.26, 0.28, 0.17), Color(0.75, 0.68, 0.38), 2, Vector4(0, 0, 0, 0)))
+	var sep := StyleBoxLine.new()
+	sep.color = Color(0.45, 0.5, 0.4, 0.55)
+	sep.thickness = 1
+	th.set_stylebox("separator", "PopupMenu", sep)
+	th.set_stylebox("labeled_separator_left", "PopupMenu", sep)
+	th.set_stylebox("labeled_separator_right", "PopupMenu", sep)
+	th.set_color("font_color", "PopupMenu", TEXT)
+	th.set_color("font_hover_color", "PopupMenu", Color(1, 0.95, 0.75))
+	th.set_color("font_disabled_color", "PopupMenu", Color(0.52, 0.55, 0.5))
+	th.set_color("font_accelerator_color", "PopupMenu", Color(0.62, 0.68, 0.58))
+	th.set_color("font_separator_color", "PopupMenu", AMBER)
+	th.set_constant("v_separation", "PopupMenu", 7)
+	th.set_constant("h_separation", "PopupMenu", 8)
+	th.set_constant("item_start_padding", "PopupMenu", 10)
+	th.set_constant("item_end_padding", "PopupMenu", 14)
+	th.set_font_size("font_size", "PopupMenu", 14)
+	th.set_font_size("font_separator_size", "PopupMenu", 12)
+	th.set_stylebox("panel", "TooltipPanel", _box(Color(0.06, 0.07, 0.06, 0.97), Color(0.5, 0.55, 0.42), 3, Vector4(8, 5, 8, 5)))
+	th.set_color("font_color", "TooltipLabel", TEXT)
+	th.set_font_size("font_size", "TooltipLabel", 13)
+	var hl := StyleBoxLine.new()
+	hl.color = Color(0.45, 0.5, 0.4, 0.6)
+	th.set_stylebox("separator", "HSeparator", hl)
+	var vl := StyleBoxLine.new()
+	vl.color = Color(0.45, 0.5, 0.4, 0.6)
+	vl.vertical = true
+	th.set_stylebox("separator", "VSeparator", vl)
+	th.set_color("font_color", "Label", TEXT)
+	th.set_color("default_color", "RichTextLabel", TEXT)
+	return th
 
 
 func _offsets(c: Control, l: float, t: float, r: float, b: float) -> void:
@@ -82,7 +215,7 @@ func _offsets(c: Control, l: float, t: float, r: float, b: float) -> void:
 	c.offset_bottom = b
 
 
-func _label(text: String, size := 15, color := Color(0.92, 0.92, 0.86)) -> Label:
+func _label(text: String, size := 15, color := TEXT) -> Label:
 	var l := Label.new()
 	l.text = text
 	l.add_theme_font_size_override("font_size", size)
@@ -99,224 +232,6 @@ func _button(text: String, toggle := false) -> Button:
 	return b
 
 
-func _build_top_bar() -> void:
-	var bar := PanelContainer.new()
-	bar.add_theme_stylebox_override("panel", _panel_style(0.92))
-	bar.set_anchors_preset(Control.PRESET_TOP_WIDE)
-	add_child(bar)
-	var row := HBoxContainer.new()
-	row.add_theme_constant_override("separation", 10)
-	bar.add_child(row)
-
-	time_label = _label("--", 18, Color(1, 0.95, 0.8))
-	time_label.custom_minimum_size.x = 210
-	row.add_child(time_label)
-
-	var names := ["Pause", "1 min", "5 min", "30 min", "2 h", "Max"]  # game time per real second
-	for i in names.size():
-		var b := _button(names[i], true)
-		b.tooltip_text = ("Key Space" if i == 0 else "Game time per real second. Key %d" % i)
-		b.pressed.connect(func() -> void: speed_pressed.emit(i))
-		row.add_child(b)
-		speed_buttons.append(b)
-	cap_label = _label("", 13, Color(1, 0.55, 0.4))
-	cap_label.custom_minimum_size.x = 150
-	row.add_child(cap_label)
-
-	row.add_child(VSeparator.new())
-	stock_label = _label("", 14)
-	row.add_child(stock_label)
-	var spacer := Control.new()
-	spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	spacer.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	row.add_child(spacer)
-
-	var toggles := [["Group", "O"], ["Direct command", "T"], ["Fire support", "I"], ["Grid", "G"], ["Sight", "V"], ["Zones", "Z"], ["WeGo", "P"], ["Auto-pause", "U"]]
-	for t in toggles:
-		var b := _button(t[0], true)
-		b.tooltip_text = "Key %s" % t[1]
-		if t[0] == "Direct command":
-			b.tooltip_text = "Key T. Outline and link every unit to the HQ or team leader it takes orders from: solid inside the zone, amber outside it (orders ×1.5), red by courier."
-		elif t[0] == "Fire support":
-			b.tooltip_text = "Key I. The fire support radio net: guns with their range rings, observers on the net, who relays whose calls for fire, and who is cut off."
-		var key: String = t[0]
-		b.pressed.connect(func() -> void: toggle_pressed.emit(key))
-		row.add_child(b)
-		toggle_buttons[key] = b
-	perf_label = _label("", 11, Color(0.7, 0.75, 0.7))
-	perf_label.custom_minimum_size.x = 210
-	row.add_child(perf_label)
-
-
-func _build_unit_panel() -> void:
-	unit_panel = PanelContainer.new()
-	unit_panel.add_theme_stylebox_override("panel", _panel_style())
-	unit_panel.set_anchors_preset(Control.PRESET_TOP_RIGHT)
-	_offsets(unit_panel, -372, 60, -8, 60)
-	unit_panel.custom_minimum_size = Vector2(364, 0)
-	unit_panel.visible = false
-	add_child(unit_panel)
-	var col := VBoxContainer.new()
-	unit_panel.add_child(col)
-	unit_text = RichTextLabel.new()
-	unit_text.bbcode_enabled = true
-	unit_text.fit_content = true
-	unit_text.scroll_active = false
-	unit_text.custom_minimum_size = Vector2(310, 0)
-	unit_text.add_theme_font_size_override("normal_font_size", 14)
-	unit_text.add_theme_font_size_override("bold_font_size", 16)
-	unit_text.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	col.add_child(unit_text)
-	_build_orders(col)
-
-
-## Command panel: orders for everything selected (one unit or a whole company).
-## All of them travel down the chain of command and arrive after the command delay.
-func _build_orders(parent: Control) -> void:
-	orders_box = VBoxContainer.new()
-	orders_box.add_theme_constant_override("separation", 4)
-	parent.add_child(orders_box)
-	orders_box.add_child(HSeparator.new())
-	orders_box.add_child(_label("Orders", 14, Color(1, 0.92, 0.7)))
-
-	# Move mode: what a right-click on the map will order.
-	var moves := GridContainer.new()
-	moves.columns = 4
-	moves.add_theme_constant_override("h_separation", 4)
-	orders_box.add_child(moves)
-	var move_defs := [["Move", "F", "Hasty move: normal speed, shoots on the move at a penalty."],
-		["Road march", "Q", "Fast on roads, slow off them. Shoots badly; a bunched column is easy to hit."],
-		["Deliberate", "E", "Slow (x1.5 time). Stays concealed in cover and shoots as if halted."],
-		["Assault", "R", "Slightly slower. Presses the attack: breaks contact only at heavier losses."]]
-	for i in move_defs.size():
-		var d: Array = move_defs[i]
-		var b := _small_button(d[0], true, "%s Then right-click the map. Key %s" % [d[2], d[1]])
-		b.pressed.connect(func() -> void: command.emit("mode_%d" % i))
-		moves.add_child(b)
-		mode_buttons.append(b)
-
-	var acts := GridContainer.new()
-	acts.columns = 4
-	acts.add_theme_constant_override("h_separation", 4)
-	orders_box.add_child(acts)
-	var act_defs := [["Hold", "hold", "Stop and hold position. Key H"],
-		["Fall back", "fall_back", "Withdraw about 6 km away from known enemies, or back to the HQ. Key B"],
-		["Regroup", "regroup", "Form up around the company HQ (or whoever took over from it). Key Y"],
-		["Resupply", "rest", "Rest & resupply at the HQ (or whoever took over from it): double refill rate, faster recovery. Key N"],
-		["Dismount", "dismount", "APC/IFV platoons: the vehicles halt and the squads get out (one per vehicle), to move and fight on foot. Key , (comma)"],
-		["Mount up", "mount", "The squads walk back to their vehicles, which halt and wait, and mount up (2 min once together). Order the vehicles or the squads. Key , (comma)"]]
-	for d in act_defs:
-		var name: String = d[1]
-		var b := _small_button(d[0], false, d[2])
-		b.pressed.connect(func() -> void: command.emit(name))
-		acts.add_child(b)
-	hold_button = acts.get_child(0) as Button
-
-	var roe_row := HBoxContainer.new()
-	orders_box.add_child(roe_row)
-	var roe_l := _label("Fire", 12, Color(0.75, 0.8, 0.7))
-	roe_l.custom_minimum_size.x = 82
-	roe_row.add_child(roe_l)
-	var roe_defs := [["At will", "Engage anything in range and sight."],
-		["Return fire", "Only shoot back when fired upon. Good for scouts and ambushes."],
-		["Hold fire", "Never fire. Stays hidden; will not defend itself."]]
-	for i in roe_defs.size():
-		var b := _small_button(roe_defs[i][0], true, roe_defs[i][1] + " Key X cycles.")
-		b.pressed.connect(func() -> void: command.emit("roe_%d" % i))
-		roe_row.add_child(b)
-		roe_buttons.append(b)
-
-	var brk_row := HBoxContainer.new()
-	orders_box.add_child(brk_row)
-	var brk_l := _label("Break contact", 12, Color(0.75, 0.8, 0.7))
-	brk_l.custom_minimum_size.x = 82
-	brk_row.add_child(brk_l)
-	var brk_defs := [["Heavy loss", "Fall back on its own below 30% strength or morale 25."],
-		["Light loss", "Fall back early: below 60% strength or morale 45. Preserves the company."],
-		["Never", "Hold on until morale collapses (below 8)."]]
-	for i in brk_defs.size():
-		var b := _small_button(brk_defs[i][0], true, brk_defs[i][1])
-		b.pressed.connect(func() -> void: command.emit("brk_%d" % i))
-		brk_row.add_child(b)
-		brk_buttons.append(b)
-
-	# Teams: lock units under a leader, who commands them within its zone; members keep formation.
-	var team_row := HBoxContainer.new()
-	orders_box.add_child(team_row)
-	var team_l := _label("Team", 12, Color(0.75, 0.8, 0.7))
-	team_l.custom_minimum_size.x = 82
-	team_row.add_child(team_l)
-	var team_defs := [["Form team", "team_form", "Lock the selected units under one leader: the HQ if it is selected, else the first unit you selected. Key J"],
-		["Disband", "team_disband", "Release the selected units' teams. Shift+J"],
-		["Select", "team_select", "Select the whole team of the selected unit. Key L (or double-click a team member)"]]
-	for d in team_defs:
-		var cmd: String = d[1]
-		var b := _small_button(d[0], false, d[2])
-		b.pressed.connect(func() -> void: command.emit(cmd))
-		team_row.add_child(b)
-		team_buttons.append(b)
-
-	var shape_row := HBoxContainer.new()
-	orders_box.add_child(shape_row)
-	var shape_l := _label("Formation", 12, Color(0.75, 0.8, 0.7))
-	shape_l.custom_minimum_size.x = 82
-	shape_row.add_child(shape_l)
-	var shape_defs := [["Keep", "Hold the team's present layout around its leader."],
-		["Column", "One behind the other along the line of march."],
-		["Line", "Abreast of the leader, across the line of march."],
-		["Wedge", "A V behind the leader: the leader at the point."]]
-	for i in shape_defs.size():
-		var b := _small_button(shape_defs[i][0], true, shape_defs[i][1] + " Members keep station on the leader; the team moves at its slowest member's pace.")
-		b.pressed.connect(func() -> void: command.emit("shape_%d" % i))
-		shape_row.add_child(b)
-		shape_buttons.append(b)
-
-	var spread_row := HBoxContainer.new()
-	orders_box.add_child(spread_row)
-	var spread_l := _label("Spread", 12, Color(0.75, 0.8, 0.7))
-	spread_l.custom_minimum_size.x = 82
-	spread_row.add_child(spread_l)
-	var spread_names := ["500 m", "1 km", "2 km"]
-	for i in SPREADS.size():
-		var sp: int = SPREADS[i]
-		var b := _small_button(spread_names[i], true, "Distance between formation places. 500 m is the doctrinal platoon spacing (300–600 m); 2 km is wider than one company's 1 km command zone.")
-		b.pressed.connect(func() -> void: command.emit("spread_%d" % sp))
-		spread_row.add_child(b)
-		spread_buttons.append(b)
-
-	# Stand-off: stay and fight, or keep known enemies at a distance (halt short of it, pull
-	# back to it). Per unit through the command delay; "Default" follows the company default.
-	var so_row := HBoxContainer.new()
-	orders_box.add_child(so_row)
-	var so_l := _label("Stand-off", 12, Color(0.75, 0.8, 0.7))
-	so_l.custom_minimum_size.x = 66
-	so_row.add_child(so_l)
-	for i in STANDOFFS.size():
-		var v: int = STANDOFFS[i][1]
-		var tip := "Use the company default." if v == 255 else ("Stay and fight: close with the enemy, no stand-off." if v == 0 else
-			("Keep known enemies at this unit's own weapon range." if v == 254 else "Halt %s short of known enemies and pull back out if they come closer." % STANDOFFS[i][0]))
-		var b := _small_button(STANDOFFS[i][0], true, tip + " An assault ignores stand-off; team members go by their leader's.")
-		b.pressed.connect(func() -> void: command.emit("standoff_%d" % v))
-		so_row.add_child(b)
-		standoff_buttons.append(b)
-	var def_row := HBoxContainer.new()
-	orders_box.add_child(def_row)
-	var def_l := _label("Co. default", 12, Color(0.75, 0.8, 0.7))
-	def_l.custom_minimum_size.x = 66
-	def_row.add_child(def_l)
-	for i in range(1, STANDOFFS.size()):
-		var v: int = STANDOFFS[i][1]
-		var b := _small_button(STANDOFFS[i][0], true, "Company standing order for every unit set to Default.")
-		b.pressed.connect(func() -> void: command.emit("default_standoff_%d" % v))
-		def_row.add_child(b)
-		default_buttons.append(b)
-
-	orders_hint = _label("", 12, Color(0.6, 0.85, 1.0))
-	orders_hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	orders_hint.custom_minimum_size.x = 340
-	orders_box.add_child(orders_hint)
-
-
 func _small_button(text: String, toggle: bool, tip: String) -> Button:
 	var b := _button(text, toggle)
 	b.add_theme_font_size_override("font_size", 12)
@@ -325,39 +240,521 @@ func _small_button(text: String, toggle: bool, tip: String) -> Button:
 	return b
 
 
-## Highlights the armed move mode and the selection's fire / break-contact
-## settings (-1 = mixed across the selection). `pending` marks settings still on their way.
+## A dropdown: `items` are [label, tooltip]; picking one emits command `cmd_fmt % values[i]`.
+func _dropdown(items: Array, values: Array, cmd_fmt: String, tip: String) -> OptionButton:
+	var o := OptionButton.new()
+	o.focus_mode = Control.FOCUS_NONE
+	o.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	o.add_theme_font_size_override("font_size", 12)
+	o.tooltip_text = tip
+	o.fit_to_longest_item = false
+	o.clip_text = true
+	for i in items.size():
+		o.add_item(String(items[i][0]), i)
+		o.set_item_tooltip(i, String(items[i][1]))
+	o.item_selected.connect(func(i: int) -> void: command.emit(cmd_fmt % values[i]))
+	return o
+
+
+## Shows the selection's value in a dropdown; -1 means it differs across the selection.
+func _show_choice(o: OptionButton, index: int) -> void:
+	if index < 0:
+		if o.selected != -1:
+			o.select(-1)
+		o.text = "Mixed"
+	elif o.selected != index:
+		o.select(index)
+
+
+# --- Menus ---------------------------------------------------------------------------
+
+func _new_popup() -> PopupMenu:
+	var pm := PopupMenu.new()
+	pm.set_meta("acts", [])
+	pm.id_pressed.connect(_on_menu_id.bind(pm))
+	return pm
+
+
+func _reset(pm: PopupMenu) -> void:
+	for c in pm.get_children():
+		if c is PopupMenu:
+			pm.remove_child(c)
+			c.queue_free()
+	pm.clear()
+	pm.set_meta("acts", [])
+
+
+## Adds an item. `kind`: cmd (orders), menu (game actions), toggle, speed. `check`: -1 plain,
+## 0/1 a checkbox, 2/3 a radio item (off/on).
+func _add(pm: PopupMenu, label: String, kind: String, arg: Variant, key := 0, enabled := true, check := -1, tip := "") -> void:
+	var acts: Array = pm.get_meta("acts")
+	var id := acts.size()
+	acts.append([kind, arg])
+	if check < 0:
+		pm.add_item(label, id, key as Key)
+	elif check < 2:
+		pm.add_check_item(label, id, key as Key)
+	else:
+		pm.add_radio_check_item(label, id, key as Key)
+	var idx := pm.item_count - 1
+	if check >= 0:
+		pm.set_item_checked(idx, check == 1 or check == 3)
+	pm.set_item_disabled(idx, not enabled)
+	if tip != "":
+		pm.set_item_tooltip(idx, tip)
+
+
+func _note(pm: PopupMenu, text: String) -> void:
+	pm.add_item(text)
+	pm.set_item_disabled(pm.item_count - 1, true)
+
+
+func _submenu(pm: PopupMenu, label: String, enabled := true) -> PopupMenu:
+	var sub := _new_popup()
+	pm.add_submenu_node_item(label, sub)
+	pm.set_item_disabled(pm.item_count - 1, not enabled)
+	return sub
+
+
+func _on_menu_id(id: int, pm: PopupMenu) -> void:
+	var acts: Array = pm.get_meta("acts", [])
+	if id < 0 or id >= acts.size():
+		return
+	var a: Array = acts[id]
+	match String(a[0]):
+		"cmd": command.emit(String(a[1]))
+		"menu": menu_action.emit(String(a[1]))
+		"toggle": toggle_pressed.emit(String(a[1]))
+		"speed": speed_pressed.emit(int(a[1]))
+
+
+func _fill_game(pm: PopupMenu) -> void:
+	_reset(pm)
+	var has_save := save_path != "" and FileAccess.file_exists(save_path)
+	_add(pm, "New game", "menu", "new_game")
+	pm.add_separator()
+	_add(pm, "Quick save", "menu", "save", KEY_F5)
+	_add(pm, "Quick load", "menu", "load", KEY_F9, has_save)
+	pm.add_separator()
+	_add(pm, "Pause menu", "menu", "pause_menu", KEY_ESCAPE)
+	_add(pm, "Quit to title screen", "menu", "title")
+	_add(pm, "Quit to desktop", "menu", "quit")
+
+
+func _fill_view(pm: PopupMenu) -> void:
+	_reset(pm)
+	pm.add_separator("Overlays")
+	for t in VIEW_TOGGLES:
+		_add(pm, String(t[1]), "toggle", t[0], int(t[2]), true, 1 if toggle_state.get(t[0], false) else 0)
+	pm.add_separator("Camera")
+	_add(pm, "Centre on the selection", "menu", "centre", KEY_C)
+	_add(pm, "Next unit", "menu", "next_unit", KEY_TAB)
+	_add(pm, "Whole map", "menu", "whole_map", KEY_M)
+
+
+func _fill_time(pm: PopupMenu) -> void:
+	_reset(pm)
+	pm.add_separator("Game time per real second")
+	for i in SPEED_ITEMS.size():
+		_add(pm, String(SPEED_ITEMS[i][0]), "speed", i, int(SPEED_ITEMS[i][1]), true, 3 if speed_index == i else 2)
+	pm.add_separator()
+	_add(pm, "Step 15 minutes", "menu", "step", KEY_PERIOD, speed_index == 0, -1, "Only while paused.")
+	pm.add_separator()
+	_add(pm, "WeGo pulse: pause each HQ order cycle", "toggle", "WeGo", KEY_P, true, 1 if toggle_state.get("WeGo", false) else 0)
+	_add(pm, "Auto-pause on contacts and losses", "toggle", "Auto-pause", KEY_U, true, 1 if toggle_state.get("Auto-pause", false) else 0)
+
+
+func _fill_help(pm: PopupMenu) -> void:
+	_reset(pm)
+	_add(pm, "Controls", "menu", "help", KEY_F1)
+	_add(pm, "Contract briefing", "menu", "briefing")
+	_add(pm, "Map data credits", "menu", "credits", KEY_F2)
+
+
+func _fill_orders_bar(pm: PopupMenu) -> void:
+	fill_orders(pm, false, {})
+
+
+## Orders for the selection. `at_hex`: the right-click menu, whose move orders go to the hex
+## under the cursor (`ctx` gives its title and notes); otherwise the Orders menu, whose move
+## items arm the next right-click.
+func fill_orders(pm: PopupMenu, at_hex: bool, ctx: Dictionary) -> void:
+	_reset(pm)
+	if not ord["has_own"]:
+		if at_hex:
+			pm.add_separator(String(ctx.get("title", "Map")))
+			if ctx.has("info"):
+				_note(pm, String(ctx["info"]))
+			_add(pm, "Centre the map here", "cmd", "centre_here")
+			_add(pm, "Whole map", "menu", "whole_map", KEY_M)
+			pm.add_separator()
+		_note(pm, "Select one of your units to give orders")
+		return
+	if at_hex:
+		pm.add_separator(String(ctx.get("title", "Orders")))
+		if ctx.has("info"):
+			_note(pm, String(ctx["info"]))
+		if ctx.has("enemy"):
+			_note(pm, String(ctx["enemy"]))
+		var can_move: bool = ctx.get("can_move", true)
+		for i in MOVES.size():
+			_add(pm, String(MOVES[i][0]) + " here", "cmd", "move_here_%d" % i, int(MOVES[i][1]), can_move, -1, String(MOVES[i][2]))
+		pm.add_separator()
+	else:
+		pm.add_separator("Next right-click sends")
+		_add(pm, "Order menu (nothing armed)", "cmd", "disarm", 0, true, 3 if int(ord["mode"]) < 0 else 2,
+			"Right-click opens this menu at the clicked hex.")
+		for i in MOVES.size():
+			_add(pm, String(MOVES[i][0]), "cmd", "mode_%d" % i, int(MOVES[i][1]), true, 3 if int(ord["mode"]) == i else 2,
+				String(MOVES[i][2]) + " Then right-click the map.")
+		pm.add_separator()
+	_add(pm, "Hold position", "cmd", "hold", KEY_H, true, -1, "Stop and hold. A team leader halts its team.")
+	_add(pm, "Fall back", "cmd", "fall_back", KEY_B, true, -1, "Withdraw about 6 km away from known enemies, or back to the HQ.")
+	_add(pm, "Regroup on the HQ", "cmd", "regroup", KEY_Y, true, -1, "Form up around the company HQ (or whoever took over from it).")
+	_add(pm, "Rest & resupply", "cmd", "rest", KEY_N, true, -1, "At the HQ (or whoever took over from it): double refill rate, faster recovery.")
+	if ord["can_dismount"]:
+		_add(pm, "Dismount the squads", "cmd", "dismount", KEY_COMMA, true, -1, "The vehicles halt and the squads get out to move and fight on foot.")
+	if ord["can_mount"]:
+		_add(pm, "Mount up", "cmd", "mount", KEY_COMMA, true, -1, "The squads walk back to their vehicles and climb aboard (2 min once together).")
+	pm.add_separator("Standing orders")
+	var fire := _submenu(pm, "Fire: " + _choice_name(ROES, int(ord["roe"])))
+	for i in ROES.size():
+		_add(fire, String(ROES[i][0]), "cmd", "roe_%d" % i, KEY_X if i == 0 else 0, true, 3 if int(ord["roe"]) == i else 2, String(ROES[i][1]))
+	var brk := _submenu(pm, "Break contact: " + _choice_name(BREAKS, int(ord["brk"])).to_lower())
+	for i in BREAKS.size():
+		_add(brk, String(BREAKS[i][0]), "cmd", "brk_%d" % i, 0, true, 3 if int(ord["brk"]) == i else 2, String(BREAKS[i][1]))
+	var so := _submenu(pm, "Stand-off: " + _standoff_label(int(ord["standoff"])))
+	for s in STANDOFFS:
+		var v: int = s[1]
+		_add(so, String(s[0]), "cmd", "standoff_%d" % v, 0, true, 3 if int(ord["standoff"]) == v else 2, _standoff_tip(v))
+	var dso := _submenu(pm, "Company default stand-off: " + _standoff_label(int(ord["default_standoff"])))
+	for i in range(1, STANDOFFS.size()):
+		var v: int = STANDOFFS[i][1]
+		_add(dso, String(STANDOFFS[i][0]), "cmd", "default_standoff_%d" % v, 0, true, 3 if int(ord["default_standoff"]) == v else 2,
+			"Company standing order for every unit set to Default. Applies at once.")
+	var team := _submenu(pm, "Team" + ((": " + String(ord["team"])) if String(ord["team"]) != "" else ""))
+	_fill_team(team)
+	if at_hex:
+		pm.add_separator()
+		_add(pm, "Centre the map here", "cmd", "centre_here")
+	if String(ord["delay"]) != "":
+		pm.add_separator()
+		_note(pm, "Orders arrive in %s (command delay)" % ord["delay"])
+
+
+func _fill_team(pm: PopupMenu) -> void:
+	if pm.item_count > 0:
+		_reset(pm)
+	var in_team: bool = ord["in_team"]
+	_add(pm, "Form team from the selection", "cmd", "team_form", KEY_J, ord["can_form"], -1,
+		"Lock the selected units under one leader: the HQ if it is selected, else the first unit you selected.")
+	_add(pm, "Disband", "cmd", "team_disband", KEY_MASK_SHIFT | KEY_J, in_team, -1, "Release the selected units' teams.")
+	_add(pm, "Select the whole team", "cmd", "team_select", KEY_L, in_team)
+	_add(pm, "Select the whole company", "cmd", "select_company", KEY_K)
+	pm.add_separator("Formation")
+	for i in SHAPES.size():
+		_add(pm, String(SHAPES[i][0]), "cmd", "shape_%d" % i, 0, in_team, 3 if in_team and int(ord["shape"]) == i else 2,
+			String(SHAPES[i][1]) + " Members keep station on the leader; the team moves at its slowest member's pace.")
+	pm.add_separator("Spread")
+	for i in SPREADS.size():
+		_add(pm, SPREAD_NAMES[i], "cmd", "spread_%d" % SPREADS[i], 0, in_team, 3 if in_team and int(ord["spacing"]) == SPREADS[i] else 2,
+			"Distance between formation places. 500 m is the doctrinal platoon spacing.")
+
+
+func _choice_name(list: Array, i: int) -> String:
+	return String(list[i][0]) if i >= 0 and i < list.size() else "mixed"
+
+
+func _standoff_label(v: int) -> String:
+	for s in STANDOFFS:
+		if int(s[1]) == v:
+			return String(s[0]).to_lower() if v != 255 else "company default"
+	return "mixed"
+
+
+func _standoff_tip(v: int) -> String:
+	var tip := "Use the company default." if v == 255 else ("Stay and fight: close with the enemy, no stand-off." if v == 0 else
+		("Keep known enemies at this unit's own weapon range." if v == 254 else "Halt %.1f km short of known enemies and pull back out if they come closer." % (v * 0.5)))
+	return tip + " An assault ignores stand-off; team members go by their leader's."
+
+
+## Right-click order menu at `screen_pos`. `ctx`: title, info, enemy, can_move.
+func open_order_menu(screen_pos: Vector2, ctx: Dictionary) -> void:
+	fill_orders(order_popup, true, ctx)
+	order_popup.reset_size()
+	var vs := get_viewport_rect().size
+	var sz := Vector2(order_popup.size)
+	var p := screen_pos + Vector2(2, 2)
+	if p.x + sz.x > vs.x:
+		p.x = maxf(0.0, screen_pos.x - sz.x - 2)
+	if p.y + sz.y > vs.y:
+		p.y = maxf(0.0, vs.y - sz.y)
+	order_popup.popup(Rect2i(Vector2i(p), Vector2i(sz)))
+
+
+func is_menu_open() -> bool:
+	if order_popup.visible:
+		return true
+	for k in menu_buttons:
+		if (menu_buttons[k] as MenuButton).get_popup().visible:
+			return true
+	return false
+
+
+# --- Top bar ---------------------------------------------------------------------------
+
+func _build_top_bar() -> void:
+	var bar := PanelContainer.new()
+	bar.add_theme_stylebox_override("panel", _box(Color(0.07, 0.08, 0.07, 0.94), Color(0.45, 0.5, 0.4, 0.6), 0, Vector4(6, 4, 10, 4)))
+	bar.set_anchors_preset(Control.PRESET_TOP_WIDE)
+	add_child(bar)
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 6)
+	bar.add_child(row)
+
+	var menus := [["Game", _fill_game], ["View", _fill_view], ["Time", _fill_time], ["Orders", _fill_orders_bar], ["Help", _fill_help]]
+	for m in menus:
+		var mb := MenuButton.new()
+		mb.text = m[0]
+		mb.flat = false
+		mb.switch_on_hover = true
+		mb.focus_mode = Control.FOCUS_NONE
+		mb.set_disable_shortcuts(true) # the keys are handled once, by main
+		mb.add_theme_font_size_override("font_size", 15)
+		var pm := mb.get_popup()
+		pm.set_meta("acts", [])
+		pm.id_pressed.connect(_on_menu_id.bind(pm))
+		var fill: Callable = m[1]
+		pm.about_to_popup.connect(fill.bind(pm))
+		row.add_child(mb)
+		menu_buttons[m[0]] = mb
+	row.add_child(VSeparator.new())
+
+	time_label = _label("--", 18, Color(1, 0.95, 0.8))
+	time_label.custom_minimum_size.x = 200
+	row.add_child(time_label)
+	var names := ["Pause", "1 min", "5 min", "30 min", "2 h", "Max"]  # game time per real second
+	for i in names.size():
+		var b := _button(names[i], true)
+		b.tooltip_text = ("Pause / resume. Key Space" if i == 0 else "Game time per real second. Key %d" % i)
+		b.pressed.connect(func() -> void: speed_pressed.emit(i))
+		row.add_child(b)
+		speed_buttons.append(b)
+	cap_label = _label("", 13, Color(1, 0.55, 0.4))
+	cap_label.custom_minimum_size.x = 120
+	row.add_child(cap_label)
+	row.add_child(VSeparator.new())
+	stock_label = _label("", 14)
+	stock_label.tooltip_text = "Company stocks: diesel, ammunition, food, and men on the rolls."
+	stock_label.mouse_filter = Control.MOUSE_FILTER_PASS
+	row.add_child(stock_label)
+	var spacer := Control.new()
+	spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	spacer.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	row.add_child(spacer)
+	perf_label = _label("", 11, Color(0.6, 0.65, 0.6))
+	perf_label.custom_minimum_size.x = 200
+	perf_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	row.add_child(perf_label)
+
+
+# --- Unit panel ------------------------------------------------------------------------
+
+func _build_unit_panel() -> void:
+	unit_panel = PanelContainer.new()
+	unit_panel.set_anchors_preset(Control.PRESET_TOP_RIGHT)
+	_offsets(unit_panel, -392, 52, -8, 52)
+	unit_panel.custom_minimum_size = Vector2(384, 0)
+	unit_panel.visible = false
+	add_child(unit_panel)
+	var col := VBoxContainer.new()
+	unit_panel.add_child(col)
+	unit_text = RichTextLabel.new()
+	unit_text.bbcode_enabled = true
+	unit_text.fit_content = true
+	unit_text.scroll_active = false
+	unit_text.custom_minimum_size = Vector2(340, 0)
+	unit_text.add_theme_font_size_override("normal_font_size", 14)
+	unit_text.add_theme_font_size_override("bold_font_size", 16)
+	unit_text.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	col.add_child(unit_text)
+	_build_orders(col)
+
+
+## Orders: everything selected (one unit, a team or a company). Every order and setting travels
+## down the chain of command and arrives after the command delay.
+func _build_orders(parent: Control) -> void:
+	orders_box = VBoxContainer.new()
+	orders_box.add_theme_constant_override("separation", 5)
+	parent.add_child(orders_box)
+	orders_box.add_child(HSeparator.new())
+	var head := HBoxContainer.new()
+	orders_box.add_child(head)
+	orders_toggle = _button("▾ Orders", false)
+	orders_toggle.flat = true
+	orders_toggle.add_theme_color_override("font_color", AMBER)
+	orders_toggle.tooltip_text = "Show or hide the orders. Right-click the map for the order menu at any time."
+	orders_toggle.pressed.connect(func() -> void:
+		orders_body.visible = not orders_body.visible
+		orders_toggle.text = ("▾ Orders" if orders_body.visible else "▸ Orders"))
+	head.add_child(orders_toggle)
+	var sp := Control.new()
+	sp.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	head.add_child(sp)
+	delay_label = _label("", 12, MUTED)
+	head.add_child(delay_label)
+
+	orders_body = VBoxContainer.new()
+	orders_body.add_theme_constant_override("separation", 5)
+	orders_box.add_child(orders_body)
+
+	# Arm the next right-click with a move (none armed: right-click opens the order menu).
+	var moves := HBoxContainer.new()
+	moves.add_theme_constant_override("separation", 4)
+	orders_body.add_child(moves)
+	var short := ["Move", "Road march", "Deliberate", "Assault"]
+	for i in MOVES.size():
+		var b := _small_button(short[i], true, "%s Arms the next right-click: it sends this order at once instead of opening the menu. Key %s; Esc cancels." % [
+			MOVES[i][2], OS.get_keycode_string(MOVES[i][1])])
+		b.pressed.connect(func() -> void: command.emit(("mode_%d" % i) if b.button_pressed else "disarm"))
+		moves.add_child(b)
+		mode_buttons.append(b)
+
+	var acts := HBoxContainer.new()
+	acts.add_theme_constant_override("separation", 4)
+	orders_body.add_child(acts)
+	for d in [["Hold", "hold", "Stop and hold position. A team leader halts its team. Key H"],
+			["Fall back", "fall_back", "Withdraw about 6 km away from known enemies, or back to the HQ. Key B"],
+			["Regroup", "regroup", "Form up around the company HQ (or whoever took over from it). Key Y"],
+			["Resupply", "rest", "Rest & resupply at the HQ (or whoever took over from it): double refill rate, faster recovery. Key N"]]:
+		var name: String = d[1]
+		var b := _small_button(d[0], false, d[2])
+		b.pressed.connect(func() -> void: command.emit(name))
+		acts.add_child(b)
+	mount_button = _small_button("Dismount", false, "APC/IFV platoons: dismount the squads, or mount them up again. Key , (comma)")
+	mount_button.pressed.connect(func() -> void: command.emit("mount_toggle"))
+	acts.add_child(mount_button)
+
+	var grid := GridContainer.new()
+	grid.columns = 4
+	grid.add_theme_constant_override("h_separation", 6)
+	grid.add_theme_constant_override("v_separation", 4)
+	orders_body.add_child(grid)
+	roe_opt = _dropdown(ROES, [0, 1, 2], "roe_%d", "When the unit may open fire. Key X cycles.")
+	brk_opt = _dropdown(BREAKS, [0, 1, 2], "brk_%d", "When the unit falls back on its own.")
+	var so_items: Array = []
+	var so_vals: Array = []
+	for s in STANDOFFS:
+		so_items.append([s[0], _standoff_tip(int(s[1]))])
+		so_vals.append(s[1])
+	standoff_opt = _dropdown(so_items, so_vals, "standoff_%d", "Stay and fight, or keep known enemies at a distance: halt short of it and pull back out to it.")
+	default_opt = _dropdown(so_items.slice(1), so_vals.slice(1), "default_standoff_%d", "Company standing order for every unit set to Default. Applies at once.")
+	shape_opt = _dropdown(SHAPES, [0, 1, 2, 3], "shape_%d", "The team's formation around its leader.")
+	var sp_items: Array = []
+	for i in SPREADS.size():
+		sp_items.append([SPREAD_NAMES[i], "Distance between formation places. 500 m is the doctrinal platoon spacing (300–600 m)."])
+	spread_opt = _dropdown(sp_items, SPREADS, "spread_%d", "Distance between the team's formation places.")
+	for pair in [["Fire", roe_opt], ["Break off", brk_opt], ["Stand-off", standoff_opt], ["Co. default", default_opt],
+			["Formation", shape_opt], ["Spread", spread_opt]]:
+		var l := _label(pair[0], 12, MUTED)
+		l.custom_minimum_size.x = 64
+		grid.add_child(l)
+		grid.add_child(pair[1])
+
+	var team_row := HBoxContainer.new()
+	orders_body.add_child(team_row)
+	var tl := _label("Team", 12, MUTED)
+	tl.custom_minimum_size.x = 64
+	team_row.add_child(tl)
+	team_menu = MenuButton.new()
+	team_menu.text = "No team  ▾"
+	team_menu.flat = false
+	team_menu.focus_mode = Control.FOCUS_NONE
+	team_menu.set_disable_shortcuts(true)
+	team_menu.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	team_menu.alignment = HORIZONTAL_ALIGNMENT_LEFT
+	team_menu.add_theme_font_size_override("font_size", 12)
+	team_menu.add_theme_stylebox_override("normal", _box(Color(0.12, 0.14, 0.11, 0.96), Color(0.3, 0.34, 0.26)))
+	team_menu.tooltip_text = "Form, disband or select a team; formation and spread. Keys J, Shift+J, L, K."
+	var tpm := team_menu.get_popup()
+	tpm.set_meta("acts", [])
+	tpm.id_pressed.connect(_on_menu_id.bind(tpm))
+	tpm.about_to_popup.connect(_fill_team.bind(tpm))
+	team_row.add_child(team_menu)
+
+	orders_hint = _label("", 12, HINT)
+	orders_hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	orders_hint.custom_minimum_size.x = 340
+	orders_box.add_child(orders_hint)
+
+
+## Highlights the armed move mode and the selection's fire / break-contact settings
+## (-1 = mixed across the selection). `pending` marks settings still on their way.
 func set_orders_state(mode: int, roe: int, brk: int, pending: bool, delay_text: String) -> void:
+	ord["has_own"] = true
+	ord["mode"] = mode
+	ord["roe"] = roe
+	ord["brk"] = brk
+	ord["pending"] = pending
+	ord["delay"] = delay_text
 	for i in mode_buttons.size():
 		mode_buttons[i].set_pressed_no_signal(i == mode)
-	for i in roe_buttons.size():
-		roe_buttons[i].set_pressed_no_signal(i == roe)
-	for i in brk_buttons.size():
-		brk_buttons[i].set_pressed_no_signal(i == brk)
+	_show_choice(roe_opt, roe)
+	_show_choice(brk_opt, brk)
+	delay_label.text = "arrive in %s" % delay_text
 	var names := ["a hasty move", "a road march", "a deliberate move", "an assault"]
-	orders_hint.text = "Right-click the map for %s. Orders arrive in %s.%s" % [
-		names[mode], delay_text, "  (Fire / break-contact change on its way)" if pending else ""]
+	var t := ("Next right-click sends %s (Esc cancels)." % names[mode]) if mode >= 0 else "Right-click the map for the order menu."
+	orders_hint.text = t + ("  Fire / break-contact change on its way." if pending else "")
 
 
-## Team controls: the selection's team formation (shape -1 when none or mixed).
-func set_team_state(in_team: bool, can_form: bool, shape: int, spacing: int) -> void:
-	team_buttons[0].disabled = not can_form
-	team_buttons[1].disabled = not in_team
-	team_buttons[2].disabled = not in_team
-	for i in shape_buttons.size():
-		shape_buttons[i].disabled = not in_team
-		shape_buttons[i].set_pressed_no_signal(in_team and i == shape)
-	for i in spread_buttons.size():
-		spread_buttons[i].disabled = not in_team
-		spread_buttons[i].set_pressed_no_signal(in_team and SPREADS[i] == spacing)
+func set_has_own(has: bool) -> void:
+	ord["has_own"] = has
+	if not has:
+		ord["delay"] = ""
 
 
-## Stand-off buttons: the selection's own setting (-1 mixed) and the company default.
+## Team controls: the selection's team formation (shape -1 when none, -2 mixed).
+func set_team_state(in_team: bool, can_form: bool, shape: int, spacing: int, team_name := "") -> void:
+	ord["in_team"] = in_team
+	ord["can_form"] = can_form
+	ord["shape"] = shape if shape >= 0 else -1
+	ord["spacing"] = spacing if spacing >= 0 else -1
+	ord["team"] = team_name
+	shape_opt.disabled = not in_team
+	spread_opt.disabled = not in_team
+	if in_team:
+		_show_choice(shape_opt, shape if shape >= 0 else -1)
+		_show_choice(spread_opt, SPREADS.find(spacing))
+	else:
+		shape_opt.select(-1)
+		shape_opt.text = "—"
+		spread_opt.select(-1)
+		spread_opt.text = "—"
+	team_menu.text = ((team_name if team_name != "" else "Several teams") if in_team else ("No team: form one" if can_form else "No team")) + "  ▾"
+
+
+## Stand-off dropdowns: the selection's own setting (-1 mixed) and the company default.
 func set_standoff_state(setting: int, default_value: int) -> void:
-	for i in standoff_buttons.size():
-		standoff_buttons[i].set_pressed_no_signal(STANDOFFS[i][1] == setting)
-	for i in default_buttons.size():
-		default_buttons[i].set_pressed_no_signal(STANDOFFS[i + 1][1] == default_value)
+	ord["standoff"] = setting
+	ord["default_standoff"] = default_value
+	var si := -1
+	for i in STANDOFFS.size():
+		if int(STANDOFFS[i][1]) == setting:
+			si = i
+	_show_choice(standoff_opt, si)
+	var di := -1
+	for i in range(1, STANDOFFS.size()):
+		if int(STANDOFFS[i][1]) == default_value:
+			di = i - 1
+	_show_choice(default_opt, di)
+
+
+## Mounted infantry: what the comma key / Dismount button would do for the selection.
+func set_mount_state(can_dismount: bool, can_mount: bool) -> void:
+	ord["can_dismount"] = can_dismount
+	ord["can_mount"] = can_mount
+	mount_button.text = "Mount up" if can_mount and not can_dismount else "Dismount"
+	mount_button.disabled = not (can_dismount or can_mount)
 
 
 func _standoff_text(info: Dictionary) -> String:
@@ -426,26 +823,29 @@ func _fire_support_line(info: Dictionary) -> String:
 		info.get("fs_battery", "guns"), float(info.get("fs_battery_km", 0.0)), float(info.get("radio_km", 20.0))]
 
 
+# --- Log, status line, banners ---------------------------------------------------------
+
 func _build_log() -> void:
 	var panel := PanelContainer.new()
 	panel.add_theme_stylebox_override("panel", _panel_style(0.8))
 	panel.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
-	_offsets(panel, 8, -244, 640, -8)
+	_offsets(panel, 8, -8, 640, -8) # grows upward with the reports it holds
 	panel.grow_vertical = Control.GROW_DIRECTION_BEGIN
 	add_child(panel)
 	var col := VBoxContainer.new()
 	panel.add_child(col)
-	col.add_child(_label("Reports  (click to centre the map)        F1: all controls", 13, Color(0.75, 0.8, 0.7)))
+	col.add_child(_label("Reports  (click one to centre the map on it)", 13, MUTED))
 	log_box = VBoxContainer.new()
 	log_box.add_theme_constant_override("separation", 0)
 	col.add_child(log_box)
 
 
-func _build_status_and_help() -> void:
+func _build_status() -> void:
 	var sp := PanelContainer.new()
 	sp.add_theme_stylebox_override("panel", _panel_style(0.75))
 	sp.set_anchors_preset(Control.PRESET_TOP_LEFT)
 	_offsets(sp, 8, 104, 8, 104)
+	sp.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	add_child(sp)
 	var op := PanelContainer.new()
 	op.add_theme_stylebox_override("panel", _panel_style(0.8))
@@ -468,38 +868,247 @@ func _build_status_and_help() -> void:
 	sp.add_child(status_label)
 	sp.visible = false
 
-	help_panel = PanelContainer.new()
-	help_panel.add_theme_stylebox_override("panel", _panel_style(0.8))
-	help_panel.set_anchors_preset(Control.PRESET_BOTTOM_RIGHT)
-	_offsets(help_panel, -330, -230, -8, -8)
-	help_panel.grow_horizontal = Control.GROW_DIRECTION_BEGIN
-	help_panel.grow_vertical = Control.GROW_DIRECTION_BEGIN
-	help_panel.visible = false  # F1
-	add_child(help_panel)
-	help_panel.add_child(_label(
-		"Left click: select unit (Shift adds)\n" +
-		"Left drag / WASD: pan    Wheel: zoom\n" +
-		"Right click: move order to hex\n" +
-		"H: hold    Tab: next unit    C: centre\n" +
-		"Double-click / K: whole company   O: grouping\n" +
-		"F/Q/E/R: move/road/deliberate/assault\n" +
-		"B: fall back  Y: regroup  N: resupply  X: fire\n" +
-		"Space: pause    1-5: speed    .: +15 min\n" +
-		"M: whole map    G grid  V sight  Z zones\n" +
-		"T: direct command    I: fire support net\n" +
-		", (comma): dismount / mount up\n" +
-		"P: WeGo pulse    U: auto-pause    F1: help\n" +
-		"F5: quick save    F9: quick load\n" +
-		"F2: map data credits", 13, Color(0.85, 0.88, 0.8)))
 
-	credits_panel = PanelContainer.new()
-	credits_panel.add_theme_stylebox_override("panel", _panel_style(0.92))
-	credits_panel.set_anchors_preset(Control.PRESET_CENTER)
-	_offsets(credits_panel, -380, -150, 380, 150)
-	credits_panel.visible = false
-	add_child(credits_panel)
-	credits_panel.add_child(_label(
-		"Map data credits (F2 to close)\n\n" +
+func _build_banners() -> void:
+	banner = _label("", 17, Color(1, 0.85, 0.5))
+	banner.set_anchors_preset(Control.PRESET_CENTER_TOP)
+	_offsets(banner, -390, 100, 390, 130) # clear of the unit panel on a 1600 px screen
+	banner.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	banner.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART # long briefings wrap instead of running under the panels
+	banner.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.9))
+	banner.add_theme_constant_override("outline_size", 6)
+	banner.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	banner.z_index = 5 # above the pause menu, so a save or load can report back
+	add_child(banner)
+
+	toast = _label("", 15, Color(0.85, 0.95, 1.0))
+	toast.set_anchors_preset(Control.PRESET_CENTER_TOP)
+	_offsets(toast, -390, 186, 390, 212)
+	toast.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	toast.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	toast.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.9))
+	toast.add_theme_constant_override("outline_size", 5)
+	toast.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	toast.z_index = 5
+	add_child(toast)
+
+
+func _build_loading() -> void:
+	loading = _label("Murks 1989\nLoading the map...", 26, Color(1, 0.95, 0.8))
+	loading.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	loading.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	loading.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	var bg := StyleBoxFlat.new()
+	bg.bg_color = Color(0.05, 0.06, 0.05, 1.0)
+	loading.add_theme_stylebox_override("normal", bg)
+	add_child(loading)
+
+
+# --- Screens and dialogs ---------------------------------------------------------------
+
+## A full-screen layer that dims the map and stops clicks reaching it, with `content` centred.
+func _screen(dim: float, content: Control) -> Control:
+	var s := Control.new()
+	s.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	s.mouse_filter = Control.MOUSE_FILTER_STOP
+	s.visible = false
+	var bg := ColorRect.new()
+	bg.color = Color(0.03, 0.04, 0.03, dim)
+	bg.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	s.add_child(bg)
+	var cc := CenterContainer.new()
+	cc.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	cc.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	s.add_child(cc)
+	cc.add_child(content)
+	add_child(s)
+	return s
+
+
+func _menu_button(text: String, action: String, tip := "") -> Button:
+	var b := _button(text)
+	b.custom_minimum_size = Vector2(300, 40)
+	b.add_theme_font_size_override("font_size", 17)
+	b.tooltip_text = tip
+	b.pressed.connect(func() -> void: menu_action.emit(action))
+	return b
+
+
+func _title_font(size: int) -> FontVariation:
+	var fv := FontVariation.new()
+	fv.base_font = ThemeDB.fallback_font
+	fv.spacing_glyph = maxi(1, size / 12)
+	fv.variation_embolden = 0.7
+	return fv
+
+
+func _build_title_screen() -> void:
+	var col := VBoxContainer.new()
+	col.add_theme_constant_override("separation", 10)
+	col.custom_minimum_size = Vector2(560, 0)
+	var title := _label("MURKS 1989", 76, AMBER)
+	title.add_theme_font_override("font", _title_font(76))
+	title.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.9))
+	title.add_theme_constant_override("outline_size", 10)
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	col.add_child(title)
+	var sub := _label("Spring 1989. Europe after the war. One company, one contract.", 17, MUTED)
+	sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	col.add_child(sub)
+	var brief_box := PanelContainer.new()
+	col.add_child(brief_box)
+	title_brief = RichTextLabel.new()
+	title_brief.bbcode_enabled = true
+	title_brief.fit_content = true
+	title_brief.scroll_active = false
+	title_brief.custom_minimum_size = Vector2(540, 0)
+	title_brief.add_theme_font_size_override("normal_font_size", 15)
+	title_brief.add_theme_font_size_override("bold_font_size", 15)
+	brief_box.add_child(title_brief)
+	var gap := Control.new()
+	gap.custom_minimum_size.y = 6
+	col.add_child(gap)
+	var buttons := VBoxContainer.new()
+	buttons.add_theme_constant_override("separation", 8)
+	buttons.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	col.add_child(buttons)
+	buttons.add_child(_menu_button("New campaign", "start", "Take the contract from the start: 14 April 1989, 06:00."))
+	title_continue = _menu_button("Continue from quick save", "continue", "Load the quick save (F5 saves during play).")
+	buttons.add_child(title_continue)
+	buttons.add_child(_menu_button("Controls", "help"))
+	buttons.add_child(_menu_button("Map data credits", "credits"))
+	buttons.add_child(_menu_button("Quit", "quit"))
+	var foot := _label("Proof of concept · Poland and East Germany on 3.8 million 500 m hexes · one map, one clock", 12, Color(0.55, 0.6, 0.55))
+	foot.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	col.add_child(foot)
+	title_screen = _screen(0.88, col)
+
+
+func show_title(briefing: String) -> void:
+	title_brief.text = briefing
+	title_continue.disabled = save_path == "" or not FileAccess.file_exists(save_path)
+	title_screen.visible = true
+
+
+func hide_title() -> void:
+	title_screen.visible = false
+
+
+func _build_pause_menu() -> void:
+	var panel := PanelContainer.new()
+	panel.add_theme_stylebox_override("panel", _box(Color(0.07, 0.08, 0.07, 0.97), Color(0.6, 0.62, 0.45, 0.8), 6, Vector4(22, 16, 22, 18)))
+	var col := VBoxContainer.new()
+	col.add_theme_constant_override("separation", 8)
+	panel.add_child(col)
+	var t := _label("PAUSED", 30, AMBER)
+	t.add_theme_font_override("font", _title_font(30))
+	t.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	col.add_child(t)
+	pause_time = _label("", 14, MUTED)
+	pause_time.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	col.add_child(pause_time)
+	col.add_child(HSeparator.new())
+	col.add_child(_menu_button("Resume", "resume", "Esc"))
+	col.add_child(_menu_button("Quick save", "save", "F5"))
+	pause_load = _menu_button("Quick load", "load", "F9")
+	col.add_child(pause_load)
+	col.add_child(_menu_button("Controls", "help", "F1"))
+	col.add_child(_menu_button("Contract briefing", "briefing"))
+	col.add_child(_menu_button("Map data credits", "credits", "F2"))
+	col.add_child(HSeparator.new())
+	col.add_child(_menu_button("New game", "new_game", "Start the contract again from 14 April, 06:00."))
+	col.add_child(_menu_button("Quit to title screen", "title"))
+	col.add_child(_menu_button("Quit to desktop", "quit"))
+	pause_screen = _screen(0.55, panel)
+
+
+func show_pause(time_text: String) -> void:
+	pause_time.text = time_text
+	pause_load.disabled = save_path == "" or not FileAccess.file_exists(save_path)
+	pause_screen.visible = true
+
+
+func hide_pause() -> void:
+	pause_screen.visible = false
+
+
+## Title screen or pause menu up: the map takes no input.
+func is_modal() -> bool:
+	return title_screen.visible or pause_screen.visible
+
+
+## A centred dialog with a title, a body and a Close button. Not modal: it sits over everything.
+func _build_dialog(title: String, body: Control) -> Control:
+	var panel := PanelContainer.new()
+	panel.add_theme_stylebox_override("panel", _box(Color(0.07, 0.08, 0.07, 1.0), Color(0.6, 0.62, 0.45, 0.8), 6, Vector4(20, 14, 20, 16)))
+	panel.set_anchors_preset(Control.PRESET_CENTER)
+	panel.grow_horizontal = Control.GROW_DIRECTION_BOTH
+	panel.grow_vertical = Control.GROW_DIRECTION_BOTH
+	panel.visible = false
+	var col := VBoxContainer.new()
+	col.add_theme_constant_override("separation", 10)
+	panel.add_child(col)
+	var head := HBoxContainer.new()
+	col.add_child(head)
+	var t := _label(title, 20, AMBER)
+	t.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	head.add_child(t)
+	var close := _button("Close")
+	close.pressed.connect(func() -> void: panel.visible = false)
+	head.add_child(close)
+	col.add_child(HSeparator.new())
+	col.add_child(body)
+	add_child(panel)
+	return panel
+
+
+func _controls_body() -> Control:
+	var sections := [
+		["Mouse", [["Left click", "Select a unit (Shift adds or removes)"],
+			["Double-click", "Select its team, or else its whole company"],
+			["Right click", "Order menu at that hex (or send the armed order)"],
+			["Drag, WASD, arrows", "Pan the map"], ["Wheel", "Zoom"]]],
+		["Orders", [["F  Q  E  R", "Arm the next right-click: move, road march,\ndeliberate move, assault"],
+			["Esc", "Disarm; with nothing armed, the pause menu"],
+			["H", "Hold position"], ["B  Y  N", "Fall back, regroup on the HQ, rest & resupply"],
+			[", (comma)", "Dismount or mount up"], ["X", "Cycle fire: at will, return fire, hold fire"],
+			["J / Shift+J", "Form a team / disband it"], ["L / K", "Select the whole team / company"],
+			["Tab / C", "Next unit / centre on the selection"]]],
+		["Time", [["Space", "Pause or resume"], ["1 – 5", "1 min, 5 min, 30 min, 2 h per second, max"],
+			[". (period)", "Step 15 minutes while paused"], ["P / U", "WeGo pulse / auto-pause on contact"]]],
+		["View", [["O  T  I", "Company grouping, direct command, fire support"],
+			["G  V  Z", "Hex grid, line of sight, fidelity zones"], ["M", "Whole map"]]],
+		["Game", [["F5 / F9", "Quick save / quick load"], ["F1 / F2", "Controls / map data credits"],
+			["Esc", "Pause menu"]]]]
+	var cols := HBoxContainer.new()
+	cols.add_theme_constant_override("separation", 28)
+	var halves := [[0, 1], [2, 3, 4]]
+	for h in halves:
+		var col := VBoxContainer.new()
+		col.add_theme_constant_override("separation", 4)
+		cols.add_child(col)
+		for si in h:
+			var sec: Array = sections[si]
+			col.add_child(_label(String(sec[0]), 14, AMBER))
+			var g := GridContainer.new()
+			g.columns = 2
+			g.add_theme_constant_override("h_separation", 14)
+			g.add_theme_constant_override("v_separation", 2)
+			col.add_child(g)
+			for row in sec[1]:
+				var k := _label(String(row[0]), 13, Color(0.75, 0.88, 1.0))
+				k.custom_minimum_size.x = 140
+				g.add_child(k)
+				g.add_child(_label(String(row[1]), 13))
+			var gap := Control.new()
+			gap.custom_minimum_size.y = 4
+			col.add_child(gap)
+	return cols
+
+
+func _credits_body() -> Control:
+	return _label(
 		"Elevation: Copernicus DEM GLO-90. © DLR e.V. 2010-2014 and © Airbus Defence and Space GmbH\n" +
 		"  2014-2018, provided under COPERNICUS by the European Union and ESA; all rights reserved.\n" +
 		"  Produced using Copernicus WorldDEM-90 © DLR e.V. 2010-2014 and © Airbus Defence and Space GmbH 2014-2018.\n" +
@@ -507,32 +1116,28 @@ func _build_status_and_help() -> void:
 		"  processed by ESA WorldCover consortium. CC BY 4.0.\n" +
 		"Rivers, roads, railways: Made with Natural Earth. Free vector and raster map data @ naturalearthdata.com.\n" +
 		"Place names and populations: GeoNames (geonames.org), CC BY 4.0. Some names changed to 1989 usage.\n" +
-		"Local roads are generated; borders, roads and rail are not yet corrected to 1989.", 13, Color(0.9, 0.9, 0.85)))
+		"Local roads are generated; borders, roads and rail are not yet corrected to 1989.", 13, Color(0.9, 0.9, 0.85))
 
 
-func _build_banners() -> void:
-	banner = _label("", 17, Color(1, 0.85, 0.5))
-	banner.set_anchors_preset(Control.PRESET_CENTER_TOP)
-	_offsets(banner, -450, 100, 450, 130)
-	banner.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	banner.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART # long briefings wrap instead of running under the panels
-	banner.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.9))
-	banner.add_theme_constant_override("outline_size", 6)
-	add_child(banner)
+func toggle_help() -> void:
+	help_panel.visible = not help_panel.visible
+	if help_panel.visible:
+		credits_panel.visible = false
 
-	toast = _label("", 15, Color(0.85, 0.95, 1.0))
-	toast.set_anchors_preset(Control.PRESET_CENTER_TOP)
-	_offsets(toast, -450, 186, 450, 212)
-	toast.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	toast.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.9))
-	toast.add_theme_constant_override("outline_size", 5)
-	add_child(toast)
 
-	loading = _label("Murks 1989\nLoading the map...", 26, Color(1, 0.95, 0.8))
-	loading.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	loading.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	loading.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	add_child(loading)
+func toggle_credits() -> void:
+	credits_panel.visible = not credits_panel.visible
+	if credits_panel.visible:
+		help_panel.visible = false
+
+
+## Closes a controls or credits dialog if one is open; true if it did.
+func close_dialog() -> bool:
+	if help_panel.visible or credits_panel.visible:
+		help_panel.visible = false
+		credits_panel.visible = false
+		return true
+	return false
 
 
 # --- Updates -------------------------------------------------------------------------
@@ -548,14 +1153,14 @@ func show_toast(text: String, seconds := 4.0) -> void:
 
 
 func set_speed(index: int, capped: bool) -> void:
+	speed_index = index
 	for i in speed_buttons.size():
 		speed_buttons[i].set_pressed_no_signal(i == index)
-	cap_label.text = "Capped: company in contact" if capped else ""
+	cap_label.text = "Capped: in contact" if capped else ""
 
 
 func set_toggle(name: String, on: bool) -> void:
-	if toggle_buttons.has(name):
-		(toggle_buttons[name] as Button).set_pressed_no_signal(on)
+	toggle_state[name] = on
 
 
 func refresh(time_text: String, night: bool, stats: Dictionary, fps: float, map_stats: String) -> void:
@@ -581,6 +1186,8 @@ func set_events(events: Array) -> void:
 		var b := _button("%s   %s" % [String(e["time_string"]).substr(11), e["text"]])
 		b.flat = true
 		b.alignment = HORIZONTAL_ALIGNMENT_LEFT
+		b.clip_text = true # long reports end at the panel edge; the full text is in the tooltip
+		b.tooltip_text = String(e["text"])
 		b.add_theme_font_size_override("font_size", 13)
 		var kind: String = e["kind"]
 		var col := Color(0.88, 0.9, 0.84)
@@ -783,7 +1390,7 @@ func set_objectives(obj: Dictionary) -> void:
 
 func _build_end_screen() -> void:
 	end_panel = PanelContainer.new()
-	end_panel.add_theme_stylebox_override("panel", _panel_style(0.95))
+	end_panel.add_theme_stylebox_override("panel", _box(Color(0.07, 0.08, 0.07, 0.97), Color(0.6, 0.62, 0.45, 0.8), 6, Vector4(20, 14, 20, 16)))
 	end_panel.set_anchors_preset(Control.PRESET_CENTER)
 	_offsets(end_panel, -310, -125, 310, 125)
 	end_panel.visible = false
