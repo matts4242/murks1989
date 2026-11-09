@@ -113,6 +113,7 @@ public:
     Dictionary get_unit_info(int id) const;
     int order_move(int id, Vector2i hex, int mode = 0);
     int order_hold(int id);
+    int order_rejoin(int id); // a detached team member heads back to its formation place
     int order_fall_back(int id);
     int order_regroup(int id, bool rest);
     int order_dismount(int id);

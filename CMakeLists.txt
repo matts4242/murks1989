@@ -50,6 +50,10 @@ target_link_libraries(dismount_test PRIVATE murks_core)
 add_executable(suppression_test tests/suppression_test.cpp)
 target_link_libraries(suppression_test PRIVATE murks_core)
 
+# Solo orders to team members and the Rejoin order (MRK-22). build/team_orders_test
+add_executable(team_orders_test tests/team_orders_test.cpp)
+target_link_libraries(team_orders_test PRIVATE murks_core)
+
 # Real-map 4-day scripted runs over several seeds (needs zlib). build/playtest game/data/poland_1989.murkz 4 active 1989 8
 find_package(ZLIB)
 if(ZLIB_FOUND)

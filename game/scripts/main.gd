@@ -543,7 +543,8 @@ func _on_key(key: Key) -> void:
 		KEY_I: _on_toggle("Fire support")
 		KEY_J:
 			_on_command("team_disband" if Input.is_key_pressed(KEY_SHIFT) else "team_form")
-		KEY_L: _on_command("team_select")
+		KEY_L:
+			_on_command("team_rejoin" if Input.is_key_pressed(KEY_SHIFT) else "team_select")
 		KEY_F: _on_command("mode_0")
 		KEY_Q: _on_command("mode_1")
 		KEY_E: _on_command("mode_2")
@@ -984,6 +985,8 @@ func _on_command(name: String) -> void:
 		_refresh_snapshot()
 		groups_cache = world.get_groups()
 		hud.show_toast("%d team%s disbanded." % [n, "" if n == 1 else "s"] if n > 0 else "No team in the selection.")
+	elif name == "team_rejoin":
+		_order_rejoin()
 	elif name == "team_select":
 		if selected.is_empty() or not _select_team_of(selected[0]):
 			hud.show_toast("That unit isn't in a team. Select units and press J to form one.")
@@ -1073,6 +1076,28 @@ func _form_team() -> void:
 	var li: Dictionary = world.get_unit_info(leader)
 	hud.show_toast("%s formed: %s leads %d units and commands within %.1f km. Formation: keep layout (change it below)." % [
 		tm["name"], li.get("name", "?"), own.size() - 1, int(tm["zone_hexes"]) * 0.5], 6.0)
+
+
+## Send the selected detached team members back to their formation places.
+func _order_rejoin() -> void:
+	var own := _own_selected()
+	if not world.has_method("order_rejoin"):
+		hud.show_toast("Rejoin needs the rebuilt Murks extension in game/bin.")
+		return
+	var lo := 1 << 30
+	var hi := 0
+	var n := 0
+	for id in own:
+		var d: int = world.call("order_rejoin", id)
+		if d >= 0:
+			n += 1
+			lo = mini(lo, d)
+			hi = maxi(hi, d)
+	if n == 0:
+		hud.show_toast("Nothing to rejoin: select a team member that is off on its own orders.")
+		return
+	hud.show_toast("Rejoin: %d unit%s head back to their team places, orders arrive in %s." % [n, "" if n == 1 else "s",
+		("%d min" % lo) if lo == hi else ("%d-%d min" % [lo, hi])])
 
 
 func _order_group(kind: String) -> void:

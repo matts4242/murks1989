@@ -23,8 +23,9 @@ namespace murks {
 enum UnitType : uint8_t { U_HQ = 0, U_TANK, U_MECH, U_INFANTRY, U_RECON, U_ARTILLERY, U_TYPE_COUNT };
 enum Mobility : uint8_t { M_TRACKED = 0, M_WHEELED, M_FOOT };
 enum Side : int8_t { SIDE_PLAYER = 0, SIDE_HOSTILE = 1, SIDE_COUNT = 2 };
-// O_DISMOUNT and O_MOUNT only travel as pending orders; they never become a unit's current order.
-enum OrderKind : uint8_t { O_HOLD = 0, O_MOVE, O_RETREAT, O_REGROUP, O_REST, O_DISMOUNT, O_MOUNT };
+// O_DISMOUNT, O_MOUNT and O_REJOIN only travel as pending orders; they never become a unit's
+// current order.
+enum OrderKind : uint8_t { O_HOLD = 0, O_MOVE, O_RETREAT, O_REGROUP, O_REST, O_DISMOUNT, O_MOUNT, O_REJOIN };
 // How a unit moves (Flashpoint-style move orders).
 enum MoveMode : uint8_t {
     MV_HASTY = 0,   // normal speed, fires on the move at a penalty
@@ -317,7 +318,13 @@ public:
     bool set_group_shape(int gid, int shape, int spacing);
     int order_group_move(int gid, HexCoord target, MoveMode mode = MV_HASTY); // leader moves, team follows
     int order_group_hold(int gid);                                           // leader halts, team forms up on it
-    void detach(int unit_id); // a member given its own order leaves the formation until the next team order
+    // A team member given an order of its own leaves the formation (detaches) when that order
+    // arrives, not when it is given, and stays detached: team orders leave it alone until it is
+    // ordered to rejoin. Rejoin goes through the member's command delay like any order; on arrival
+    // the member heads for its formation place and follows the leader again. -1 when the unit is
+    // not a team member (or is the leader), or is already in formation with nothing on its way.
+    int order_rejoin(int unit_id);
+    void detach(int unit_id); // leaves the formation now (used when an order arrives)
     int hq_above(const Unit &u) const;      // the HQ or team leader this unit takes orders from, -1 none
     int command_zone(const Unit &hq) const; // zone of effective command in hexes
     std::vector<Group> groups;
@@ -423,6 +430,7 @@ private:
     void update_suppression();
     void dismount_now(Unit &carrier);
     void start_mount(Unit &ordered);
+    void rejoin_now(Unit &member);
     void update_mounting();
     void bucket_insert(const Unit &u);
     void displace_battery(Unit &u);

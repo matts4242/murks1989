@@ -1216,6 +1216,13 @@ void World::update_orders() {
         if (paths_this_tick_ >= MAX_PATHS_PER_TICK) continue; // spread heavy route-finding over ticks
         u.pending.active = false;
         OrderKind kind = u.pending.kind;
+        // Team members: a rejoin order puts the member back in formation; any other order of its
+        // own detaches it now that it arrives (team orders never reach members as pending orders).
+        if (kind == O_REJOIN) {
+            rejoin_now(u);
+            continue;
+        }
+        detach(u.id);
         if (kind == O_DISMOUNT) {
             dismount_now(u);
             continue;
@@ -1386,45 +1393,82 @@ bool World::set_group_shape(int gid, int shape, int spacing) {
     if (shape >= 0 && shape < FS_COUNT) g.shape = (uint8_t)shape;
     if (spacing > 0) g.spacing = std::min(spacing, 8);
     if (g.shape == FS_KEEP) {
-        // "Keep layout" locks the team's present arrangement around its leader.
+        // "Keep layout" locks the team's present arrangement around its leader. A detached
+        // member keeps the place it had, so it goes back there when it rejoins.
         Vec2 lc = hex_center(units[g.leader].pos);
         for (size_t k = 0; k < g.members.size(); ++k) {
+            if (!units[g.members[k]].follow) continue;
             Vec2 mc = hex_center(units[g.members[k]].pos);
             g.keep_dx[k] = (float)(mc.x - lc.x);
             g.keep_dy[k] = (float)(mc.y - lc.y);
         }
     }
-    for (int id : g.members) units[id].follow = true;
-    g.has_dest = false; // members take up their new slots
+    g.has_dest = false; // members in formation take up their new slots; detached ones stay detached
     return true;
 }
 
+// Team orders go to the leader; the members in formation keep station on it. A team order
+// replaces any order of their own still on its way to them. Detached members are left alone:
+// they carry on with their own orders until they are ordered to rejoin.
 int World::order_group_move(int gid, HexCoord target, MoveMode mode) {
     if (gid < 0 || gid >= (int)groups.size() || !groups[gid].alive) return -1;
     Group &g = groups[gid];
-    for (int id : g.members) {
-        units[id].follow = true;
-        units[id].pending.active = false; // the team order replaces anything still on its way
-    }
+    for (int id : g.members)
+        if (units[id].follow) units[id].pending.active = false;
     return order_move(g.leader, target, mode);
 }
 
 int World::order_group_hold(int gid) {
     if (gid < 0 || gid >= (int)groups.size() || !groups[gid].alive) return -1;
     Group &g = groups[gid];
-    for (int id : g.members) {
-        units[id].follow = true;
-        units[id].pending.active = false;
-    }
+    for (int id : g.members)
+        if (units[id].follow) units[id].pending.active = false;
     return order_hold(g.leader);
+}
+
+static bool is_member(const std::vector<Group> &groups, const Unit &u) {
+    return u.group >= 0 && u.group < (int)groups.size() && groups[u.group].alive && groups[u.group].leader != u.id;
 }
 
 void World::detach(int unit_id) {
     if (unit_id < 0 || unit_id >= (int)units.size()) return;
     Unit &u = units[unit_id];
-    if (u.group < 0 || u.group >= (int)groups.size() || groups[u.group].leader == unit_id) return;
+    if (!is_member(groups, u)) return;
     u.follow = false;
     u.formation_wait = false;
+}
+
+int World::order_rejoin(int unit_id) {
+    if (unit_id < 0 || unit_id >= (int)units.size()) return -1;
+    Unit &u = units[unit_id];
+    if (!u.alive || !is_member(groups, u)) return -1;
+    if (u.follow && !u.pending.active) return -1; // already in formation, nothing to replace
+    int delay = command_delay(u);
+    u.pending = {true, O_REJOIN, u.pos, time_min, time_min + delay, MV_HASTY};
+    return delay;
+}
+
+// The rejoin order arrives: the member follows its leader again and update_groups sends it to
+// its formation place (it keeps going where it was heading until then, so nothing stalls).
+void World::rejoin_now(Unit &u) {
+    if (!is_member(groups, u)) {
+        if (u.side == SIDE_PLAYER)
+            push_event(EV_INFO, u.id, false, fmt("%s can't rejoin: no longer in a team.", u.name.c_str()));
+        return;
+    }
+    u.follow = true;
+    u.formation_wait = false;
+    u.resting = false;
+    u.mounting = false;
+    u.mount_at = -1;
+    if (u.order == O_RETREAT || u.order == O_REGROUP || u.order == O_REST) u.order = O_MOVE;
+    if (!u.moving()) u.order = O_HOLD;
+    if (u.side == SIDE_PLAYER) {
+        const Group &g = groups[u.group];
+        push_event(EV_ORDER, u.id, false,
+                   fmt("%s rejoins %s and heads for its place by %s.", u.name.c_str(), g.name.c_str(),
+                       units[g.leader].name.c_str()));
+    }
 }
 
 HexCoord World::slot_for(const Group &g, int k, HexCoord center, float heading) const {
@@ -1483,9 +1527,18 @@ void World::update_groups() {
                 g = Group{};
                 continue;
             }
+            // A member still in formation takes over before a detached one (an HQ first in
+            // each), so the team isn't dragged off after a unit on an errand of its own.
             size_t pick = 0;
-            for (size_t k = 0; k < g.members.size(); ++k)
-                if (units[g.members[k]].type == U_HQ) pick = k;
+            int best = -1;
+            for (size_t k = 0; k < g.members.size(); ++k) {
+                const Unit &c = units[g.members[k]];
+                int rank = (c.follow ? 2 : 0) + (c.type == U_HQ ? 1 : 0);
+                if (rank > best) {
+                    best = rank;
+                    pick = k;
+                }
+            }
             int nl = g.members[pick];
             float ox = g.keep_dx[pick], oy = g.keep_dy[pick];
             g.members.erase(g.members.begin() + pick);

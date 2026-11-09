@@ -450,6 +450,8 @@ func _fill_team(pm: PopupMenu) -> void:
 		"Lock the selected units under one leader: the HQ if it is selected, else the first unit you selected.")
 	_add(pm, "Disband", "cmd", "team_disband", KEY_MASK_SHIFT | KEY_J, in_team, -1, "Release the selected units' teams.")
 	_add(pm, "Select the whole team", "cmd", "team_select", KEY_L, in_team)
+	_add(pm, "Rejoin team", "cmd", "team_rejoin", KEY_MASK_SHIFT | KEY_L, in_team, -1,
+		"A member sent off on its own orders goes back to its formation place and follows the leader again (after the command delay). Team orders don't pull detached members back.")
 	_add(pm, "Select the whole company", "cmd", "select_company", KEY_K)
 	pm.add_separator("Formation")
 	for i in SHAPES.size():
@@ -675,7 +677,7 @@ func _build_orders(parent: Control) -> void:
 	team_menu.alignment = HORIZONTAL_ALIGNMENT_LEFT
 	team_menu.add_theme_font_size_override("font_size", 12)
 	team_menu.add_theme_stylebox_override("normal", _box(Color(0.12, 0.14, 0.11, 0.96), Color(0.3, 0.34, 0.26)))
-	team_menu.tooltip_text = "Form, disband or select a team; formation and spread. Keys J, Shift+J, L, K."
+	team_menu.tooltip_text = "Form, disband or select a team; formation and spread. Keys J, Shift+J, L, Shift+L, K."
 	var tpm := team_menu.get_popup()
 	tpm.set_meta("acts", [])
 	tpm.id_pressed.connect(_on_menu_id.bind(tpm))
@@ -772,6 +774,8 @@ func _team_line(info: Dictionary) -> String:
 		var col: Color = TEAM_COLORS[int(info["group_color"]) % TEAM_COLORS.size()]
 		t += "[color=#%s]■ %s[/color]  %s · %s, %.1f km spread\n" % [col.to_html(false), info["group_name"],
 			info["group_role"], String(info["group_shape_name"]).to_lower(), float(info["group_spacing_km"])]
+		if String(info["group_role"]) == "detached":
+			t += "[color=#ffd84a]Detached on its own orders: team orders leave it alone. Shift+L rejoins.[/color]\n"
 	if info.has("own_zone_km"):
 		t += "Commands within %.1f km\n" % float(info["own_zone_km"])
 	if info.has("hq_name"):
@@ -1073,7 +1077,7 @@ func _controls_body() -> Control:
 			["Esc", "Disarm; with nothing armed, the pause menu"],
 			["H", "Hold position"], ["B  Y  N", "Fall back, regroup on the HQ, rest & resupply"],
 			[", (comma)", "Dismount or mount up"], ["X", "Cycle fire: at will, return fire, hold fire"],
-			["J / Shift+J", "Form a team / disband it"], ["L / K", "Select the whole team / company"],
+			["J / Shift+J", "Form a team / disband it"], ["L / K", "Select the whole team / company"], ["Shift+L", "Rejoin team (detached members)"],
 			["Tab / C", "Next unit / centre on the selection"]]],
 		["Time", [["Space", "Pause or resume"], ["1 – 5", "1 min, 5 min, 30 min, 2 h per second, max"],
 			[". (period)", "Step 15 minutes while paused"], ["P / U", "WeGo pulse / auto-pause on contact"]]],

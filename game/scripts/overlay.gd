@@ -373,6 +373,12 @@ func _draw_counter(c: Vector2, s: float, it: Dictionary) -> void:
 		var tc: Color = TEAM_COLORS[tcol % TEAM_COLORS.size()]
 		var role: int = it.get("role", -1)
 		_outline(_rrect(c, s + s * 0.1, rad * 1.3), tc, maxf(2.0, s * (0.08 if role != 0 else 0.04)))
+		if role == 0:
+			# Detached: off on its own orders until it is told to rejoin.
+			var dfs := int(maxf(8.0, s * 0.2))
+			var dp := Vector2(c.x + h + s * 0.1, c.y - h + float(dfs))
+			draw_string_outline(font, dp, "DET", HORIZONTAL_ALIGNMENT_LEFT, -1, dfs, 3, Color(0, 0, 0, 0.85))
+			draw_string(font, dp, "DET", HORIZONTAL_ALIGNMENT_LEFT, -1, dfs, tc)
 		if role == 2:
 			var px := c.x + h - s * 0.05
 			var py := c.y - h - s * 0.42
