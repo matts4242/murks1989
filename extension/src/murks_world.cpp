@@ -73,6 +73,10 @@ void MurksWorld::_bind_methods() {
     ClassDB::bind_method(D_METHOD("get_unit_stride"), &MurksWorld::get_unit_stride);
     ClassDB::bind_method(D_METHOD("get_unit_info", "id"), &MurksWorld::get_unit_info);
     ClassDB::bind_method(D_METHOD("order_move", "id", "hex", "mode"), &MurksWorld::order_move, DEFVAL(0));
+    ClassDB::bind_method(D_METHOD("order_route", "id", "route"), &MurksWorld::order_route);
+    ClassDB::bind_method(D_METHOD("route_delay", "id", "route"), &MurksWorld::route_delay);
+    ClassDB::bind_method(D_METHOD("order_group_route", "gid", "route"), &MurksWorld::order_group_route);
+    ClassDB::bind_method(D_METHOD("plan_leg", "id", "from", "to", "mode"), &MurksWorld::plan_leg);
     ClassDB::bind_method(D_METHOD("order_fall_back", "id"), &MurksWorld::order_fall_back);
     ClassDB::bind_method(D_METHOD("order_regroup", "id", "rest"), &MurksWorld::order_regroup);
     ClassDB::bind_method(D_METHOD("order_dismount", "id"), &MurksWorld::order_dismount);
@@ -460,6 +464,37 @@ PackedFloat32Array MurksWorld::get_units_snapshot() const {
     return out;
 }
 
+static std::vector<murks::Waypoint> to_route(const Array &a) {
+    std::vector<murks::Waypoint> r;
+    for (int i = 0; i < a.size(); ++i) {
+        Dictionary d = a[i];
+        Vector2i h = d.get("hex", Vector2i(-1, -1));
+        murks::Waypoint w;
+        w.at = {h.x, h.y};
+        w.mode = (murks::MoveMode)std::max(0, std::min((int)d.get("mode", 0), 3));
+        w.halt_min = (int16_t)std::max(0, std::min((int)d.get("halt", 0), murks::MAX_WAYPOINT_HALT));
+        w.shape = (int8_t)std::max(-1, std::min((int)d.get("shape", -1), (int)murks::FS_COUNT - 1));
+        r.push_back(w);
+    }
+    return r;
+}
+
+static Array from_route(const std::vector<murks::Waypoint> &r, size_t from) {
+    Array out;
+    for (size_t i = from; i < r.size(); ++i) {
+        const murks::Waypoint &w = r[i];
+        Dictionary d;
+        d["hex"] = Vector2i(w.at.col, w.at.row);
+        murks::Vec2 c = murks::hex_center(w.at);
+        d["pos"] = Vector2((real_t)c.x, (real_t)c.y);
+        d["mode"] = (int)w.mode;
+        d["halt"] = (int)w.halt_min;
+        d["shape"] = (int)w.shape;
+        out.push_back(d);
+    }
+    return out;
+}
+
 Dictionary MurksWorld::get_unit_info(int id) const {
     Dictionary d;
     if (id < 0 || id >= (int)world_.units.size()) return d;
@@ -663,7 +698,20 @@ Dictionary MurksWorld::get_unit_info(int id) const {
         d["pending_in"] = (int)(u.pending.activates_at - world_.time_min);
         murks::Vec2 t = murks::hex_center(u.pending.target);
         d["pending_target"] = Vector2((real_t)t.x, (real_t)t.y);
+        if (u.pending.kind == murks::O_MOVE) {
+            d["pending_route"] = from_route(u.pending.route, 0);
+            d["pending_adjust"] = u.pending.adjust;
+        }
     }
+    // The route ahead: waypoints from the one the unit is heading for, the leg it is on, and
+    // why it is halted on it, if it is.
+    d["route"] = from_route(u.route, (size_t)std::max(0, u.wp_i));
+    d["wp_index"] = u.wp_i;
+    d["route_paused"] = u.route_pause == murks::RP_ENEMY_HEX ? "enemy ahead"
+                        : u.route_pause == murks::RP_STANDOFF ? "stand-off"
+                                                               : "";
+    if (u.on_route() && u.leg_due && u.wp_halt_until > world_.time_min)
+        d["route_halt_in"] = (int)(u.wp_halt_until - world_.time_min);
     PackedVector2Array path;
     if (u.moving()) {
         path.push_back(unit_world_pos(u));
@@ -689,6 +737,48 @@ int MurksWorld::order_move(int id, Vector2i hex, int mode) {
     if (!own_unit(world_, id)) return -1;
     world_.detach(id); // a team member given its own order leaves the formation
     return world_.order_move(id, {hex.x, hex.y}, (murks::MoveMode)std::max(0, std::min(mode, 3)));
+}
+
+int MurksWorld::order_route(int id, const Array &route) {
+    if (!own_unit(world_, id)) return -1;
+    const std::vector<murks::Waypoint> r = to_route(route);
+    if (world_.route_delay(id, r) < 0) return -1;
+    world_.detach(id); // a team member given its own order leaves the formation
+    return world_.order_route(id, r);
+}
+
+Dictionary MurksWorld::route_delay(int id, const Array &route) const {
+    Dictionary d;
+    bool adj = false;
+    d["delay"] = own_unit(world_, id) ? world_.route_delay(id, to_route(route), &adj) : -1;
+    d["adjust"] = adj;
+    return d;
+}
+
+int MurksWorld::order_group_route(int gid, const Array &route) {
+    if (gid < 0 || gid >= (int)world_.groups.size() || world_.groups[gid].side != murks::SIDE_PLAYER) return -1;
+    return world_.order_group_route(gid, to_route(route));
+}
+
+Dictionary MurksWorld::plan_leg(int id, Vector2i from, Vector2i to, int mode) {
+    Dictionary d;
+    std::vector<int> path;
+    const float mins = own_unit(world_, id)
+                           ? world_.plan_leg(id, {from.x, from.y}, {to.x, to.y},
+                                             (murks::MoveMode)std::max(0, std::min(mode, 3)), path)
+                           : -1.0f;
+    PackedVector2Array pts;
+    if (mins >= 0) {
+        murks::Vec2 s = murks::hex_center({from.x, from.y});
+        pts.push_back(Vector2((real_t)s.x, (real_t)s.y));
+        for (int idx : path) {
+            murks::Vec2 c = murks::hex_center(world_.map.coord_of(idx));
+            pts.push_back(Vector2((real_t)c.x, (real_t)c.y));
+        }
+    }
+    d["minutes"] = mins;
+    d["path"] = pts;
+    return d;
 }
 
 int MurksWorld::order_fall_back(int id) {

@@ -24,6 +24,7 @@ struct PathResult {
 class Pathfinder {
 public:
     void attach(const Map *map);
+    bool attached_to(const Map *map) const { return map_ == map; }
 
     // Fills out_path with hex indices from the step after `from` up to `to`.
     // `min_step_cost` must not exceed the cheapest possible step, so the

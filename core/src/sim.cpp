@@ -1523,18 +1523,100 @@ int World::command_delay(const Unit &u) const {
         }
     }
     if (u.zone == Z_HOT && (time_min - u.last_fired < 10 || time_min - u.last_hit < 10)) d *= 1.5f;
+    // On the move the chain has to catch the unit up first (MRK-20 first estimate, unsourced:
+    // Flashpoint Campaigns: Cold War has no such factor; it adds 5 minutes to start a halted unit
+    // moving and charges 2 minutes to change a move already under way).
+    if (u.moving()) d *= MOVING_ORDER_FACTOR;
     d *= 1.0f + (100.0f - u.readiness) / 200.0f;
     return (int)std::ceil(d);
 }
 
-int World::order_move(int unit_id, HexCoord target, MoveMode mode) {
-    if (unit_id < 0 || unit_id >= (int)units.size()) return -1;
+namespace {
+// Metres from p to the segment a-b.
+double seg_dist_m(Vec2 p, Vec2 a, Vec2 b) {
+    const double vx = b.x - a.x, vy = b.y - a.y, l2 = vx * vx + vy * vy;
+    double t = l2 > 0 ? ((p.x - a.x) * vx + (p.y - a.y) * vy) / l2 : 0;
+    t = std::max(0.0, std::min(1.0, t));
+    return std::hypot(p.x - (a.x + t * vx), p.y - (a.y + t * vy));
+}
+} // namespace
+
+bool World::is_adjustment(const Unit &u, const std::vector<Waypoint> &route) const {
+    if (route.empty() || !u.alive || u.mounting || u.order == O_RETREAT) return false;
+    // The route being followed now: from where the unit is, through the waypoints ahead. A unit
+    // without one has only its position (adjust position). Regrouping or resting moves are
+    // standing procedures, not routes: anything else for them is a new order.
+    std::vector<Waypoint> old;
+    if (u.on_route()) old.assign(u.route.begin() + u.wp_i, u.route.end());
+    else if (u.moving()) return false;
+    std::vector<Vec2> line{hex_center(u.pos)};
+    for (const auto &w : old) line.push_back(hex_center(w.at));
+    const HexCoord old_final = old.empty() ? u.pos : old.back().at;
+    auto old_wp = [&](HexCoord h) -> const Waypoint * {
+        for (const auto &w : old)
+            if (w.at == h) return &w;
+        return nullptr;
+    };
+    for (const auto &w : route) {
+        const Waypoint *o = old_wp(w.at);
+        if (w.mode == MV_ASSAULT && !(o && o->mode == MV_ASSAULT)) return false; // a change to Assault
+        if (o) continue;                                                         // unchanged waypoint
+        const Vec2 p = hex_center(w.at);
+        double best = 1e18;
+        if (line.size() == 1) best = std::hypot(p.x - line[0].x, p.y - line[0].y);
+        for (size_t i = 1; i < line.size(); ++i) best = std::min(best, seg_dist_m(p, line[i - 1], line[i]));
+        if (best > ADJUST_RADIUS_M) return false;
+    }
+    const Vec2 a = hex_center(old_final), b = hex_center(route.back().at);
+    return std::hypot(a.x - b.x, a.y - b.y) <= ADJUST_RADIUS_M;
+}
+
+static bool valid_route(const Map &map, const std::vector<Waypoint> &route) {
+    if (route.empty() || (int)route.size() > MAX_WAYPOINTS) return false;
+    for (const auto &w : route) {
+        if (!map.in_bounds(w.at) || map.at(w.at).terrain == T_WATER) return false;
+        if (w.mode > MV_ASSAULT || w.halt_min < 0 || w.halt_min > MAX_WAYPOINT_HALT) return false;
+        if (w.shape < -1 || w.shape >= FS_COUNT) return false;
+    }
+    return true;
+}
+
+int World::route_delay(int unit_id, const std::vector<Waypoint> &route, bool *adjust) const {
+    if (adjust) *adjust = false;
+    if (unit_id < 0 || unit_id >= (int)units.size() || !units[unit_id].alive || !orderable(units[unit_id])) return -1;
+    if (!valid_route(map, route)) return -1;
+    const Unit &u = units[unit_id];
+    const int base = command_delay(u);
+    if (!is_adjustment(u, route)) return base;
+    if (adjust) *adjust = true;
+    const int streak = time_min - u.last_adjust_at <= ADJUST_WINDOW ? u.adjust_streak + 1 : 1;
+    const float f = streak == 1 ? ADJUST_FACTOR : streak == 2 ? ADJUST_FACTOR_2 : 1.0f;
+    return std::max(ADJUST_MIN_DELAY, (int)std::ceil(base * f));
+}
+
+int World::order_route(int unit_id, const std::vector<Waypoint> &route, bool *adjust) {
+    bool adj = false;
+    const int delay = route_delay(unit_id, route, &adj);
+    if (adjust) *adjust = adj;
+    if (delay < 0) return -1;
     Unit &u = units[unit_id];
-    if (!u.alive || !orderable(u) || !map.in_bounds(target)) return -1;
-    if (map.at(target).terrain == T_WATER) return -1;
-    int delay = command_delay(u);
-    u.pending = {true, O_MOVE, target, time_min, time_min + delay, mode};
+    if (adj) {
+        u.adjust_streak = time_min - u.last_adjust_at <= ADJUST_WINDOW ? u.adjust_streak + 1 : 1;
+        u.last_adjust_at = time_min;
+    } else {
+        u.adjust_streak = 0;
+    }
+    u.pending = {true, O_MOVE, route.back().at, time_min, time_min + delay, route.front().mode};
+    u.pending.route = route;
+    u.pending.adjust = adj;
     return delay;
+}
+
+int World::order_move(int unit_id, HexCoord target, MoveMode mode) {
+    Waypoint w;
+    w.at = target;
+    w.mode = mode;
+    return order_route(unit_id, {w});
 }
 
 int World::order_fall_back(int unit_id) {
@@ -1624,7 +1706,17 @@ void World::bucket_insert(const Unit &u) {
     if (std::find(b.begin(), b.end(), u.id) == b.end()) b.push_back(u.id);
 }
 
+// Drops the unit's route: a new order, falling back, a drill or a team move replaces it.
+static void clear_route(Unit &u) {
+    u.route.clear();
+    u.wp_i = 0;
+    u.wp_halt_until = -1;
+    u.leg_due = false;
+    u.route_pause = RP_NONE;
+}
+
 static void halt(Unit &u) {
+    clear_route(u);
     u.path.clear();
     u.path_i = 0;
     u.progress = 0;
@@ -1803,21 +1895,9 @@ void World::update_standoff() {
         const int S = standoff_hexes(u);
         if (S <= 0) continue;
         // Nearest enemy this side knows about (seen now, or seen in the last 10 minutes).
-        int best = -1, bd = 1 << 30;
         HexCoord bpos;
-        for_units_near(u.pos, S + 8, [&](const Unit &o) {
-            if (!o.alive || o.side == u.side) return;
-            HexCoord at;
-            if (seen_by(o, u.side)) at = o.pos;
-            else if (time_min - o.last_seen[u.side] <= 10) at = o.last_seen_pos[u.side];
-            else return;
-            int d = hex_distance(u.pos, at);
-            if (d < bd) {
-                bd = d;
-                best = o.id;
-                bpos = at;
-            }
-        });
+        int bd = 0;
+        const int best = standoff_threat(u, S, &bpos, &bd);
         if (best < 0) continue;
         // Moving in: stop at the stand-off line.
         if (u.moving() && u.order == O_MOVE) {
@@ -1828,6 +1908,7 @@ void World::update_standoff() {
                 u.progress = 0;
                 u.order = O_HOLD;
                 u.dest = u.pos;
+                pause_route(u, RP_STANDOFF, bpos); // picks the route up once it is clear
                 if (u.side == SIDE_PLAYER)
                     push_event(EV_INFO, u.id, false,
                                fmt("%s halts at its %.1f km stand-off from a hostile %s.", u.name.c_str(), S * 0.5,
@@ -1899,6 +1980,36 @@ int World::order_hold(int unit_id) {
     return delay;
 }
 
+// Minutes for the rest of the unit's present leg.
+static float leg_cost(const World &w, const Unit &u) {
+    float cost = 0;
+    int from = w.map.index(u.pos);
+    for (size_t i = u.path_i; i < u.path.size(); ++i) {
+        cost += std::max(0.0f, w.move_cost(u, from, u.path[i]));
+        from = u.path[i];
+    }
+    return cost;
+}
+
+float World::plan_leg(int unit_id, HexCoord from, HexCoord to, MoveMode mode, std::vector<int> &path) {
+    path.clear();
+    if (unit_id < 0 || unit_id >= (int)units.size() || !units[unit_id].alive) return -1;
+    if (!map.in_bounds(from) || !map.in_bounds(to) || map.at(to).terrain == T_WATER) return -1;
+    if (from == to) return 0;
+    // A scratch copy of the unit at `from`: start_path's rules, without touching the real one
+    // or the path budget.
+    Unit t = units[unit_id];
+    t.pos = from;
+    t.mode = mode;
+    clear_route(t);
+    const int saved = paths_this_tick_;
+    start_path(t, to, O_MOVE, false);
+    paths_this_tick_ = saved;
+    if (!t.moving()) return -1;
+    path = t.path;
+    return leg_cost(*this, t);
+}
+
 void World::start_path(Unit &u, HexCoord target, OrderKind kind, bool announce) {
     u.path.clear();
     u.path_i = 0;
@@ -1935,6 +2046,8 @@ void World::start_path(Unit &u, HexCoord target, OrderKind kind, bool announce) 
             if (idx != tgt_idx) closed.push_back(idx);
         }
     }
+    // A copied World keeps the source's pathfinder, which still points at the source's map.
+    if (!pf_.attached_to(&map)) pf_.attach(&map);
     PathResult pr = pf_.find(
         u.pos, target,
         [&](int a, int b) {
@@ -1987,6 +2100,30 @@ void World::update_orders() {
         }
         u.mode = u.pending.mode;
         u.resting = false;
+        if (kind == O_MOVE) {
+            // A route: the unit drops whatever it was doing and starts the first leg. An
+            // adjustment re-plans from where the unit is, keeping its progress into the next hex.
+            const bool adjusted = u.pending.adjust;
+            const bool was_moving = u.moving();
+            const int old_next = was_moving ? u.path[u.path_i] : -1;
+            const float old_progress = u.progress;
+            std::vector<Waypoint> route = std::move(u.pending.route);
+            if (route.empty()) {
+                Waypoint w;
+                w.at = u.pending.target;
+                w.mode = u.pending.mode;
+                route.push_back(w);
+            }
+            u.pending.route.clear();
+            clear_route(u);
+            u.route = std::move(route);
+            start_leg(u, u.side == SIDE_PLAYER);
+            if (adjusted && was_moving && u.moving() && u.path[u.path_i] == old_next) u.progress = old_progress;
+            if (adjusted && u.side == SIDE_PLAYER && u.on_route())
+                push_event(EV_ORDER, u.id, false, fmt("%s adjusts its route.", u.name.c_str()));
+            continue;
+        }
+        clear_route(u);
         HexCoord target = u.pending.target;
         if (kind == O_REGROUP || kind == O_REST) target = regroup_point(u);
         else if (kind == O_RETREAT) target = fall_back_point(u);
@@ -1995,6 +2132,142 @@ void World::update_orders() {
             if (u.moving()) u.order = kind;
             u.resting = kind == O_REST;
         }
+    }
+}
+
+// ------------------------------------------------------------------------------------
+// Routes (MRK-20)
+// ------------------------------------------------------------------------------------
+
+void World::start_leg(Unit &u, bool announce) {
+    u.leg_due = false;
+    u.wp_halt_until = -1;
+    if (!u.on_route()) return;
+    const Waypoint &w = u.route[u.wp_i];
+    u.mode = w.mode;
+    // A team leader sets the team's formation for this leg (column on the road, line on the approach).
+    if (w.shape >= 0 && u.group >= 0 && u.group < (int)groups.size() && groups[u.group].alive &&
+        groups[u.group].leader == u.id && groups[u.group].shape != w.shape)
+        set_group_shape(u.group, w.shape, -1);
+    const bool single = u.route.size() == 1;
+    start_path(u, w.at, O_MOVE, announce && single); // a plain move reports as before
+    if (u.pos == w.at) return;                       // already there: update_routes moves on
+    if (!u.moving()) {
+        if (u.side == SIDE_PLAYER && !single)
+            push_event(EV_INFO, u.id, false,
+                       fmt("%s: no route to waypoint %d. It halts.", u.name.c_str(), u.wp_i + 1));
+        clear_route(u);
+        return;
+    }
+    if (announce && !single) {
+        const int mins = (int)leg_cost(*this, u);
+        push_event(EV_ORDER, u.id, false,
+                   fmt("%s moving: waypoint %d of %d, %.0f km, about %dh%02d.", u.name.c_str(), u.wp_i + 1,
+                       (int)u.route.size(), u.path.size() * 0.5, mins / 60, mins % 60));
+    }
+}
+
+void World::pause_route(Unit &u, uint8_t why, HexCoord blocked) {
+    if (!u.on_route()) return;
+    u.route_pause = why;
+    u.blocked_hex = blocked;
+    u.leg_due = false;
+    u.route_check = time_min + 1;
+}
+
+// The nearest enemy this unit's side knows about (seen now or in the last 10 minutes) within
+// its stand-off plus 8 hexes; -1 none. The stand-off rules work from it.
+int World::standoff_threat(const Unit &u, int S, HexCoord *at, int *dist) const {
+    int best = -1, bd = 1 << 30;
+    HexCoord bpos;
+    for_units_near(u.pos, S + 8, [&](const Unit &o) {
+        if (!o.alive || o.side == u.side) return;
+        HexCoord p;
+        if (seen_by(o, u.side)) p = o.pos;
+        else if (time_min - o.last_seen[u.side] <= 10) p = o.last_seen_pos[u.side];
+        else return;
+        int d = hex_distance(u.pos, p);
+        if (d < bd) {
+            bd = d;
+            best = o.id;
+            bpos = p;
+        }
+    });
+    if (at) *at = bpos;
+    if (dist) *dist = bd;
+    return best;
+}
+
+// Would the next step of the unit's path take it inside its stand-off?
+bool World::standoff_blocks(const Unit &u) const {
+    if (!u.moving() || u.mode == MV_ASSAULT || u.order != O_MOVE) return false;
+    const int S = standoff_hexes(u);
+    if (S <= 0) return false;
+    HexCoord bpos;
+    int bd = 0;
+    if (standoff_threat(u, S, &bpos, &bd) < 0) return false;
+    const HexCoord next = map.coord_of(u.path[u.path_i]);
+    return hex_distance(next, bpos) < S && hex_distance(next, bpos) < bd;
+}
+
+void World::update_routes() {
+    for (auto &u : units) {
+        if (!u.alive || !u.on_route()) continue;
+        if (u.moving() || u.order == O_RETREAT) continue;
+        if (u.route_pause != RP_NONE) {
+            // Halted by an enemy-held hex or at the stand-off line: pick the route up again once
+            // that is clear (decided 2026-11-09). Checked every 2 minutes.
+            if (time_min < u.route_check || paths_this_tick_ >= MAX_PATHS_PER_TICK) continue;
+            u.route_check = time_min + 2;
+            if (u.route_pause == RP_ENEMY_HEX && map.in_bounds(u.blocked_hex)) {
+                bool held = false;
+                for_units_near(u.blocked_hex, 1, [&](const Unit &o) {
+                    if (o.alive && o.side != u.side && o.pos == u.blocked_hex) held = true;
+                });
+                if (held) continue;
+            }
+            const uint8_t why = u.route_pause;
+            const HexCoord blocked = u.blocked_hex;
+            u.route_pause = RP_NONE;
+            start_leg(u, false);
+            if (standoff_blocks(u)) { // still inside the stand-off going this way: wait
+                u.path.clear();
+                u.path_i = 0;
+                u.progress = 0;
+                u.order = O_HOLD;
+                u.dest = u.pos;
+                pause_route(u, why, blocked);
+                u.route_check = time_min + 2;
+                continue;
+            }
+            if (u.on_route() && u.side == SIDE_PLAYER)
+                push_event(EV_INFO, u.id, false, fmt("%s resumes its route.", u.name.c_str()));
+            continue;
+        }
+        if (u.leg_due) {
+            if (time_min < u.wp_halt_until || paths_this_tick_ >= MAX_PATHS_PER_TICK) continue;
+            start_leg(u, false);
+            continue;
+        }
+        if (u.pos == u.route[u.wp_i].at) {
+            // At the waypoint: halt the set time there, then on to the next one.
+            const int halt_for = u.route[u.wp_i].halt_min;
+            ++u.wp_i;
+            if (!u.on_route()) {
+                clear_route(u);
+                continue;
+            }
+            u.leg_due = true;
+            u.wp_halt_until = time_min - 1 + halt_for; // it arrived during the last tick
+            if (halt_for > 0 && u.side == SIDE_PLAYER)
+                push_event(EV_INFO, u.id, false,
+                           fmt("%s halts %d min at waypoint %d.", u.name.c_str(), halt_for, u.wp_i));
+            if (time_min >= u.wp_halt_until && paths_this_tick_ < MAX_PATHS_PER_TICK) start_leg(u, false);
+            continue;
+        }
+        // Stopped short for another reason (the path ran into ground it can't cross): the unit
+        // halts there, as a plain move always has.
+        clear_route(u);
     }
 }
 
@@ -2030,6 +2303,7 @@ void World::tick() {
     ++time_min;
 
     update_orders();
+    update_routes();
     update_groups();
     update_movement();
     update_mounting();
@@ -2154,7 +2428,10 @@ bool World::set_group_shape(int gid, int shape, int spacing) {
             g.keep_dy[k] = (float)(mc.y - lc.y);
         }
     }
-    for (int id : g.members) units[id].follow = true;
+    for (int id : g.members) {
+        units[id].follow = true;
+        clear_route(units[id]); // back in formation: the team moves it
+    }
     g.has_dest = false; // members take up their new slots
     return true;
 }
@@ -2165,8 +2442,21 @@ int World::order_group_move(int gid, HexCoord target, MoveMode mode) {
     for (int id : g.members) {
         units[id].follow = true;
         units[id].pending.active = false; // the team order replaces anything still on its way
+        clear_route(units[id]);
     }
     return order_move(g.leader, target, mode);
+}
+
+int World::order_group_route(int gid, const std::vector<Waypoint> &route, bool *adjust) {
+    if (gid < 0 || gid >= (int)groups.size() || !groups[gid].alive) return -1;
+    Group &g = groups[gid];
+    if (route_delay(g.leader, route) < 0) return -1;
+    for (int id : g.members) {
+        units[id].follow = true;
+        units[id].pending.active = false; // the team order replaces anything still on its way
+        clear_route(units[id]);
+    }
+    return order_route(g.leader, route, adjust);
 }
 
 int World::order_group_hold(int gid) {
@@ -2175,6 +2465,7 @@ int World::order_group_hold(int gid) {
     for (int id : g.members) {
         units[id].follow = true;
         units[id].pending.active = false;
+        clear_route(units[id]);
     }
     return order_hold(g.leader);
 }
@@ -2454,6 +2745,7 @@ void World::update_movement() {
                     u.path_i = 0;
                     u.progress = 0;
                     halted_by_enemy = true;
+                    pause_route(u, RP_ENEMY_HEX, next); // picks the route up once the hex is clear
                     break;
                 }
             }
@@ -2478,7 +2770,9 @@ void World::update_movement() {
             u.progress = 0;
             u.path.clear();
             u.path_i = 0;
-            if (u.side == SIDE_PLAYER && !was_retreat && !u.follow && !halted_by_enemy) // team members keeping station don't report
+            // A waypoint on the way is not an arrival (update_routes takes it from there).
+            const bool waypoint = u.on_route() && u.wp_i + 1 < (int)u.route.size() && u.pos == u.route[u.wp_i].at;
+            if (u.side == SIDE_PLAYER && !was_retreat && !u.follow && !halted_by_enemy && !waypoint) // team members keeping station don't report
                 push_event(EV_ARRIVED, u.id, false, fmt("%s has arrived %s.", u.name.c_str(), place_name(u.pos).c_str()));
         }
     }
@@ -2571,6 +2865,7 @@ void World::displace_battery(Unit &u) {
     if (best == u.pos) return;
     const MoveMode keep = u.mode;
     u.mode = MV_HASTY;
+    clear_route(u);
     start_path(u, best, O_MOVE, false);
     if (!u.moving()) u.mode = keep;
     if (u.side == SIDE_PLAYER && u.moving())
@@ -2814,6 +3109,7 @@ void World::update_morale_and_sop() {
             u.pending.active = false;
             u.mode = MV_HASTY;
             u.resting = false;
+            clear_route(u); // a unit that breaks drops its route
             start_path(u, away, O_RETREAT, false);
             if (u.moving()) {
                 u.order = O_RETREAT;
@@ -3130,10 +3426,11 @@ bool World::player_in_contact() const {
 // ------------------------------------------------------------------------------------
 
 namespace {
-constexpr char kSaveMagic[8] = {'M', 'U', 'R', 'K', 'S', 'S', 'V', '7'};
+constexpr char kSaveMagic[8] = {'M', 'U', 'R', 'K', 'S', 'S', 'V', '8'};
 
 struct SaveWriter {
     std::vector<uint8_t> b;
+    bool ok = true; // shared shape with SaveReader (io_route); writing never fails
     template <typename T> void pod(const T &v) {
         static_assert(std::is_trivially_copyable<T>::value, "pod");
         const uint8_t *p = reinterpret_cast<const uint8_t *>(&v);
@@ -3182,6 +3479,19 @@ struct SaveReader {
     }
 };
 
+template <typename A> void io_route(A &a, std::vector<Waypoint> &r) {
+    uint32_t n = (uint32_t)r.size();
+    a.pod(n);
+    if (n > (uint32_t)MAX_WAYPOINTS) {
+        n = 0;
+        a.ok = false;
+    }
+    r.resize(n);
+    for (auto &w : r) {
+        a.pod(w.at); a.pod(w.mode); a.pod(w.halt_min); a.pod(w.shape);
+    }
+}
+
 template <typename A, typename U> void io_unit(A &a, U &u) {
     a.pod(u.id); a.pod(u.side); a.pod(u.type); a.str(u.name); a.str(u.equipment);
     a.pod(u.formation); a.pod(u.slot); a.pod(u.pos); a.pod(u.prev_pos); a.pod(u.dest);
@@ -3193,6 +3503,10 @@ template <typename A, typename U> void io_unit(A &a, U &u) {
     // Field by field: whole structs would carry their (uninitialised) padding into the save.
     a.pod(u.pending.active); a.pod(u.pending.kind); a.pod(u.pending.target); a.pod(u.pending.issued_at);
     a.pod(u.pending.activates_at); a.pod(u.pending.mode);
+    io_route(a, u.pending.route); a.pod(u.pending.adjust);
+    io_route(a, u.route); a.pod(u.wp_i); a.pod(u.wp_halt_until); a.pod(u.leg_due);
+    a.pod(u.route_pause); a.pod(u.blocked_hex); a.pod(u.route_check);
+    a.pod(u.last_adjust_at); a.pod(u.adjust_streak);
     a.pod(u.mode);
     a.pod(u.roe); a.pod(u.brk);
     a.pod(u.pending_stance.active); a.pod(u.pending_stance.roe); a.pod(u.pending_stance.brk);
@@ -3350,6 +3664,10 @@ bool World::load_state(const uint8_t *data, size_t size, std::string *error) {
             return fail("save is corrupt");
         for (int idx : u.path)
             if (idx < 0 || idx >= n_cells) return fail("save is corrupt");
+        if (u.wp_i < 0 || u.wp_i > (int)u.route.size()) return fail("save is corrupt");
+        for (const auto *r : {&u.route, &u.pending.route})
+            for (const auto &wp : *r)
+                if (!map.in_bounds(wp.at)) return fail("save is corrupt");
     }
     for (const auto &f : fs)
         for (int id : f.members)

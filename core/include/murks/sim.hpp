@@ -59,13 +59,50 @@ struct UnitTypeInfo {
 };
 const UnitTypeInfo &unit_type_info(int type);
 
+// Routes (MRK-20). A move order carries up to MAX_WAYPOINTS waypoints. Each sets the move mode
+// for the leg that leads to it, how long to halt there, and (for a team leader) the formation
+// shape the team takes for that leg. The whole route goes down the chain as one order with one
+// command delay; on reaching a waypoint the unit plans the next leg.
+constexpr int MAX_WAYPOINTS = 16;
+constexpr int MAX_WAYPOINT_HALT = 60; // minutes
+struct Waypoint {
+    HexCoord at;
+    MoveMode mode = MV_HASTY; // for the leg that ends here
+    int16_t halt_min = 0;     // minutes to halt here before the next leg (0-60)
+    int8_t shape = -1;        // team leaders: formation shape for this leg (FormationShape), -1 keep
+};
+inline bool operator==(const Waypoint &a, const Waypoint &b) {
+    return a.at == b.at && a.mode == b.mode && a.halt_min == b.halt_min && a.shape == b.shape;
+}
+
+// Route edits. An edit that keeps every changed waypoint within ADJUST_RADIUS_M of the old route
+// and moves the final destination no more than that is an adjustment: it costs ADJUST_FACTOR of
+// the normal command delay (at least ADJUST_MIN_DELAY), and the unit keeps following its old
+// route until it arrives. The second adjustment within ADJUST_WINDOW minutes of the one before
+// costs ADJUST_FACTOR_2, the third and later full delay. A halted unit moving 2 km or less gets
+// the same rate (adjust position). A change to Assault is always a new order. Starting values
+// accepted by the user on 2026-11-09 (Work Board MRK-20).
+constexpr float ADJUST_RADIUS_M = 2000.0f;
+constexpr float ADJUST_FACTOR = 0.5f, ADJUST_FACTOR_2 = 0.75f;
+constexpr int ADJUST_MIN_DELAY = 3;
+constexpr int ADJUST_WINDOW = 30;
+// A unit on the move receives any order or adjustment at this factor (first estimate, see
+// command_delay; not yet sourced).
+constexpr float MOVING_ORDER_FACTOR = 1.25f;
+
+// Why a route is paused: the unit halted short of an enemy-held hex or at its stand-off line,
+// and picks the route up again once that is clear.
+enum RoutePause : uint8_t { RP_NONE = 0, RP_ENEMY_HEX, RP_STANDOFF };
+
 struct PendingOrder {
     bool active = false;
     OrderKind kind = O_HOLD;
-    HexCoord target;
+    HexCoord target;             // O_MOVE: the route's final waypoint
     int64_t issued_at = 0;
     int64_t activates_at = 0;
     MoveMode mode = MV_HASTY;
+    std::vector<Waypoint> route; // O_MOVE: the waypoints, in order (one for a plain move)
+    bool adjust = false;         // an adjustment of the route in progress (see ADJUST_*)
 };
 
 // Rules of engagement and break-contact changes also travel down the chain of command.
@@ -90,8 +127,19 @@ struct Unit {
     int formation = 0;
     int slot = 0;
 
-    HexCoord pos, prev_pos, dest;
-    std::vector<int> path; // hex indices
+    HexCoord pos, prev_pos, dest; // dest: the end of the present leg
+    std::vector<int> path; // hex indices, for the present leg only
+    // Route: the waypoints still ahead start at wp_i. Empty when the unit has no route (holding,
+    // falling back, keeping station in a team, or moved by a standing procedure).
+    std::vector<Waypoint> route;
+    int wp_i = 0;
+    int64_t wp_halt_until = -1;   // halting at waypoint wp_i - 1 until then
+    bool leg_due = false;         // the next leg still has to be planned (lazy, path budget)
+    uint8_t route_pause = RP_NONE;
+    HexCoord blocked_hex;         // RP_ENEMY_HEX: the hex it halted in front of
+    int64_t route_check = 0;      // next check whether a paused route is clear
+    int64_t last_adjust_at = -100000; // when the last adjustment was issued
+    int adjust_streak = 0;            // adjustments in a row, each within ADJUST_WINDOW of the last
     size_t path_i = 0;
     float progress = 0, step_cost = 1;
     OrderKind order = O_HOLD;
@@ -159,6 +207,9 @@ struct Unit {
     int64_t ai_next = 0;
 
     bool moving() const { return path_i < path.size(); }
+    bool on_route() const { return wp_i < (int)route.size(); }
+    // The final destination: the last waypoint of the route, else the end of the present leg.
+    HexCoord final_dest() const { return route.empty() ? dest : route.back().at; }
 };
 
 // ------------------------------------------------------------------------------------
@@ -377,6 +428,16 @@ public:
 
     // Orders go through the command delay; returns the delay in minutes, or -1.
     int order_move(int unit_id, HexCoord target, MoveMode mode = MV_HASTY);
+    // A route of 1..MAX_WAYPOINTS waypoints (a plain move is a route of one). Replaces the
+    // route in progress and any order still on its way. Returns the delay in minutes, or -1.
+    // *adjust tells whether it went as an adjustment (see ADJUST_*).
+    int order_route(int unit_id, const std::vector<Waypoint> &route, bool *adjust = nullptr);
+    // What order_route would cost now, without giving it: the delay, and whether it is an
+    // adjustment. -1 when the route is not valid.
+    int route_delay(int unit_id, const std::vector<Waypoint> &route, bool *adjust = nullptr) const;
+    // Plans one leg for the map (route preview and ETAs) without moving anyone: fills `path`
+    // with hex indices and returns the minutes the unit would need at `mode`, or -1 (no route).
+    float plan_leg(int unit_id, HexCoord from, HexCoord to, MoveMode mode, std::vector<int> &path);
     int order_hold(int unit_id);
     int order_fall_back(int unit_id);              // away from known enemies, else back to the HQ
     int order_regroup(int unit_id, bool rest);
@@ -394,6 +455,8 @@ public:
     int standoff_hexes(const Unit &u) const;       // effective stand-off in hexes, 0 = stay and fight
     uint8_t default_standoff = 0;                  // company default stand-off (player side)
     int command_delay(const Unit &u) const;
+    // Is this route an adjustment of the unit's route in progress (see ADJUST_*)?
+    bool is_adjustment(const Unit &u, const std::vector<Waypoint> &route) const;
 
     // Teams. create_group returns the team id or -1; the leader must be one of ids.
     int create_group(const std::vector<int> &ids, int leader);
@@ -401,6 +464,7 @@ public:
     bool set_group_shape(int gid, int shape, int spacing);
     int order_group_move(int gid, HexCoord target, MoveMode mode = MV_HASTY); // leader moves, team follows
     int order_group_hold(int gid);                                           // leader halts, team forms up on it
+    int order_group_route(int gid, const std::vector<Waypoint> &route, bool *adjust = nullptr); // leader's route, team follows
     void detach(int unit_id); // a member given its own order leaves the formation until the next team order
     int hq_above(const Unit &u) const;      // the HQ or team leader this unit takes orders from, -1 none
     int command_zone(const Unit &hq) const; // zone of effective command in hexes
@@ -564,6 +628,11 @@ private:
     double used_diesel_l_ = 0, used_ammo_t_ = 0; // this hour, for the consumption rates
     void push_event(EventKind k, int unit, bool pause, const std::string &text);
     void start_path(Unit &u, HexCoord target, OrderKind kind, bool announce);
+    void start_leg(Unit &u, bool announce);  // plans the leg to route[wp_i]
+    void update_routes();                    // halts at waypoints, next legs, resuming paused routes
+    void pause_route(Unit &u, uint8_t why, HexCoord blocked);
+    int standoff_threat(const Unit &u, int S, HexCoord *at, int *dist) const;
+    bool standoff_blocks(const Unit &u) const;
     HexCoord regroup_point(const Unit &u) const;
     HexCoord fall_back_point(const Unit &u) const;
     int spawn(int formation, int8_t side, UnitType type, const std::string &name, const std::string &equip,

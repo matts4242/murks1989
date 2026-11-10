@@ -54,6 +54,10 @@ target_link_libraries(suppression_test PRIVATE murks_core)
 add_executable(holdings_test tests/holdings_test.cpp)
 target_link_libraries(holdings_test PRIVATE murks_core)
 
+# Waypoint routes: legs, halts, adjustments, pause and resume, save/load. build/route_test
+add_executable(route_test tests/route_test.cpp)
+target_link_libraries(route_test PRIVATE murks_core)
+
 # Real-map 4-day scripted runs over several seeds (needs zlib). build/playtest game/data/poland_1989.murkz 4 active 1989 8
 find_package(ZLIB)
 if(ZLIB_FOUND)
