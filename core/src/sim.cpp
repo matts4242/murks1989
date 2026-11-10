@@ -32,6 +32,9 @@ const UnitTypeInfo kTypes[U_TYPE_COUNT] = {
     {"Rifle Plt", M_FOOT, 6, 2, 4.0f, 0.5f, false, false, 3, 0.0f, 0, 1.0f, 35, 1, 0},
     {"Recon Sect", M_WHEELED, 14, 3, 2.5f, 0.25f, false, false, 3, 0.08f, 500, 0.5f, 15, 1, 0},
     {"Arty Bty", M_TRACKED, 6, 30, 12.0f, 0.6f, false, true, 4, 0.12f, 2400, 18.0f, 30, 1, 0},
+    // Supply column: 6 Ural-375D (4.5 t each), 2 men a truck with small arms. About 48 L/100 km
+    // loaded: 1.4 L a hex for the column, 0.08% of its 1,800 L. First estimates (MRK-09).
+    {"Supply Col", M_WHEELED, 6, 1, 0.5f, 0.05f, false, false, 3, 0.08f, 1800, 0.2f, 12, 1, 0},
 };
 
 // Minutes per hex by mobility and terrain (water, open, fields, forest, wetland, urban).
@@ -67,6 +70,22 @@ std::string fmt(const char *f, ...) {
 } // namespace
 
 const UnitTypeInfo &unit_type_info(int type) { return kTypes[type < 0 || type >= U_TYPE_COUNT ? 0 : type]; }
+
+const char *holding_kind_name(int kind) {
+    static const char *names[HK_COUNT] = {"Town", "Farm collective", "Fuel depot", "Ammo dump"};
+    return names[kind < 0 || kind >= HK_COUNT ? 0 : kind];
+}
+
+const char *levy_kind_name(int kind) {
+    static const char *names[LV_COUNT] = {"food", "fuel", "cash", "men"};
+    return names[kind < 0 || kind >= LV_COUNT ? 0 : kind];
+}
+
+const char *convoy_state_name(int state) {
+    static const char *names[6] = {"With the trains", "To the source", "Loading", "To the destination",
+                                   "Unloading", "Returning to the trains"};
+    return names[state < 0 || state >= 6 ? 0 : state];
+}
 
 World::World() : rng_(1989) {}
 
@@ -164,6 +183,8 @@ void World::attach_map() {
     buckets_.assign((size_t)bucket_cols_ * bucket_rows_, {});
     units.clear();
     formations.clear();
+    holdings.clear();
+    routes.clear();
     label_land_regions();
 }
 
@@ -246,8 +267,11 @@ void World::setup_scenario(int extra_groups) {
     units.clear();
     formations.clear();
     groups.clear();
+    holdings.clear();
+    routes.clear();
     events_.clear();
     stock = CompanyStock{};
+    used_diesel_l_ = used_ammo_t_ = 0;
     outcome_ = OUT_ONGOING;
     outcome_text_.clear();
     default_standoff = 0;
@@ -288,6 +312,12 @@ void World::setup_scenario(int extra_groups) {
     spawn(0, SIDE_PLAYER, U_RECON, "1st Recon", "2x BRDM-2", {home.col + 6, home.row - 1}, taken);
     spawn(0, SIDE_PLAYER, U_RECON, "2nd Recon", "2x BRDM-2", {home.col + 6, home.row + 3}, taken);
     spawn(0, SIDE_PLAYER, U_ARTILLERY, "Battery", "4x 2S1 Gvozdika", {home.col - 3, home.row}, taken);
+    {
+        // The company trains' trucks: a supply column that works the supply routes.
+        int tr = spawn(0, SIDE_PLAYER, U_TRUCK, "Supply Column", "6x Ural-375D", {home.col - 1, home.row + 1}, taken);
+        units[tr].roe = ROE_RETURN;
+        units[tr].brk = BC_LIGHT;
+    }
 
     // ---- Hostile strike group heading for the company's town ---------------------------
     int a_town = settlement_near(0.38 + 120.0 / map.cols() * 1.0, 0.50, 2000, 400000);
@@ -345,11 +375,736 @@ void World::setup_scenario(int extra_groups) {
         if (u.side == SIDE_PLAYER && u.carrier < 0) stock.personnel += unit_type_info(u.type).crew;
     }
     for (int f = 0; f < (int)formations.size(); ++f) formations[f].start_combat = effective_combat_units(f);
+    setup_holdings();
     push_event(EV_INFO, -1, false,
                fmt("Company Murks is billeted at %s. The 7th Guards Remnant is moving on the town from the east: "
                    "break it before it breaks you.", S[player_home].name.c_str()));
     rebuild_buckets();
     update_zones();
+}
+
+// ------------------------------------------------------------------------------------
+// Holdings: towns, farms and depots the company can hold (MRK-08)
+// ------------------------------------------------------------------------------------
+
+// Towns of 5,000+ within about 120 km of home are holdings; the home town is the company's.
+// Around it, deterministically from the settlement list: one fuel depot and one ammo dump at
+// villages 15-50 km out (a remnant army's stores), and four farm collectives at villages in
+// farmland within 60 km. All first estimates; everything else starts independent.
+void World::setup_holdings() {
+    holdings.clear();
+    routes.clear();
+    const auto &S = map.settlements;
+    if (S.empty() || player_home < 0) return;
+    const HexCoord home = S[player_home].pos;
+    std::vector<bool> used(S.size(), false);
+    auto add = [&](int si, HoldingKind kind, int8_t owner, float loyalty) {
+        Holding h;
+        h.settlement = si;
+        h.name = S[si].name;
+        h.pos = S[si].pos;
+        h.radius = std::max(1, S[si].radius);
+        h.kind = kind;
+        h.owner = owner;
+        h.known_owner = owner;
+        h.loyalty = loyalty;
+        h.population = S[si].population;
+        h.manpower = owner >= 0 ? (int)(h.population * 0.005) : (int)(h.population * 0.002); // volunteers so far
+        switch (kind) {
+            case HK_TOWN: h.diesel_l = h.population * 1.0; break; // what the town's garages still hold
+            case HK_FARM: h.food_kg = 2000; break;
+            case HK_FUEL_DEPOT: h.diesel_l = 40000; break;
+            case HK_AMMO_DUMP: h.ammo_t = 60; break;
+            default: break;
+        }
+        used[si] = true;
+        holdings.push_back(h);
+    };
+    add(player_home, HK_TOWN, SIDE_PLAYER, 50.0f);
+    for (int i = 0; i < (int)S.size(); ++i) {
+        if (used[i] || S[i].population < 5000) continue;
+        if (hex_distance(S[i].pos, home) > 240 || !reachable(S[i].pos, home)) continue;
+        add(i, HK_TOWN, -1, 30.0f);
+    }
+    // Depots: villages 15-50 km out, the first on rail (an army depot sits on a railway), then any.
+    auto pick_village = [&](int min_d, int max_d, bool want_rail, bool want_fields) {
+        int best = -1, bd = 1 << 30;
+        for (int i = 0; i < (int)S.size(); ++i) {
+            if (used[i] || S[i].population >= 5000 || S[i].population < 1000) continue;
+            int d = hex_distance(S[i].pos, home);
+            if (d < min_d || d > max_d || !reachable(S[i].pos, home)) continue;
+            const Hex &x = map.at(S[i].pos);
+            if (want_rail && !(x.features & F_RAIL)) continue;
+            if (want_fields && x.terrain != T_FIELDS) {
+                bool fields = false;
+                for (int dir = 0; dir < 6 && !fields; ++dir) {
+                    HexCoord n = neighbor(S[i].pos, dir);
+                    fields = map.in_bounds(n) && map.at(n).terrain == T_FIELDS;
+                }
+                if (!fields) continue;
+            }
+            // Prefer the middle of the band so depots aren't right on top of the company.
+            int score = std::abs(d - (min_d + max_d) / 2);
+            if (score < bd) {
+                bd = score;
+                best = i;
+            }
+        }
+        return best;
+    };
+    int fuel = pick_village(30, 100, true, false);
+    if (fuel < 0) fuel = pick_village(30, 100, false, false);
+    if (fuel >= 0) add(fuel, HK_FUEL_DEPOT, -1, 30.0f);
+    int ammo = pick_village(30, 100, true, false);
+    if (ammo < 0) ammo = pick_village(30, 100, false, false);
+    if (ammo >= 0) add(ammo, HK_AMMO_DUMP, -1, 30.0f);
+    for (int k = 0; k < 4; ++k) {
+        int f = pick_village(8, 120, false, true);
+        if (f < 0) break;
+        add(f, HK_FARM, -1, 30.0f);
+    }
+}
+
+int World::holding_at(HexCoord h) const {
+    int best = -1, bd = 1 << 30;
+    for (int i = 0; i < (int)holdings.size(); ++i) {
+        int d = hex_distance(holdings[i].pos, h);
+        if (d <= holdings[i].radius && d < bd) {
+            bd = d;
+            best = i;
+        }
+    }
+    return best;
+}
+
+int World::present_in(const Holding &h, int side) const {
+    int n = 0;
+    for_units_near(h.pos, h.radius + 1, [&](const Unit &u) {
+        if (!u.alive || u.side != side || u.type == U_TRUCK || u.embarked) return;
+        if (in_place(h, u.pos)) ++n;
+    });
+    return n;
+}
+
+bool World::can_levy(const Holding &h, int side) const {
+    bool ok = false;
+    for_units_near(h.pos, h.radius + 1, [&](const Unit &u) {
+        if (!u.alive || u.side != side || u.type == U_TRUCK || u.militia || u.embarked || u.moving()) return;
+        if (in_place(h, u.pos)) ok = true;
+    });
+    return ok;
+}
+
+// Taxes of 0.5 DM a head and a food surplus of 20 g a head per day at full loyalty; a farm
+// collective gives 400 kg a day. First estimates for a post-war spring.
+void World::daily_yield(const Holding &h, double &cash, double &food_kg) const {
+    cash = food_kg = 0;
+    if (h.owner < 0) return;
+    const double l = h.loyalty / 100.0;
+    switch (h.kind) {
+        case HK_TOWN:
+            cash = h.population * 0.5 * l;
+            food_kg = h.population * 0.02 * l;
+            break;
+        case HK_FARM: food_kg = 400.0 * l; break;
+        default: break;
+    }
+}
+
+int World::militia_max_squads(const Holding &h) const {
+    if (h.kind != HK_TOWN) return 0;
+    return std::min(MILITIA_MAX_SQUADS, h.population / MILITIA_PER_POP);
+}
+
+int World::militia_squads(const Holding &h) const {
+    if (h.militia_unit < 0 || h.militia_unit >= (int)units.size()) return 0;
+    const Unit &m = units[h.militia_unit];
+    return m.alive ? m.elements : 0;
+}
+
+bool World::orderable(const Unit &u) const {
+    if (u.militia) return false;
+    if (u.type == U_TRUCK && u.convoy_route >= 0) return false;
+    return true;
+}
+
+bool World::set_training(int hid, bool on) {
+    if (hid < 0 || hid >= (int)holdings.size()) return false;
+    Holding &h = holdings[hid];
+    if (h.owner != SIDE_PLAYER || h.kind != HK_TOWN || militia_max_squads(h) == 0) return false;
+    if (on && h.loyalty < 25.0f) return false;
+    if (h.training == on) return true;
+    h.training = on;
+    if (on)
+        push_event(EV_HOLDING, -1, false,
+                   fmt("%s is raising militia: a squad of %d every %d days, up to %d squads.", h.name.c_str(),
+                       MILITIA_SQUAD_MEN, MILITIA_TRAIN_MIN / 1440, militia_max_squads(h)));
+    return true;
+}
+
+std::string World::levy(int hid, int what) {
+    if (hid < 0 || hid >= (int)holdings.size() || what < 0 || what >= LV_COUNT) return "no such holding";
+    Holding &h = holdings[hid];
+    if (h.owner != SIDE_PLAYER) return "the company does not hold " + h.name;
+    if (h.kind != HK_TOWN && h.kind != HK_FARM) return "nothing to requisition at a depot: its stores are already yours";
+    if (!can_levy(h, SIDE_PLAYER)) return "a unit of the company must be halted in " + h.name + " to requisition";
+    if (h.levy_until[what] > time_min)
+        return fmt("%s was requisitioned for %s less than a day ago (again in %d h)", h.name.c_str(),
+                   levy_kind_name(what), (int)((h.levy_until[what] - time_min + 59) / 60));
+    double got = 0;
+    float cost = 10.0f;
+    switch (what) {
+        case LV_FOOD:
+            got = h.population * (h.kind == HK_FARM ? 0.5 : 0.1);
+            h.food_kg += got;
+            break;
+        case LV_FUEL:
+            if (h.kind == HK_FARM) return "a farm collective has no fuel to spare";
+            got = h.population * 0.5;
+            h.diesel_l += got;
+            break;
+        case LV_CASH:
+            if (h.kind == HK_FARM) return "a farm collective has no cash to speak of";
+            got = h.population * 2.0;
+            h.cash += got;
+            cost = 15.0f;
+            break;
+        case LV_MEN:
+            if (h.manpower <= 0) return "nobody in " + h.name + " is willing to serve right now";
+            got = h.manpower;
+            stock.replacements += h.manpower;
+            h.manpower = 0;
+            cost = 15.0f;
+            break;
+        default: break;
+    }
+    h.levy_until[what] = time_min + LEVY_COOLDOWN_MIN;
+    h.loyalty = std::max(0.0f, h.loyalty - cost);
+    static const char *units_of[LV_COUNT] = {"kg of food", "L of fuel", "DM", "men"};
+    push_event(EV_HOLDING, -1, false,
+               fmt("Requisition in %s: %.0f %s%s. Loyalty falls to %.0f.", h.name.c_str(), got, units_of[what],
+                   what == LV_MEN ? " join the company's replacements" : " go into the holding's stores",
+                   h.loyalty));
+    return "";
+}
+
+void World::capture(Holding &h, int side) {
+    const int8_t was = h.owner;
+    h.owner = (int8_t)side;
+    h.loyalty = 20.0f; // taken: the people pay, grudgingly
+    h.contested_since = -1;
+    h.captured_at = time_min;
+    h.training = false;
+    h.training_progress = 0;
+    if (h.militia_unit >= 0 && !units[h.militia_unit].alive) h.militia_unit = -1;
+    std::string stores;
+    if (h.diesel_l >= 1) stores += fmt(" %.0f L diesel", h.diesel_l);
+    if (h.ammo_t >= 0.1) stores += fmt(" %.1f t ammunition", h.ammo_t);
+    if (h.food_kg >= 1) stores += fmt(" %.0f kg food", h.food_kg);
+    if (h.cash >= 1) stores += fmt(" %.0f DM", h.cash);
+    if (side == SIDE_PLAYER) {
+        h.known_owner = SIDE_PLAYER;
+        push_event(EV_HOLDING, -1, true,
+                   fmt("Company Murks takes %s (%s, pop. %d).%s Loyalty %.0f: taken, not won over.", h.name.c_str(),
+                       holding_kind_name(h.kind), h.population,
+                       stores.empty() ? "" : (" Stores found:" + stores + ".").c_str(), h.loyalty));
+    } else if (was == SIDE_PLAYER) {
+        h.known_owner = (int8_t)side;
+        push_event(EV_HOLDING, -1, true,
+                   fmt("%s has been taken by hostile forces.%s", h.name.c_str(),
+                       stores.empty() ? "" : (" Lost with it:" + stores + ".").c_str()));
+        // Routes through a lost source stop: the stores are no longer ours.
+        for (auto &r : routes)
+            if (r.active && r.side == SIDE_PLAYER &&
+                (&holdings[r.source] == &h || (r.dest >= 0 && &holdings[r.dest] == &h)))
+                r.active = false;
+    }
+}
+
+// A town's militia: one unit per holding, growing a squad at a time. They hold the town, take
+// no orders and fight to the end for their homes (BC_NEVER); untrained at first.
+void World::add_militia_squad(Holding &h) {
+    if (h.militia_unit >= 0 && units[h.militia_unit].alive) {
+        Unit &m = units[h.militia_unit];
+        ++m.elements_max;
+        ++m.elements;
+        m.strength = 100.0f * m.elements / m.elements_max;
+        m.equipment = fmt("%d squads of %d militia, rifles", m.elements_max, MILITIA_SQUAD_MEN);
+        return;
+    }
+    Unit m;
+    m.id = (int)units.size();
+    m.side = h.owner;
+    m.type = U_INFANTRY;
+    m.name = h.name + " Militia";
+    m.equipment = fmt("1 squad of %d militia, rifles", MILITIA_SQUAD_MEN);
+    m.formation = 0;
+    for (int f = 0; f < (int)formations.size(); ++f)
+        if (formations[f].side == h.owner) {
+            m.formation = f;
+            break;
+        }
+    m.slot = (int)formations[m.formation].members.size();
+    m.pos = m.prev_pos = m.dest = h.pos;
+    m.last_seen_pos[0] = m.last_seen_pos[1] = h.pos;
+    m.morale = 55;
+    m.readiness = 60;
+    m.elements_max = m.elements = 1;
+    m.roe = ROE_FREE;
+    m.brk = BC_NEVER;
+    m.standoff = 0;
+    m.militia = true;
+    m.holding = (int)(&h - &holdings[0]);
+    m.squad_men = MILITIA_SQUAD_MEN;
+    m.ai_next = rng_.range_int(0, 30);
+    formations[m.formation].members.push_back(m.id);
+    units.push_back(m);
+    h.militia_unit = m.id;
+    bucket_insert(units.back());
+}
+
+// Hourly: who holds each place, loyalty, and militia training.
+void World::update_holdings() {
+    for (int hi = 0; hi < (int)holdings.size(); ++hi) {
+        Holding &h = holdings[hi];
+        int present[SIDE_COUNT];
+        for (int s = 0; s < SIDE_COUNT; ++s) present[s] = present_in(h, s);
+        // Fighting inside the place in the last hour (collateral damage and fear).
+        bool fighting = false;
+        for_units_near(h.pos, h.radius + 1, [&](const Unit &u) {
+            if (u.alive && in_place(h, u.pos) && (time_min - u.last_hit < 60 || time_min - u.last_fired < 60)) fighting = true;
+        });
+        if (fighting) h.last_fight = time_min;
+        // Capture: one side alone in the place for CAPTURE_MIN takes it. Both present: the fight decides.
+        const int sides = (present[0] > 0) + (present[1] > 0);
+        if (sides == 1) {
+            const int s = present[0] > 0 ? 0 : 1;
+            if (s == h.owner) {
+                h.contested_since = -1;
+            } else if (h.contested_since < 0) {
+                h.contested_since = time_min;
+            } else if (time_min - h.contested_since >= CAPTURE_MIN) {
+                capture(h, s);
+            }
+        } else {
+            h.contested_since = -1;
+        }
+        // What the player knows: ownership is seen when the company is within 10 km (or the place is its own).
+        bool own_near = h.owner == SIDE_PLAYER;
+        if (!own_near)
+            for_units_near(h.pos, 20, [&](const Unit &u) {
+                if (u.alive && u.side == SIDE_PLAYER && hex_distance(u.pos, h.pos) <= 20) own_near = true;
+            });
+        if (own_near) h.known_owner = h.owner;
+        if (h.owner < 0) continue;
+        // Loyalty to the owner: protection raises it, enemies nearby with nobody to stop them,
+        // fighting in the streets and requisitions lower it.
+        const int enemy = 1 - h.owner;
+        bool enemy_near = false;
+        for_units_near(h.pos, 10, [&](const Unit &u) {
+            if (u.alive && u.side == enemy && u.type != U_TRUCK && hex_distance(u.pos, h.pos) <= 10) enemy_near = true;
+        });
+        const bool militia_here = militia_squads(h) > 0;
+        const bool troops_here = present[h.owner] > (militia_here ? 1 : 0);
+        if (present[h.owner] > 0) h.loyalty += 0.05f + ((militia_here && troops_here) ? 0.05f : 0.0f);
+        if (enemy_near && present[h.owner] == 0) h.loyalty -= 0.3f;
+        if (fighting) h.loyalty -= 2.0f;
+        h.loyalty = std::max(0.0f, std::min(100.0f, h.loyalty));
+        // Militia training (the player's towns): a squad every MILITIA_TRAIN_MIN from the manpower pool.
+        if (h.training && h.owner == SIDE_PLAYER) {
+            const int squads = militia_squads(h);
+            const int cap = militia_max_squads(h);
+            if (squads >= cap) {
+                h.training = false;
+                h.training_progress = 0;
+                push_event(EV_HOLDING, h.militia_unit, false,
+                           fmt("%s has all the militia it can raise: %d squads.", h.name.c_str(), squads));
+            } else if (h.loyalty < 25.0f) {
+                h.training = false;
+                h.training_progress = 0;
+                push_event(EV_HOLDING, -1, true, fmt("%s stops raising militia: loyalty has fallen under 25.", h.name.c_str()));
+            } else if (h.manpower < MILITIA_SQUAD_MEN) {
+                // Nobody to train: wait for volunteers (the pool refills daily).
+            } else {
+                h.training_progress += 60.0f / MILITIA_TRAIN_MIN;
+                if (h.training_progress >= 1.0f) {
+                    h.training_progress -= 1.0f;
+                    h.manpower -= MILITIA_SQUAD_MEN;
+                    add_militia_squad(h);
+                    push_event(EV_HOLDING, h.militia_unit, false,
+                               fmt("%s: a militia squad of %d is ready (%d of %d).", h.name.c_str(), MILITIA_SQUAD_MEN,
+                                   militia_squads(h), cap));
+                }
+            }
+        }
+    }
+}
+
+// The company trains parked at an own holding draw from its stores, up to the want levels,
+// as fast as the handling allows (10,000 L, 10 t, 2,000 kg an hour; cash and men at once).
+void World::update_trains_at_depot(int hq) {
+    if (hq < 0) return;
+    const Unit &q = units[hq];
+    if (q.moving()) return;
+    for (auto &h : holdings) {
+        if (h.owner != SIDE_PLAYER || hex_distance(h.pos, q.pos) > std::max(3, h.radius)) continue;
+        const double l = std::min({h.diesel_l, std::max(0.0, WANT_DIESEL_L - stock.diesel_l), 10000.0});
+        const double t = std::min({h.ammo_t, std::max(0.0, WANT_AMMO_T - stock.ammo_t), 10.0});
+        const double k = std::min({h.food_kg, std::max(0.0, WANT_FOOD_KG - stock.food_kg), 2000.0});
+        if (l > 0) { h.diesel_l -= l; stock.diesel_l += l; }
+        if (t > 0) { h.ammo_t -= t; stock.ammo_t += t; }
+        if (k > 0) { h.food_kg -= k; stock.food_kg += k; }
+        if (h.cash > 0) { stock.cash += h.cash; h.cash = 0; }
+    }
+}
+
+double World::days_of_diesel() const {
+    return stock.rate_diesel_lph > 1e-6 ? stock.diesel_l / (stock.rate_diesel_lph * 24.0) : 1e9;
+}
+double World::days_of_ammo() const {
+    return stock.rate_ammo_tph > 1e-6 ? stock.ammo_t / (stock.rate_ammo_tph * 24.0) : 1e9;
+}
+double World::days_of_food() const {
+    return stock.personnel > 0 ? stock.food_kg / (stock.personnel * 1.5) : 1e9;
+}
+
+// ------------------------------------------------------------------------------------
+// Supply routes and convoys (MRK-09)
+// ------------------------------------------------------------------------------------
+
+int World::free_convoy(int side) const {
+    for (const auto &u : units)
+        if (u.alive && u.side == side && u.type == U_TRUCK && u.convoy_route < 0 && u.elements > 0) return u.id;
+    return -1;
+}
+
+int World::set_supply_route(int source, int dest, std::string *error) {
+    auto fail = [&](const std::string &why) {
+        if (error) *error = why;
+        return -1;
+    };
+    if (source < 0 || source >= (int)holdings.size()) return fail("no such holding");
+    if (dest >= (int)holdings.size()) return fail("no such destination");
+    if (dest == source) return fail("source and destination are the same place");
+    const Holding &s = holdings[source];
+    if (s.owner != SIDE_PLAYER) return fail("the company does not hold " + s.name);
+    if (dest >= 0 && holdings[dest].owner != SIDE_PLAYER) return fail("the company does not hold " + holdings[dest].name);
+    for (const auto &r : routes)
+        if (r.active && r.side == SIDE_PLAYER && r.source == source && r.dest == dest)
+            return fail("that route already exists");
+    const int cv = free_convoy(SIDE_PLAYER);
+    if (cv < 0) return fail("no supply column is free: every column is working a route, or they are lost");
+    Unit &u = units[cv];
+    const HexCoord to = dest >= 0 ? holdings[dest].pos : (acting_hq(0) >= 0 ? units[acting_hq(0)].pos : u.pos);
+    if (!reachable(u.pos, s.pos) || !reachable(s.pos, to)) return fail("no road or land route between the places");
+    int rid = -1;
+    for (int i = 0; i < (int)routes.size(); ++i)
+        if (!routes[i].active && routes[i].convoy < 0) {
+            rid = i;
+            break;
+        }
+    if (rid < 0) {
+        rid = (int)routes.size();
+        routes.emplace_back();
+    }
+    SupplyRoute r;
+    r.active = true;
+    r.side = SIDE_PLAYER;
+    r.source = source;
+    r.dest = dest;
+    r.convoy = cv;
+    routes[rid] = r;
+    u.convoy_route = rid;
+    u.convoy_state = CV_TO_SOURCE;
+    u.convoy_wait_until = -1;
+    u.pending.active = false;
+    u.resting = false;
+    detach(cv);
+    u.mode = MV_ROAD;
+    start_path(u, s.pos, O_MOVE, false);
+    push_event(EV_SUPPLY, cv, false,
+               fmt("%s takes up the supply route %s -> %s: %d trucks, %.1f t a trip.", u.name.c_str(), s.name.c_str(),
+                   dest >= 0 ? holdings[dest].name.c_str() : "the trains", u.elements, convoy_capacity_t(u)));
+    return rid;
+}
+
+bool World::cancel_supply_route(int rid) {
+    if (rid < 0 || rid >= (int)routes.size() || !routes[rid].active) return false;
+    SupplyRoute &r = routes[rid];
+    r.active = false;
+    if (r.convoy >= 0 && units[r.convoy].alive) {
+        Unit &u = units[r.convoy];
+        // A loaded column still delivers; an empty one comes home.
+        if (u.convoy_state == CV_TO_SOURCE || u.convoy_state == CV_LOADING || u.convoy_state == CV_IDLE) {
+            u.convoy_state = CV_RETURN;
+            u.convoy_wait_until = -1;
+            const int hq = acting_hq(0);
+            u.mode = MV_ROAD;
+            start_path(u, hq >= 0 ? units[hq].pos : u.pos, O_MOVE, false);
+        }
+        push_event(EV_SUPPLY, r.convoy, false,
+                   fmt("Supply route %s -> %s cancelled; %s %s.", holdings[r.source].name.c_str(),
+                       r.dest >= 0 ? holdings[r.dest].name.c_str() : "the trains", u.name.c_str(),
+                       u.convoy_state == CV_RETURN ? "returns to the trains" : "delivers what it carries first"));
+    } else {
+        r.convoy = -1;
+    }
+    return true;
+}
+
+// The column is out of trucks (or stranded): the route stops until a column is assigned again.
+void World::convoy_suspend(Unit &u, const char *why) {
+    if (u.convoy_route >= 0 && u.convoy_route < (int)routes.size()) {
+        SupplyRoute &r = routes[u.convoy_route];
+        r.active = false;
+        r.convoy = -1;
+        r.suspended_at = time_min;
+        if (u.side == SIDE_PLAYER)
+            push_event(EV_SUPPLY, u.id, true,
+                       fmt("Supply route %s -> %s suspended: %s %s.", holdings[r.source].name.c_str(),
+                           r.dest >= 0 ? holdings[r.dest].name.c_str() : "the trains", u.name.c_str(), why));
+    }
+    u.convoy_route = -1;
+    u.convoy_state = CV_IDLE;
+    u.cargo_l = u.cargo_t = u.cargo_kg = 0;
+}
+
+// Loads what the destination is short of (against its want levels), proportionally when the
+// trucks can't take it all. 1 t = 1,190 L diesel = 1 t ammunition = 1,000 kg food.
+void World::load_convoy(Unit &u, SupplyRoute &r) {
+    Holding &s = holdings[r.source];
+    double need_l, need_t, need_kg;
+    if (r.dest < 0) {
+        need_l = std::max(0.0, WANT_DIESEL_L - stock.diesel_l);
+        need_t = std::max(0.0, WANT_AMMO_T - stock.ammo_t);
+        need_kg = std::max(0.0, WANT_FOOD_KG - stock.food_kg);
+    } else {
+        const Holding &d = holdings[r.dest];
+        need_l = std::max(0.0, WANT_DIESEL_L - d.diesel_l);
+        need_t = std::max(0.0, WANT_AMMO_T - d.ammo_t);
+        need_kg = std::max(0.0, WANT_FOOD_KG - d.food_kg);
+    }
+    double take_l = std::min(need_l, s.diesel_l), take_t = std::min(need_t, s.ammo_t), take_kg = std::min(need_kg, s.food_kg);
+    const double tonnes = take_l / DIESEL_L_PER_T + take_t + take_kg / 1000.0;
+    const double cap = convoy_capacity_t(u);
+    if (tonnes > cap && tonnes > 0) {
+        const double f = cap / tonnes;
+        take_l *= f;
+        take_t *= f;
+        take_kg *= f;
+    }
+    s.diesel_l -= take_l;
+    s.ammo_t -= take_t;
+    s.food_kg -= take_kg;
+    u.cargo_l = take_l;
+    u.cargo_t = take_t;
+    u.cargo_kg = take_kg;
+    u.trip_started = time_min;
+    // The trucks fill their own tanks from the depot's pumps while they load.
+    const auto &ti = unit_type_info(u.type);
+    const double own = std::min((100.0 - u.fuel) / 100.0 * ti.fuel_litres, s.diesel_l);
+    if (own > 0) {
+        s.diesel_l -= own;
+        u.fuel += (float)(own / ti.fuel_litres * 100.0);
+        u.out_of_fuel_reported = false;
+    }
+    if (u.side == SIDE_PLAYER) {
+        if (tonnes <= 0.01)
+            push_event(EV_SUPPLY, u.id, false,
+                       fmt("%s at %s: nothing to carry (the stores are empty, or the destination wants nothing). Waiting.",
+                           u.name.c_str(), s.name.c_str()));
+        else
+            push_event(EV_SUPPLY, u.id, false,
+                       fmt("%s loaded at %s: %.0f L diesel, %.1f t ammunition, %.0f kg food.", u.name.c_str(),
+                           s.name.c_str(), take_l, take_t, take_kg));
+    }
+}
+
+void World::unload_convoy(Unit &u, SupplyRoute &r) {
+    std::string where;
+    if (r.dest < 0) {
+        stock.diesel_l += u.cargo_l;
+        stock.ammo_t += u.cargo_t;
+        stock.food_kg += u.cargo_kg;
+        where = "the trains";
+    } else {
+        Holding &d = holdings[r.dest];
+        d.diesel_l += u.cargo_l;
+        d.ammo_t += u.cargo_t;
+        d.food_kg += u.cargo_kg;
+        where = d.name;
+    }
+    r.delivered_l += u.cargo_l;
+    r.delivered_t += u.cargo_t;
+    r.delivered_kg += u.cargo_kg;
+    ++r.trips;
+    // And the trucks fill up where they unload: at the trains from the company stock, at a
+    // holding from its stores.
+    {
+        const auto &ti = unit_type_info(u.type);
+        double &pool = r.dest < 0 ? stock.diesel_l : holdings[r.dest].diesel_l;
+        const double own = std::min((100.0 - u.fuel) / 100.0 * ti.fuel_litres, pool);
+        if (own > 0) {
+            pool -= own;
+            if (r.dest < 0) used_diesel_l_ += own;
+            u.fuel += (float)(own / ti.fuel_litres * 100.0);
+            u.out_of_fuel_reported = false;
+        }
+    }
+    if (u.side == SIDE_PLAYER && (u.cargo_l + u.cargo_t + u.cargo_kg) > 0.01)
+        push_event(EV_SUPPLY, u.id, false,
+                   fmt("%s delivered %.0f L diesel, %.1f t ammunition, %.0f kg food to %s from %s.", u.name.c_str(),
+                       u.cargo_l, u.cargo_t, u.cargo_kg, where.c_str(), holdings[r.source].name.c_str()));
+    u.cargo_l = u.cargo_t = u.cargo_kg = 0;
+}
+
+// Drive to `target` and count as arrived within `reach` hexes. A column halted short of it (an
+// enemy-held hex, a fall-back, a lost route) tries the leg again after CONVOY_RESUME_MIN with no
+// enemy known within 5 km.
+bool World::convoy_arrive_or_repath(Unit &u, HexCoord target, int reach) {
+    if (u.moving() || u.order == O_RETREAT || u.pending.active) return false;
+    if (hex_distance(u.pos, target) <= reach) return true;
+    // Not there: was it driven off or blocked? Wait, then try again.
+    const bool shaken = time_min - u.last_targeted < CONVOY_RESUME_MIN || time_min - u.last_hit < CONVOY_RESUME_MIN;
+    if (shaken || nearest_known_enemy(u, 10) >= 0) {
+        u.convoy_wait_until = std::max(u.convoy_wait_until, time_min + CONVOY_RESUME_MIN);
+        return false;
+    }
+    if (time_min < u.convoy_wait_until || paths_this_tick_ >= MAX_PATHS_PER_TICK) return false;
+    u.mode = MV_ROAD;
+    start_path(u, target, O_MOVE, false);
+    if (!u.moving()) {
+        // No route at all right now (enemy on every road): try again in an hour.
+        u.convoy_wait_until = time_min + CONVOY_RESUME_MIN;
+    }
+    return false;
+}
+
+void World::update_convoys() {
+    // A route whose column is gone (however it went) stops until a column is assigned again.
+    for (auto &r : routes)
+        if (r.active && r.convoy >= 0 && r.convoy < (int)units.size() && !units[r.convoy].alive)
+            convoy_suspend(units[r.convoy], "was lost");
+    for (auto &u : units) {
+        if (!u.alive || u.type != U_TRUCK) continue;
+        if (u.convoy_route < 0) {
+            // With the trains: an idle column keeps station near the HQ (or whoever took over).
+            if (u.convoy_state == CV_RETURN) {
+                const int hq = acting_hq(0);
+                if (hq < 0 || u.moving() || u.order == O_RETREAT) continue;
+                if (hex_distance(u.pos, units[hq].pos) <= 3) {
+                    u.convoy_state = CV_IDLE;
+                } else if (time_min >= u.convoy_wait_until && paths_this_tick_ < MAX_PATHS_PER_TICK) {
+                    u.mode = MV_ROAD;
+                    start_path(u, regroup_point(u), O_MOVE, false);
+                    u.convoy_wait_until = time_min + CONVOY_RESUME_MIN;
+                }
+            }
+            continue;
+        }
+        SupplyRoute &r = routes[u.convoy_route];
+        const int hq = acting_hq(u.side == SIDE_PLAYER ? 0 : u.formation);
+        if (r.source < 0 || r.source >= (int)holdings.size()) {
+            convoy_suspend(u, "has no source");
+            continue;
+        }
+        // A source or destination lost to the enemy ends the route; the column comes home.
+        if (r.active && (holdings[r.source].owner != u.side || (r.dest >= 0 && holdings[r.dest].owner != u.side))) {
+            r.active = false;
+            if (u.convoy_state == CV_TO_SOURCE || u.convoy_state == CV_LOADING) {
+                u.convoy_state = CV_RETURN;
+                u.convoy_wait_until = -1;
+            }
+        }
+        switch (u.convoy_state) {
+            case CV_IDLE:
+                u.convoy_state = r.active ? CV_TO_SOURCE : CV_RETURN;
+                u.convoy_wait_until = -1;
+                break;
+            case CV_TO_SOURCE:
+                if (!r.active) {
+                    u.convoy_state = CV_RETURN;
+                    u.convoy_wait_until = -1;
+                    break;
+                }
+                if (convoy_arrive_or_repath(u, holdings[r.source].pos, holdings[r.source].radius)) {
+                    u.convoy_state = CV_LOADING;
+                    u.convoy_wait_until = time_min + CONVOY_LOAD_MIN;
+                }
+                break;
+            case CV_LOADING:
+                if (time_min < u.convoy_wait_until) break;
+                if (!r.active) {
+                    u.convoy_state = CV_RETURN;
+                    u.convoy_wait_until = -1;
+                    break;
+                }
+                load_convoy(u, r);
+                if (u.cargo_l + u.cargo_t + u.cargo_kg <= 0.01) {
+                    u.convoy_wait_until = time_min + 60; // nothing to carry yet: look again in an hour
+                    break;
+                }
+                u.convoy_state = CV_TO_DEST;
+                u.convoy_wait_until = -1;
+                break;
+            case CV_TO_DEST: {
+                bool there = false;
+                if (r.dest >= 0) {
+                    there = convoy_arrive_or_repath(u, holdings[r.dest].pos, holdings[r.dest].radius);
+                } else {
+                    if (hq < 0) break; // nobody runs the trains yet: wait where it is
+                    const HexCoord t = units[hq].moving() ? units[hq].dest : units[hq].pos;
+                    // The trains moved on: follow them.
+                    if (u.moving() && hex_distance(u.dest, t) > 3 && paths_this_tick_ < MAX_PATHS_PER_TICK &&
+                        time_min >= u.convoy_wait_until) {
+                        u.mode = MV_ROAD;
+                        start_path(u, t, O_MOVE, false);
+                        u.convoy_wait_until = time_min + 30;
+                    }
+                    there = convoy_arrive_or_repath(u, units[hq].pos, 3);
+                }
+                if (there) {
+                    u.convoy_state = CV_UNLOADING;
+                    u.convoy_wait_until = time_min + CONVOY_LOAD_MIN;
+                }
+                break;
+            }
+            case CV_UNLOADING:
+                if (time_min < u.convoy_wait_until) break;
+                if (r.dest < 0 && (hq < 0 || hex_distance(u.pos, units[hq].pos) > 3)) {
+                    // The trains left while we were unloading: catch up.
+                    u.convoy_state = CV_TO_DEST;
+                    break;
+                }
+                if (u.trip_started >= 0) {
+                    // Round trip = this leg out and back (the return is as long as the way here).
+                    r.last_round_trip_min = (int)(2 * (time_min - u.trip_started));
+                }
+                unload_convoy(u, r);
+                u.trip_started = -1;
+                if (r.active) {
+                    u.convoy_state = CV_TO_SOURCE;
+                } else {
+                    u.convoy_state = CV_RETURN;
+                }
+                u.convoy_wait_until = -1;
+                break;
+            case CV_RETURN: {
+                if (hq < 0) break;
+                if (convoy_arrive_or_repath(u, units[hq].pos, 3)) {
+                    u.convoy_state = CV_IDLE;
+                    if (r.convoy == u.id) r.convoy = -1;
+                    u.convoy_route = -1;
+                    if (u.side == SIDE_PLAYER)
+                        push_event(EV_SUPPLY, u.id, false, fmt("%s is back with the trains.", u.name.c_str()));
+                }
+                break;
+            }
+            default:
+                u.convoy_state = CV_IDLE;
+                break;
+        }
+    }
 }
 
 // ------------------------------------------------------------------------------------
@@ -406,7 +1161,7 @@ int World::element_count(const Unit &u) {
     while (i < e.size() && e[i] >= '0' && e[i] <= '9') n = n * 10 + (e[i++] - '0');
     if (n > 0 && i < e.size() && e[i] == 'x') return n;
     if (n > 0 && e.find(" men", i) != std::string::npos) return std::max(1, (int)std::lround(n / 11.0));
-    static const int kDefault[U_TYPE_COUNT] = {2, 3, 3, 3, 2, 6}; // HQ, tank, mech, infantry, recon, artillery (6-gun battery)
+    static const int kDefault[U_TYPE_COUNT] = {2, 3, 3, 3, 2, 6, 6}; // HQ, tank, mech, infantry, recon, artillery (6-gun battery), trucks
     return kDefault[u.type < U_TYPE_COUNT ? u.type : 0];
 }
 
@@ -464,6 +1219,7 @@ float World::suppression_weight(const Unit &s) {
         case U_INFANTRY: return 1.0f;
         case U_RECON: return 0.5f;
         case U_HQ: return 0.2f;
+        case U_TRUCK: return 0.1f; // drivers' rifles
         default: break;
     }
     // Guns: by calibre against 155 mm; rocket launchers fire a ripple of rockets each.
@@ -641,14 +1397,17 @@ int World::acting_hq(int formation, int64_t at) const {
     if (hq < 0) return -1; // the formation never had an HQ
     // The HQ died with its last element, so its last hit is when it was lost.
     if (at - units[hq].last_hit < HANDOVER_MIN) return -1;
-    // The senior platoon still able to fight: first in the order of battle.
+    // The senior platoon still able to fight: first in the order of battle. A town's militia
+    // never leaves its town, so it never runs the trains.
     for (int id : m) {
         const Unit &u = units[id];
-        if (u.alive && (u.type == U_TANK || u.type == U_MECH || u.type == U_INFANTRY) && u.strength >= 30.0f)
+        if (u.alive && !u.militia && (u.type == U_TANK || u.type == U_MECH || u.type == U_INFANTRY) && u.strength >= 30.0f)
             return id;
     }
     for (int id : m)
-        if (units[id].alive) return id;
+        if (units[id].alive && !units[id].militia && units[id].type != U_TRUCK) return id;
+    for (int id : m)
+        if (units[id].alive && !units[id].militia) return id;
     return -1;
 }
 
@@ -771,7 +1530,7 @@ int World::command_delay(const Unit &u) const {
 int World::order_move(int unit_id, HexCoord target, MoveMode mode) {
     if (unit_id < 0 || unit_id >= (int)units.size()) return -1;
     Unit &u = units[unit_id];
-    if (!u.alive || !map.in_bounds(target)) return -1;
+    if (!u.alive || !orderable(u) || !map.in_bounds(target)) return -1;
     if (map.at(target).terrain == T_WATER) return -1;
     int delay = command_delay(u);
     u.pending = {true, O_MOVE, target, time_min, time_min + delay, mode};
@@ -779,7 +1538,7 @@ int World::order_move(int unit_id, HexCoord target, MoveMode mode) {
 }
 
 int World::order_fall_back(int unit_id) {
-    if (unit_id < 0 || unit_id >= (int)units.size() || !units[unit_id].alive) return -1;
+    if (unit_id < 0 || unit_id >= (int)units.size() || !units[unit_id].alive || !orderable(units[unit_id])) return -1;
     Unit &u = units[unit_id];
     int delay = command_delay(u);
     u.pending = {true, O_RETREAT, u.pos, time_min, time_min + delay, MV_HASTY};
@@ -787,7 +1546,7 @@ int World::order_fall_back(int unit_id) {
 }
 
 int World::order_regroup(int unit_id, bool rest) {
-    if (unit_id < 0 || unit_id >= (int)units.size() || !units[unit_id].alive) return -1;
+    if (unit_id < 0 || unit_id >= (int)units.size() || !units[unit_id].alive || !orderable(units[unit_id])) return -1;
     Unit &u = units[unit_id];
     int delay = command_delay(u);
     u.pending = {true, rest ? O_REST : O_REGROUP, u.pos, time_min, time_min + delay, MV_HASTY};
@@ -997,7 +1756,7 @@ void World::update_mounting() {
 }
 
 int World::set_stance(int unit_id, int roe, int brk) {
-    if (unit_id < 0 || unit_id >= (int)units.size() || !units[unit_id].alive) return -1;
+    if (unit_id < 0 || unit_id >= (int)units.size() || !units[unit_id].alive || units[unit_id].militia) return -1;
     Unit &u = units[unit_id];
     int delay = command_delay(u);
     // -1 keeps the current (or already ordered) value, so ROE and break-contact can be set separately.
@@ -1012,7 +1771,7 @@ int World::set_stance(int unit_id, int roe, int brk) {
 }
 
 int World::set_standoff(int unit_id, int standoff) {
-    if (unit_id < 0 || unit_id >= (int)units.size() || !units[unit_id].alive) return -1;
+    if (unit_id < 0 || unit_id >= (int)units.size() || !units[unit_id].alive || units[unit_id].militia) return -1;
     Unit &u = units[unit_id];
     int delay = command_delay(u);
     if (!u.pending_stance.active) {
@@ -1134,7 +1893,7 @@ HexCoord World::fall_back_point(const Unit &u) const {
 int World::order_hold(int unit_id) {
     if (unit_id < 0 || unit_id >= (int)units.size()) return -1;
     Unit &u = units[unit_id];
-    if (!u.alive) return -1;
+    if (!u.alive || !orderable(u)) return -1;
     int delay = command_delay(u);
     u.pending = {true, O_HOLD, u.pos, time_min, time_min + delay};
     return delay;
@@ -1274,6 +2033,7 @@ void World::tick() {
     update_groups();
     update_movement();
     update_mounting();
+    update_convoys();
     if (time_min % 5 == 0) {
         rebuild_buckets();
         update_zones();
@@ -1302,7 +2062,7 @@ void World::tick() {
 int World::create_group(const std::vector<int> &ids, int leader) {
     if (ids.empty() || std::find(ids.begin(), ids.end(), leader) == ids.end()) return -1;
     for (int id : ids) {
-        if (id < 0 || id >= (int)units.size() || !units[id].alive) return -1;
+        if (id < 0 || id >= (int)units.size() || !units[id].alive || !orderable(units[id])) return -1;
         if (units[id].side != units[leader].side || units[id].formation != units[leader].formation) return -1;
     }
     // Units leave any team they were in; a team losing its leader this way is disbanded.
@@ -1955,6 +2715,18 @@ void World::update_combat() {
         if (hit) {
             const float per_element = 100.0f / t.elements_max;
             kills = std::min(kills, t.elements);
+            if (kills > 0 && t.type == U_TRUCK && t.elements > 0) {
+                // Each truck knocked out takes its share of the cargo with it.
+                const double keep = (double)(t.elements - kills) / t.elements;
+                const double lost_l = t.cargo_l * (1 - keep), lost_t = t.cargo_t * (1 - keep), lost_kg = t.cargo_kg * (1 - keep);
+                t.cargo_l *= keep;
+                t.cargo_t *= keep;
+                t.cargo_kg *= keep;
+                if (t.side == SIDE_PLAYER && lost_l + lost_t + lost_kg > 0.01)
+                    push_event(EV_SUPPLY, t.id, false,
+                               fmt("%s: %d truck%s lost with %.0f L diesel, %.1f t ammunition, %.0f kg food.", t.name.c_str(),
+                                   kills, kills == 1 ? "" : "s", lost_l, lost_t, lost_kg));
+            }
             t.elements -= kills;
             t.strength = 100.0f * t.elements / t.elements_max;
             if (kills > 0 && t.dismounts >= 0 && units[t.dismounts].embarked && units[t.dismounts].elements > 0) {
@@ -1980,16 +2752,25 @@ void World::update_combat() {
                 t.path.clear();
                 t.path_i = 0;
                 t.pending.active = false;
-                if (t.side == SIDE_PLAYER) stats_.losses++;
-                else stats_.kills++;
+                if (t.side == SIDE_PLAYER && !t.militia) stats_.losses++;
+                else if (t.side != SIDE_PLAYER) stats_.kills++;
                 push_event(EV_DESTROYED, t.id, t.side == SIDE_PLAYER,
                            t.side != SIDE_PLAYER
                                ? fmt("Hostile %s destroyed by %s.", tt.name, u.name.c_str())
+                           : t.militia
+                               ? fmt("%s wiped out %s: the town has no garrison left.", t.name.c_str(),
+                                     place_name(t.pos).c_str())
                            : t.type == U_HQ
                                ? fmt("%s has been destroyed %s. Orders will be slow, and the trains need about "
                                      "%d minutes to report to a new commander.",
                                      t.name.c_str(), place_name(t.pos).c_str(), HANDOVER_MIN)
                                : fmt("%s has been destroyed %s.", t.name.c_str(), place_name(t.pos).c_str()));
+                if (t.type == U_TRUCK) {
+                    const std::string why = fmt("destroyed %s with %.0f L diesel, %.1f t ammunition, %.0f kg food aboard",
+                                                place_name(t.pos).c_str(), t.cargo_l, t.cargo_t, t.cargo_kg);
+                    if (t.convoy_route >= 0) convoy_suspend(t, why.c_str());
+                    t.cargo_l = t.cargo_t = t.cargo_kg = 0;
+                }
             }
         }
     }
@@ -2078,6 +2859,7 @@ void World::update_ai() {
     for (auto &u : units) {
         if (!u.alive || u.side == SIDE_PLAYER || time_min < u.ai_next) continue;
         u.ai_next = time_min + 15 + rng_.range_int(0, 5);
+        if (u.militia || u.type == U_TRUCK) continue; // a garrison holds its town; trucks run their routes
         if (u.pending.active || (u.order == O_RETREAT && u.moving()) || u.mounting) continue;
         const auto &ti = unit_type_info(u.type);
         const Formation &f = formations[u.formation];
@@ -2172,10 +2954,19 @@ void World::update_logistics() {
                        "usual rate.",
                        units[hq].name.c_str(), place_name(units[hq].pos).c_str(), (int)(ACTING_SUPPLY_RATE * 100)));
     trains_announced_ = acting ? hq : -1;
+    // Holdings first: who holds what, loyalty, militia; then the trains draw from the depot they
+    // stand at, so what a convoy or a requisition brought in is handed out this same hour.
+    update_holdings();
+    update_trains_at_depot(hq);
     stock.personnel = 0;
     for (auto &u : units) {
         if (!u.alive || u.side != SIDE_PLAYER) continue;
         const auto &ti = unit_type_info(u.type);
+        if (u.militia) {
+            // The town feeds and arms its own militia (small arms from the town's stores).
+            u.ammo = std::min(100.0f, u.ammo + 10.0f);
+            continue;
+        }
         if (u.carrier >= 0) stock.personnel += u.squad_men * u.elements;          // squads on foot
         else if (u.dismounts >= 0 && units[u.dismounts].alive) stock.personnel += 3 * u.elements; // crews only
         else stock.personnel += (int)std::round(ti.crew * u.strength / 100.0f);
@@ -2189,6 +2980,7 @@ void World::update_logistics() {
         if (litres > 0 && stock.diesel_l > 0) {
             double got = std::min(litres, stock.diesel_l);
             stock.diesel_l -= got;
+            used_diesel_l_ += got;
             u.fuel += (float)(got / ti.fuel_litres * 100.0);
             u.out_of_fuel_reported = false;
         }
@@ -2197,9 +2989,14 @@ void World::update_logistics() {
         if (tonnes > 0 && stock.ammo_t > 0) {
             double got = std::min(tonnes, stock.ammo_t);
             stock.ammo_t -= got;
+            used_ammo_t_ += got;
             u.ammo += (float)(got / ti.ammo_tonnes * 100.0);
         }
     }
+    // Consumption smoothed over about a day, for the days-of-supply readout.
+    stock.rate_diesel_lph = stock.rate_diesel_lph * 0.9 + used_diesel_l_ * 0.1;
+    stock.rate_ammo_tph = stock.rate_ammo_tph * 0.9 + used_ammo_t_ * 0.1;
+    used_diesel_l_ = used_ammo_t_ = 0;
     if ((time_min % 1440) == 6 * 60) {
         double need = stock.personnel * 1.5;
         if (stock.food_kg >= need) {
@@ -2207,9 +3004,31 @@ void World::update_logistics() {
         } else {
             stock.food_kg = 0;
             for (auto &u : units)
-                if (u.alive && u.side == SIDE_PLAYER) u.morale = std::max(0.0f, u.morale - 10.0f);
+                if (u.alive && u.side == SIDE_PLAYER && !u.militia) u.morale = std::max(0.0f, u.morale - 10.0f);
             push_event(EV_SUPPLY, -1, true, "The company is out of food. Morale is falling.");
         }
+        // The holdings' day: taxes and food into their stores, volunteers into the pool.
+        double cash_day = 0, food_day = 0;
+        int towns = 0;
+        for (auto &h : holdings) {
+            if (h.owner < 0) continue;
+            double c, f;
+            daily_yield(h, c, f);
+            h.cash += c;
+            h.food_kg = std::min(h.food_kg + f, std::max(h.food_kg, 10.0 * f + 2000.0)); // the stores hold ten days
+            if (h.kind == HK_TOWN && h.loyalty >= 50.0f)
+                h.manpower = std::min(h.manpower + (int)(h.population * 0.001), (int)(h.population * 0.01));
+            if (h.owner == SIDE_PLAYER) {
+                cash_day += c;
+                food_day += f;
+                ++towns;
+            }
+        }
+        if (towns > 0)
+            push_event(EV_HOLDING, -1, false,
+                       fmt("The holdings' day: %.0f DM and %.0f kg of food into their stores (%d place%s). The trains "
+                           "collect it when parked there, or a supply route carries it.",
+                           cash_day, food_day, towns, towns == 1 ? "" : "s"));
     }
     if (stock.diesel_l < 3000 && stock.diesel_l > 0 && time_min % 720 == 0)
         push_event(EV_SUPPLY, -1, true, fmt("Diesel is running low: %.0f litres left.", stock.diesel_l));
@@ -2239,7 +3058,7 @@ void World::update_hunters() {
             // Word comes in about some part of the company, not necessarily its HQ.
             std::vector<int> own;
             for (const auto &p : units)
-                if (p.alive && p.side == SIDE_PLAYER) own.push_back(p.id);
+                if (p.alive && p.side == SIDE_PLAYER && !p.militia) own.push_back(p.id);
             if (!own.empty() && time_min - f.target_time > 120) {
                 HexCoord h = units[own[rng_.range_int(0, (int)own.size() - 1)]].pos;
                 HexCoord guess{h.col + rng_.range_int(-4, 4), h.row + rng_.range_int(-4, 4)};
@@ -2265,7 +3084,7 @@ int World::effective_combat_units(int formation) const {
         const Unit &u = units[id];
         // A platoon's squads on foot count only once its vehicles no longer do.
         if (u.carrier >= 0 && units[u.carrier].alive && units[u.carrier].strength >= 30.0f) continue;
-        if (u.alive && u.type != U_HQ && u.type != U_ARTILLERY && u.strength >= 30.0f) ++n;
+        if (u.alive && !u.militia && u.type != U_HQ && u.type != U_ARTILLERY && u.type != U_TRUCK && u.strength >= 30.0f) ++n;
     }
     return n;
 }
@@ -2311,7 +3130,7 @@ bool World::player_in_contact() const {
 // ------------------------------------------------------------------------------------
 
 namespace {
-constexpr char kSaveMagic[8] = {'M', 'U', 'R', 'K', 'S', 'S', 'V', '6'};
+constexpr char kSaveMagic[8] = {'M', 'U', 'R', 'K', 'S', 'S', 'V', '7'};
 
 struct SaveWriter {
     std::vector<uint8_t> b;
@@ -2389,6 +3208,24 @@ template <typename A, typename U> void io_unit(A &a, U &u) {
     a.pod(u.squad_men);
     a.pod(u.suppression); a.pod(u.supp_hold_until); a.pod(u.pinned);
     a.pod(u.seen_until); a.pod(u.last_seen); a.pod(u.last_seen_pos); a.pod(u.ai_next);
+    // v7: holdings and supply.
+    a.pod(u.militia); a.pod(u.holding); a.pod(u.convoy_state); a.pod(u.convoy_route);
+    a.pod(u.cargo_l); a.pod(u.cargo_t); a.pod(u.cargo_kg); a.pod(u.convoy_wait_until); a.pod(u.trip_started);
+}
+
+template <typename A, typename H> void io_holding(A &a, H &h) {
+    a.pod(h.settlement); a.str(h.name); a.pod(h.pos); a.pod(h.radius); a.pod(h.kind); a.pod(h.owner);
+    a.pod(h.known_owner); a.pod(h.loyalty); a.pod(h.population);
+    a.pod(h.diesel_l); a.pod(h.ammo_t); a.pod(h.food_kg); a.pod(h.cash); a.pod(h.manpower);
+    a.pod(h.militia_unit); a.pod(h.training); a.pod(h.training_progress); a.pod(h.contested_since);
+    a.pod(h.captured_at); a.pod(h.last_fight);
+    for (auto &x : h.levy_until) a.pod(x);
+}
+
+template <typename A, typename R> void io_route(A &a, R &r) {
+    a.pod(r.active); a.pod(r.side); a.pod(r.source); a.pod(r.dest); a.pod(r.convoy); a.pod(r.trips);
+    a.pod(r.delivered_l); a.pod(r.delivered_t); a.pod(r.delivered_kg); a.pod(r.last_round_trip_min);
+    a.pod(r.suspended_at);
 }
 
 template <typename A> void io_floats(A &a, std::vector<float> &v) {
@@ -2423,6 +3260,8 @@ std::vector<uint8_t> World::save_state() const {
     w.pod(time_min); w.pod(seed); w.pod(player_home);
     w.pod(rng_.state());
     w.pod(stock.diesel_l); w.pod(stock.ammo_t); w.pod(stock.food_kg); w.pod(stock.personnel);
+    w.pod(stock.cash); w.pod(stock.replacements); w.pod(stock.rate_diesel_lph); w.pod(stock.rate_ammo_tph);
+    w.pod(used_diesel_l_); w.pod(used_ammo_t_);
     w.pod(stats_.kills); w.pod(stats_.losses);
     w.pod(outcome_); w.str(outcome_text_);
     w.pod(default_standoff);
@@ -2432,6 +3271,10 @@ std::vector<uint8_t> World::save_state() const {
     for (const auto &u : units) io_unit(w, const_cast<Unit &>(u));
     w.pod((uint32_t)groups.size());
     for (const auto &g : groups) io_group(w, const_cast<Group &>(g));
+    w.pod((uint32_t)holdings.size());
+    for (const auto &h : holdings) io_holding(w, const_cast<Holding &>(h));
+    w.pod((uint32_t)routes.size());
+    for (const auto &r : routes) io_route(w, const_cast<SupplyRoute &>(r));
     return w.b;
 }
 
@@ -2462,6 +3305,9 @@ bool World::load_state(const uint8_t *data, size_t size, std::string *error) {
     std::string ot;
     r.pod(t); r.pod(sd); r.pod(home); r.pod(rs);
     r.pod(st.diesel_l); r.pod(st.ammo_t); r.pod(st.food_kg); r.pod(st.personnel);
+    r.pod(st.cash); r.pod(st.replacements); r.pod(st.rate_diesel_lph); r.pod(st.rate_ammo_tph);
+    double used_l = 0, used_t = 0;
+    r.pod(used_l); r.pod(used_t);
     r.pod(kills); r.pod(losses); r.pod(oc); r.str(ot);
     uint8_t dso = 0;
     r.pod(dso);
@@ -2471,7 +3317,19 @@ bool World::load_state(const uint8_t *data, size_t size, std::string *error) {
     for (auto &u : us) io_unit(r, u);
     std::vector<Group> gs(r.count(4096));
     for (auto &g : gs) io_group(r, g);
+    std::vector<Holding> hs(r.count(1 << 16));
+    for (auto &h : hs) io_holding(r, h);
+    std::vector<SupplyRoute> rts(r.count(4096));
+    for (auto &x : rts) io_route(r, x);
     if (!r.ok) return fail("save is truncated or corrupt");
+    for (const auto &h : hs)
+        if (h.settlement < 0 || h.settlement >= (int)map.settlements.size() || !map.in_bounds(h.pos) ||
+            h.kind >= HK_COUNT || h.militia_unit >= (int)us.size())
+            return fail("save is corrupt");
+    for (const auto &x : rts)
+        if (x.source >= (int)hs.size() || x.dest >= (int)hs.size() || x.convoy >= (int)us.size() ||
+            (x.active && x.source < 0))
+            return fail("save is corrupt");
     for (const auto &g : gs) {
         if (!g.alive) continue;
         if (g.leader < 0 || g.leader >= (int)us.size() || g.keep_dx.size() != g.members.size() ||
@@ -2488,7 +3346,7 @@ bool World::load_state(const uint8_t *data, size_t size, std::string *error) {
         if (u.id != i || u.formation < 0 || u.formation >= (int)fs.size() || !map.in_bounds(u.pos) ||
             u.type >= U_TYPE_COUNT || u.path_i > u.path.size() || u.elements_max <= 0 || u.elements < 0 ||
             u.elements > u.elements_max || u.carrier >= (int)us.size() || u.dismounts >= (int)us.size() ||
-            u.carrier < -1 || u.dismounts < -1)
+            u.carrier < -1 || u.dismounts < -1 || u.holding >= (int)hs.size() || u.convoy_route >= (int)rts.size())
             return fail("save is corrupt");
         for (int idx : u.path)
             if (idx < 0 || idx >= n_cells) return fail("save is corrupt");
@@ -2509,9 +3367,13 @@ bool World::load_state(const uint8_t *data, size_t size, std::string *error) {
     outcome_ = oc;
     outcome_text_ = ot;
     default_standoff = dso;
+    used_diesel_l_ = used_l;
+    used_ammo_t_ = used_t;
     formations = std::move(fs);
     units = std::move(us);
     groups = std::move(gs);
+    holdings = std::move(hs);
+    routes = std::move(rts);
     events_.clear();
     rebuild_buckets();
     // As of the last hourly logistics pass, so a load doesn't announce the acting commander again.

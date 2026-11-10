@@ -59,6 +59,10 @@ var fire_seen := {}                # shooter id -> last shot minute already show
 var targeted_seen := {}            # own unit id -> last "fired at" minute already shown
 var short_names := {}              # own unit id -> short counter label
 var groups_cache: Array = []       # own teams: {id, name, color, leader, units, shape, spacing, zone_hexes}
+var show_supply := false           # supply overlay (F3): routes and convoys
+var holdings: Array = []           # world.get_holdings(), refreshed with the HUD
+var routes: Array = []             # world.get_supply_routes(), refreshed with the HUD
+var selected_holding := -1         # holding shown in the panel (clears the unit selection)
 var show_cmd := false              # direct command overlay: every unit linked to its commander, zones, outlines
 var show_fs := false               # fire support overlay: the fire net, range rings, fire missions, outlines
 const SF_GROUP := 20
@@ -251,6 +255,8 @@ func _process(delta: float) -> void:
 	if hud_timer <= 0.0:
 		hud_timer = 0.1
 		var stats: Dictionary = world.get_stats()
+		holdings = world.get_holdings()
+		routes = world.get_supply_routes()
 		hud.refresh(world.get_time_string(), world.is_night(), stats, Engine.get_frames_per_second(),
 			"script %.1f ms · chunks %d" % [script_ms, map_view.chunks.size()])
 		hud.set_speed(speed_index, eff != speed_index)
@@ -262,7 +268,16 @@ func _process(delta: float) -> void:
 func _refresh_selection_panel() -> void:
 	if selected.is_empty():
 		hud.show_unit({}, 0)
+		if selected_holding >= 0:
+			var hd: Dictionary = world.get_holding(selected_holding)
+			if hd.is_empty():
+				selected_holding = -1
+			else:
+				hud.show_holding(hd, routes, _own_holdings())
+		else:
+			hud.hide_holding()
 		return
+	hud.hide_holding()
 	var first: Dictionary = world.get_unit_info(selected[0])
 	_update_orders_state()
 	if selected.size() == 1 or int(first.get("side", 1)) != 0:
@@ -556,6 +571,7 @@ func _on_key(key: Key) -> void:
 		KEY_C, KEY_HOME: _on_menu_action("centre")
 		KEY_M: _on_menu_action("whole_map")
 		KEY_ESCAPE: _on_escape()
+		KEY_F3: _on_toggle("Supply")
 		KEY_F1: hud.toggle_help()
 		KEY_F2: hud.toggle_credits()
 		KEY_F5: quick_save()
@@ -591,6 +607,10 @@ func _on_toggle(name: String) -> void:
 			show_cmd = not show_cmd
 			hud.set_toggle(name, show_cmd)
 			hud.show_toast("Direct command: every unit is outlined and linked to the HQ or team leader it takes orders from. Solid: inside the commander's zone. Amber dashes: outside it, orders ×1.5. Red dashes: beyond radio range, orders go by courier. Double white ring: the HQ." if show_cmd else "Direct command overlay off: command zones show for the selection only.", 8.0)
+		"Supply":
+			show_supply = not show_supply
+			hud.set_toggle(name, show_supply)
+			hud.show_toast("Supply overlay: each route from its source to the trains or another holding, the column's road on top. Green: on the road. White: loading or unloading. Amber: halted. Red: under fire. Grey: suspended, the column is lost." if show_supply else "Supply overlay off.", 8.0)
 		"Fire support":
 			show_fs = not show_fs
 			hud.set_toggle(name, show_fs)
@@ -690,6 +710,10 @@ func _open_order_menu(screen_pos: Vector2) -> void:
 		if hi.get("bridge", false): bits.append("bridge")
 		if hi.has("settlement"): bits.append(String(hi["settlement"]))
 		where = " · ".join(bits)
+	var hid := world.holding_at(hex)
+	if hid >= 0:
+		ctx["holding"] = world.get_holding(hid)
+		ctx["own_holdings"] = _own_holdings()
 	if own.is_empty():
 		ctx["title"] = "Map"
 		ctx["info"] = where
@@ -789,6 +813,12 @@ func _click_select(screen_pos: Vector2, add: bool) -> void:
 			else:
 				selected = [hit_id]
 			return
+	for hm in overlay.drawn_holdings:
+		if (hm["rect"] as Rect2).grow(2.0).has_point(screen_pos):
+			selected.clear()
+			selected_holding = int(hm["id"])
+			_refresh_selection_panel()
+			return
 	var xf := get_viewport().get_canvas_transform()
 	var best := -1
 	var best_d := 22.0
@@ -806,7 +836,9 @@ func _click_select(screen_pos: Vector2, add: bool) -> void:
 	if best < 0:
 		if not add:
 			selected.clear()
+			selected_holding = -1
 		return
+	selected_holding = -1
 	if add:
 		if selected.has(best):
 			selected.erase(best)
@@ -949,6 +981,44 @@ func _on_command(name: String) -> void:
 		move_mode = -1
 	elif name == "centre_here":
 		camera.position = menu_world_pos
+	elif name.begins_with("holding_select_"):
+		selected.clear()
+		selected_holding = name.substr(15).to_int()
+	elif name == "holding_centre":
+		if selected_holding >= 0:
+			camera.position = world.get_holding(selected_holding).get("pos", camera.position)
+	elif name.begins_with("holding_train_"):
+		var hid := name.substr(14).to_int()
+		var hd: Dictionary = world.get_holding(hid)
+		var on: bool = not hd.get("training", false)
+		if world.set_training(hid, on):
+			hud.show_toast(("%s raises militia: a squad of %d every %d days from the town's volunteers." % [hd["name"], int(hd.get("squad_men", 10)), int(hd.get("train_days", 2))]) if on else "%s stops raising militia." % hd["name"], 5.0)
+		else:
+			hud.show_toast("%s can't raise militia: it needs loyalty 25, enough people and room for another squad." % hd.get("name", "The place"), 5.0)
+	elif name.begins_with("levy_"):
+		# levy_<hid>_<kind>
+		var parts := name.split("_")
+		var hid := parts[1].to_int()
+		var why: String = world.levy(hid, parts[2].to_int())
+		if why == "":
+			hud.show_toast("Requisition done. The town's loyalty falls; the goods are in its stores for the trains or a convoy.", 5.0)
+		else:
+			hud.show_toast("Requisition refused: " + why, 5.0)
+	elif name.begins_with("route_"):
+		# route_<source>_<dest>  (dest -1 = the trains)
+		var parts := name.split("_")
+		var res: Dictionary = world.set_supply_route(parts[1].to_int(), parts[2].to_int())
+		if int(res.get("id", -1)) >= 0:
+			var src: Dictionary = world.get_holding(parts[1].to_int())
+			var dst := "the trains" if parts[2].to_int() < 0 else String(world.get_holding(parts[2].to_int()).get("name", "?"))
+			hud.show_toast("Supply route set: %s → %s. The column drives to the source, loads what the destination is short of and shuttles until you cancel it. F3 shows it." % [src.get("name", "?"), dst], 7.0)
+			if not show_supply:
+				_on_toggle("Supply")
+		else:
+			hud.show_toast("No route: " + String(res.get("error", "")), 5.0)
+	elif name.begins_with("cancel_route_"):
+		if world.cancel_supply_route(name.substr(13).to_int()):
+			hud.show_toast("Route cancelled: the column comes back to the trains.", 4.0)
 	elif name == "select_company":
 		if not selected.is_empty():
 			_select_company_of(selected[0])
@@ -1001,6 +1071,15 @@ func _on_command(name: String) -> void:
 			var tm := _team(teams[0])
 			hud.show_toast("%s: %s, %.1f km spread. Members take up their places." % [tm["name"], tm["shape_name"], int(tm["spacing"]) * 0.5])
 	_refresh_selection_panel()
+
+
+## The company's own holdings: [{id, name, kind_name}] for route menus.
+func _own_holdings() -> Array:
+	var out: Array = []
+	for hd in holdings:
+		if hd.get("own", false):
+			out.append({"id": int(hd["id"]), "name": String(hd["name"]), "kind_name": String(hd["kind_name"])})
+	return out
 
 
 func _standoff_name(v: int) -> String:
@@ -1472,8 +1551,52 @@ func _run_uitest() -> void:
 	hud.shape_opt.item_selected.emit(3)
 	check.call(teams.size() == 1 and int(_team(teams[0]).get("shape", -1)) == 3, "Formation dropdown: wedge")
 
-	# Right-click menu with nothing selected: map commands only.
+	# Holdings: the home town's panel, Raise militia, a supply route from its stores to the trains, cancel.
 	selected.clear()
+	holdings = world.get_holdings()
+	var home_id := -1
+	for hd in holdings:
+		if hd.get("own", false) and int(hd["kind"]) == 0:
+			home_id = int(hd["id"])
+	check.call(home_id >= 0, "the company holds its home town")
+	camera.position = world.get_holding(home_id)["pos"]
+	camera.zoom = Vector2.ONE * 0.06
+	await _frames(3)
+	var marker_hit := false
+	for hm in overlay.drawn_holdings:
+		if int(hm["id"]) == home_id:
+			_push_click(MOUSE_BUTTON_LEFT, (hm["rect"] as Rect2).get_center())
+			marker_hit = true
+	await _frames(3)
+	check.call(marker_hit and selected_holding == home_id and hud.holding_panel.visible, "clicking the pennant opens the holding panel")
+	hud.train_button.pressed.emit()
+	await _frames(1)
+	check.call(bool(world.get_holding(home_id).get("training", false)), "Raise militia starts training")
+	_on_command("route_%d_-1" % home_id)
+	routes = world.get_supply_routes()
+	check.call(routes.size() == 1 and int(routes[0]["source"]) == home_id and int(routes[0]["dest"]) < 0 and show_supply,
+		"a route from the town's stores to the trains is set and the supply overlay comes on")
+	var truck := -1
+	for id in _all_own_ids():
+		if int(world.get_unit_info(id).get("convoy_route", -1)) >= 0:
+			truck = id
+	check.call(truck >= 0 and not world.is_orderable(truck), "the supply column is on the route and takes no orders")
+	_push_click(MOUSE_BUTTON_RIGHT, get_viewport_rect().size * 0.5)
+	await _frames(3)
+	var place_sub := _submenu_of(hud.order_popup, "Requisition")
+	check.call(hud.order_popup.visible and place_sub != null, "right-click in the town offers Requisition")
+	hud.order_popup.hide()
+	var rlist: Array = world.get_supply_routes()
+	_on_command("cancel_route_%d" % (int(rlist[0]["id"]) if not rlist.is_empty() else 0))
+	rlist = world.get_supply_routes()
+	check.call(not rlist.is_empty() and not rlist[0]["active"] and String(rlist[0].get("state_name", "")).begins_with("Returning"),
+		"the route can be cancelled: the column returns")
+	camera.zoom = Vector2.ONE * 0.03
+
+	# Right-click menu with nothing selected: map commands only (a frame after the last menu closed).
+	selected.clear()
+	selected_holding = -1
+	await _frames(2)
 	_push_click(MOUSE_BUTTON_RIGHT, vs * Vector2(0.5, 0.5))
 	await _frames(3)
 	var has_move := false
@@ -1559,6 +1682,27 @@ func _run_autotest() -> void:
 	await _shot("25_controls", hq, 0.05)
 	hud.toggle_help()
 	selected = [0]
+	# Holdings: the home town's panel, then a supply route from its stores to the trains.
+	holdings = world.get_holdings()
+	var home_hd := -1
+	for hd in holdings:
+		if hd.get("own", false) and int(hd["kind"]) == 0:
+			home_hd = int(hd["id"])
+	if home_hd >= 0:
+		selected = []
+		selected_holding = home_hd
+		world.set_training(home_hd, true)
+		await _shot("26_holding_panel", world.get_holding(home_hd)["pos"], 0.05)
+		world.set_supply_route(home_hd, -1)
+		show_supply = true
+		for k in 50:
+			world.advance(1, 200.0)
+		routes = world.get_supply_routes()
+		await _shot("27_supply_route", world.get_holding(home_hd)["pos"], 0.05)
+		show_supply = false
+		world.cancel_supply_route(0)
+		selected_holding = -1
+		selected = [0]
 
 	# Teams: lock four live combat units under the first as leader, wedge at 1 km, march west.
 	var pick: Array[int] = []

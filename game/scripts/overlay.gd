@@ -19,6 +19,7 @@ var town_pop := PackedInt32Array()
 var draw_ms := 0.0
 var groups: Array = []              # last drawn groups: {pos, ids, side} (used for click-selection)
 var drawn: Array = []               # last drawn single counters: {rect, id, side}, bottom to top (click-selection)
+var drawn_holdings: Array = []      # last drawn holding markers: {rect, id} (click-selection)
 
 
 func _ready() -> void:
@@ -47,6 +48,9 @@ func _draw() -> void:
 	if main.show_los:
 		_draw_los(xf, zoom)
 	_draw_wrecks(xf, view)
+	if main.show_supply:
+		_draw_supply_routes(xf)
+	_draw_holdings(xf, zoom, view)
 	_draw_command_links(xf)
 	_draw_mount_links(xf)
 	_draw_fire_links(xf)
@@ -103,7 +107,13 @@ const SIGNAL := Color("#d39a17")
 const MIN_COUNTER := 32.0
 const THEATER_COUNTER := 28.0
 const COMPANY_COUNTER := 36.0
-const ECHELONS := ["coy", "plt", "plt", "plt", "sec", "btty"] # by unit type
+const ECHELONS := ["coy", "plt", "plt", "plt", "sec", "btty", "col"] # by unit type (col: a supply column)
+const HOLDING_COL := [Color("#2c5ea8"), Color("#b0342b"), Color("#7a7f74")] # owner: company, hostile, independent
+const HOLDING_GLYPH := ["T", "F", "D", "A"]  # town, farm collective, fuel depot, ammo dump
+const SF_MILITIA := 35              # own or seen units: 1 for a town's militia
+const SF_CONVOY := 36               # own supply columns: convoy state, else -1
+const SF_CARGO_T := 37              # own supply columns: tonnes aboard, else -1
+const CONVOY_COL := [Color("#9fb7a0"), Color("#8bd450"), Color("#f4f2ea"), Color("#5ab0ff"), Color("#f4f2ea"), Color("#c8c8c8")]
 const TEAM_COLORS := [Color("#f2c14e"), Color("#39c0b0"), Color("#c77dff"), Color("#8bd450"),
 	Color("#ff8c42"), Color("#5ab0ff"), Color("#ff6f91"), Color("#d9d9d9")]
 
@@ -150,10 +160,14 @@ func _row_item(o: int, i: int) -> Dictionary:
 	var item := {"id": id, "side": side, "type": int(snap[o + 2]), "flags": flags, "ghost": (flags & 2) != 0,
 		"strength": snap[o + 5], "zone": int(snap[o + 6]), "morale": snap[o + 8], "order_in": snap[o + 9],
 		"roe": int(snap[o + 12]), "badge": "", "label": "", "fire": 0.0, "sel": main.selected.has(id),
-		"echelon": ECHELONS[clampi(int(snap[o + 2]), 0, 5)], "row": i,
+		"echelon": ECHELONS[clampi(int(snap[o + 2]), 0, 6)], "row": i,
 		"engage": snap[o + 17], "elem": int(snap[o + 18]), "elem_max": int(snap[o + 19]),
 		"team": int(snap[o + 20]), "role": int(snap[o + 21]), "tcol": int(snap[o + 22]), "standoff": int(snap[o + 24]),
-		"carry": int(snap[o + SF_CARRY]), "supp": snap[o + SF_SUPP]}
+		"carry": int(snap[o + SF_CARRY]), "supp": snap[o + SF_SUPP],
+		"militia": snap[o + SF_MILITIA] > 0.5, "convoy": int(snap[o + SF_CONVOY]), "cargo": snap[o + SF_CARGO_T]}
+	if item["militia"]:
+		# A town's garrison: one dot a squad, three from the third.
+		item["echelon"] = "sec" if int(snap[o + 19]) <= 2 else "plt"
 	if side == 0:
 		match int(snap[o + 13]):
 			1: item["badge"] = ["M", "R", "D", "A"][clampi(int(snap[o + 11]), 0, 3)]
@@ -263,7 +277,13 @@ func _draw_counter(c: Vector2, s: float, it: Dictionary) -> void:
 	draw_rect(box, paper)
 	var lw := maxf(0.8, s * 0.038)
 	draw_rect(box, ink, false, lw)
+	if it.get("militia", false):
+		# Militia: the garrison's box is tinted, and a small 'm' sits in its corner.
+		draw_rect(box, Color(0.85, 0.78, 0.55, 0.45 if ghost else 0.7))
+		draw_rect(box, ink, false, lw)
 	_draw_symbol(box, int(it["type"]), ink, lw)
+	if it.get("militia", false) and s >= 22.0:
+		draw_string(font, Vector2(box.end.x - s * 0.16, box.end.y - s * 0.03), "m", HORIZONTAL_ALIGNMENT_LEFT, -1, int(s * 0.18), ink)
 	_draw_echelon(String(it["echelon"]), Vector2(c.x, c.y - s * 0.35), s, Color(1, 1, 1, 0.6 if ghost else 1.0))
 	if ghost:
 		_text_center(Vector2(c.x, c.y + h - s * 0.17), "?", int(s * 0.28), Color.WHITE)
@@ -327,6 +347,15 @@ func _draw_counter(c: Vector2, s: float, it: Dictionary) -> void:
 			var pfs := int(s * 0.22)
 			draw_string_outline(font, Vector2(c.x - h, c.y - h - s * 0.1), "PIN", HORIZONTAL_ALIGNMENT_LEFT, -1, pfs, 3, Color(0, 0, 0, 0.85))
 			draw_string(font, Vector2(c.x - h, c.y - h - s * 0.1), "PIN", HORIZONTAL_ALIGNMENT_LEFT, -1, pfs, bc)
+	# A supply column: tonnes aboard bottom right (or "empty"), and the leg it is on as its badge.
+	var cv: int = it.get("convoy", -1)
+	if cv >= 0 and s >= 22.0 and not ghost:
+		var cargo: float = it.get("cargo", 0.0)
+		var ct := ("%.0f t" % cargo) if cargo >= 0.95 else ("%.1f t" % cargo if cargo > 0.05 else "empty")
+		var cfs := int(s * 0.2)
+		var cw := font.get_string_size(ct, HORIZONTAL_ALIGNMENT_LEFT, -1, cfs).x
+		draw_string(font, Vector2(c.x + h - s * 0.08 - cw, c.y + h - s * 0.07), ct, HORIZONTAL_ALIGNMENT_LEFT, -1, cfs,
+			Color("#c8f0a0") if cargo > 0.05 else Color(0.85, 0.85, 0.8))
 	# Squads aboard an APC/IFV platoon: "+3" bottom right.
 	var carry: int = it.get("carry", -1)
 	if carry > 0 and s >= 22.0 and not ghost:
@@ -420,6 +449,10 @@ func _draw_symbol(r: Rect2, type: int, ink: Color, lw: float) -> void:
 		5: # Self-propelled artillery: oval and dot
 			_stadium(r, ink, lw)
 			draw_circle(c, r.size.y * 0.12, ink)
+		6: # Supply column: the supply bar across the box, wheels under it
+			draw_line(Vector2(r.position.x + r.size.x * 0.12, c.y - r.size.y * 0.08), Vector2(r.end.x - r.size.x * 0.12, c.y - r.size.y * 0.08), ink, lw * 1.6)
+			for k in 3:
+				draw_circle(Vector2(r.position.x + r.size.x * (0.25 + 0.25 * k), c.y + r.size.y * 0.22), r.size.y * 0.09, ink)
 
 
 ## The tracked-vehicle oval: a stadium inside the symbol box.
@@ -447,11 +480,117 @@ func _draw_echelon(ech: String, p: Vector2, s: float, col: Color) -> void:
 		"plt":
 			for i in 3:
 				draw_circle(p + Vector2((i - 1) * gap, 0), d, col)
-		"coy", "btty":
+		"coy", "btty", "col":
 			draw_rect(Rect2(p.x - d * 0.6, p.y - s * 0.06, d * 1.2, s * 0.12), col)
 		"bn":
 			for i in 2:
 				draw_rect(Rect2(p.x + (i - 0.5) * gap - d * 0.6, p.y - s * 0.06, d * 1.2, s * 0.12), col)
+
+
+# --- Holdings and supply routes ---------------------------------------------------------
+# A holding is marked with a pennant on a pole at the edge of its hex: owner's colour (company
+# blue, hostile red, independent grey), a letter for its kind (T town, F farm collective, D fuel
+# depot, A ammo dump), and under it, for the company's own places, loyalty and the militia squads.
+# Markers are clickable (drawn_holdings). Supply routes (View > Supply, F3) are drawn from the
+# source to the destination along the column's road, coloured by what the column is doing.
+
+func _draw_holdings(xf: Transform2D, zoom: float, view: Rect2) -> void:
+	drawn_holdings = []
+	var px := 500.0 * zoom
+	if px < 1.2:
+		return
+	var list: Array = main.holdings
+	var s := clampf(px * 1.1, 14.0, 34.0)
+	for hd in list:
+		var p: Vector2 = xf * (hd["pos"] as Vector2)
+		if not view.has_point(p):
+			continue
+		var owner := int(hd["owner"])
+		var own: bool = hd.get("own", false)
+		# Independent places only show up once the hexes are big enough to matter.
+		if owner < 0 and px < 4.0 and int(hd["id"]) != main.selected_holding:
+			continue
+		var col: Color = HOLDING_COL[2 if owner < 0 else clampi(owner, 0, 1)]
+		var base := p + Vector2(px * 0.55, -px * 0.2)
+		var top := base + Vector2(0, -s * 1.35)
+		var sel: bool = int(hd["id"]) == main.selected_holding
+		draw_line(base + Vector2(1, 1), top + Vector2(1, 1), Color(0, 0, 0, 0.5), maxf(1.5, s * 0.08))
+		draw_line(base, top, Color(0.95, 0.95, 0.9), maxf(1.5, s * 0.08))
+		var flag := PackedVector2Array([top, top + Vector2(s * 1.05, s * 0.3), top + Vector2(0, s * 0.62)])
+		draw_colored_polygon(PackedVector2Array([flag[0] + Vector2(1, 1), flag[1] + Vector2(1, 1), flag[2] + Vector2(1, 1)]), Color(0, 0, 0, 0.45))
+		draw_colored_polygon(flag, col)
+		var closed := flag.duplicate()
+		closed.append(flag[0])
+		draw_polyline(closed, SIGNAL if sel else Color(0, 0, 0, 0.6), maxf(1.0, s * (0.1 if sel else 0.05)), true)
+		var glyph: String = HOLDING_GLYPH[clampi(int(hd["kind"]), 0, 3)]
+		_text_center(top + Vector2(s * 0.3, s * 0.3), glyph, int(maxf(8.0, s * 0.42)), Color.WHITE)
+		if hd.get("fighting", false):
+			draw_circle(top + Vector2(-s * 0.22, 0), s * 0.14, Color("#ff6b4a"))
+		if own and s >= 20.0:
+			var tag := "%d%%" % int(hd.get("loyalty", 0.0))
+			var ms := int(hd.get("militia_squads", 0))
+			if ms > 0:
+				tag += "  M%d" % ms
+			if hd.get("training", false):
+				tag += " +"
+			if hd.get("contested", false):
+				tag += "  !"
+			draw_string_outline(font, base + Vector2(s * 0.2, 3), tag, HORIZONTAL_ALIGNMENT_LEFT, -1, 10, 3, Color(0, 0, 0, 0.85))
+			draw_string(font, base + Vector2(s * 0.2, 3), tag, HORIZONTAL_ALIGNMENT_LEFT, -1, 10, Color(1, 1, 0.9))
+		elif not own and s >= 20.0 and int(hd.get("militia_squads", 0)) > 0:
+			var mtag := "M%d" % int(hd["militia_squads"])
+			draw_string_outline(font, base + Vector2(s * 0.2, 3), mtag, HORIZONTAL_ALIGNMENT_LEFT, -1, 10, 3, Color(0, 0, 0, 0.85))
+			draw_string(font, base + Vector2(s * 0.2, 3), mtag, HORIZONTAL_ALIGNMENT_LEFT, -1, 10, Color(1, 0.85, 0.8))
+		if sel:
+			# The place's footprint.
+			var r: float = (int(hd["radius"]) + 0.5) * px * 1.16
+			draw_arc(p, r, 0, TAU, 48, SIGNAL, 2.0)
+		drawn_holdings.append({"rect": Rect2(top + Vector2(-s * 0.2, -s * 0.15), Vector2(s * 1.4, s * 1.1)).merge(Rect2(base - Vector2(s * 0.3, s * 0.3), Vector2(s * 0.6, s * 0.6))), "id": int(hd["id"])})
+
+
+func _draw_supply_routes(xf: Transform2D) -> void:
+	var routes: Array = main.routes
+	var w := clampf(hex_px() * 0.35, 2.0, 7.0)
+	for r in routes:
+		var a: Vector2 = xf * (r["source_pos"] as Vector2)
+		var b: Vector2 = xf * (r["dest_pos"] as Vector2)
+		var suspended: bool = r.get("suspended", false)
+		var state := int(r.get("state", -1))
+		var col: Color = CONVOY_COL[clampi(state, 0, 5)] if state >= 0 else Color(0.6, 0.6, 0.6)
+		if r.get("under_fire", false):
+			col = Color("#ff6b4a")
+		elif r.get("halted", false):
+			col = Color("#ffcc4d")
+		if suspended or not r.get("active", true):
+			col = Color(0.75, 0.75, 0.7, 0.8)
+		# The whole route as a faint line, the column's current road on top.
+		draw_dashed_line(a, b, Color(col.r, col.g, col.b, 0.45), w * 0.5, 10.0)
+		var path: PackedVector2Array = r.get("path", PackedVector2Array())
+		if path.size() >= 2:
+			var pts := PackedVector2Array()
+			var step := maxi(1, path.size() / 300)
+			for k in range(0, path.size(), step):
+				pts.append(xf * path[k])
+			pts.append(xf * path[path.size() - 1])
+			draw_polyline(pts, Color(0, 0, 0, 0.5), w + 2.0, true)
+			draw_polyline(pts, col, w, true)
+		# End markers: a ring at each end, filled at the source.
+		draw_circle(a, w * 1.4, col)
+		draw_arc(a, w * 1.4, 0, TAU, 16, Color(0, 0, 0, 0.6), 1.0)
+		draw_arc(b, w * 1.4, 0, TAU, 16, col, 2.0)
+		# Label at the midpoint: source -> destination, state and throughput.
+		var mid := (a + b) * 0.5
+		var txt := "%s → %s" % [String(r["source_name"]), String(r["dest_name"])]
+		var line2 := "SUSPENDED" if suspended else String(r.get("state_name", ""))
+		var tpd := float(r.get("tonnes_per_day", 0.0))
+		if tpd > 0.0 and not suspended:
+			line2 += "  ·  %.1f t/day" % tpd
+		if r.has("cargo_tonnes") and float(r["cargo_tonnes"]) > 0.05:
+			line2 += "  ·  %.1f t aboard" % float(r["cargo_tonnes"])
+		draw_string_outline(font, mid + Vector2(8, -4), txt, HORIZONTAL_ALIGNMENT_LEFT, -1, 11, 4, Color(0, 0, 0, 0.85))
+		draw_string(font, mid + Vector2(8, -4), txt, HORIZONTAL_ALIGNMENT_LEFT, -1, 11, Color(1, 1, 0.92))
+		draw_string_outline(font, mid + Vector2(8, 9), line2, HORIZONTAL_ALIGNMENT_LEFT, -1, 10, 4, Color(0, 0, 0, 0.85))
+		draw_string(font, mid + Vector2(8, 9), line2, HORIZONTAL_ALIGNMENT_LEFT, -1, 10, col.lightened(0.3))
 
 
 # --- Company grouping on the theater map ---------------------------------------------

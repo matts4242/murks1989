@@ -34,6 +34,7 @@ const char *event_kind_name(int k) {
         case murks::EV_RETREAT: return "retreat";
         case murks::EV_SUPPLY: return "supply";
         case murks::EV_UNDER_FIRE: return "under_fire";
+        case murks::EV_HOLDING: return "holding";
         default: return "info";
     }
 }
@@ -91,6 +92,15 @@ void MurksWorld::_bind_methods() {
     ClassDB::bind_method(D_METHOD("get_visible_hexes", "id"), &MurksWorld::get_visible_hexes);
     ClassDB::bind_method(D_METHOD("poll_events"), &MurksWorld::poll_events);
     ClassDB::bind_method(D_METHOD("get_stats"), &MurksWorld::get_stats);
+    ClassDB::bind_method(D_METHOD("get_holdings"), &MurksWorld::get_holdings);
+    ClassDB::bind_method(D_METHOD("get_holding", "hid"), &MurksWorld::get_holding);
+    ClassDB::bind_method(D_METHOD("holding_at", "hex"), &MurksWorld::holding_at);
+    ClassDB::bind_method(D_METHOD("set_training", "hid", "on"), &MurksWorld::set_training);
+    ClassDB::bind_method(D_METHOD("levy", "hid", "kind"), &MurksWorld::levy);
+    ClassDB::bind_method(D_METHOD("set_supply_route", "source", "dest"), &MurksWorld::set_supply_route);
+    ClassDB::bind_method(D_METHOD("cancel_supply_route", "rid"), &MurksWorld::cancel_supply_route);
+    ClassDB::bind_method(D_METHOD("get_supply_routes"), &MurksWorld::get_supply_routes);
+    ClassDB::bind_method(D_METHOD("is_orderable", "id"), &MurksWorld::is_orderable);
 }
 
 Dictionary MurksWorld::generate(int seed, int chunks_x, int chunks_y) {
@@ -421,6 +431,11 @@ PackedFloat32Array MurksWorld::get_units_snapshot() const {
         q[SF_CARRY] = -1.0f;
         q[SF_MOUNT_LINK] = -1.0f;
         q[SF_SUPP] = own ? u.suppression + (u.pinned ? 1000.0f : 0.0f) : -1.0f;
+        q[SF_MILITIA] = shown && u.militia ? 1.0f : 0.0f;
+        q[SF_CONVOY] = own && u.type == murks::U_TRUCK ? (float)u.convoy_state : -1.0f;
+        q[SF_CARGO_T] = own && u.type == murks::U_TRUCK
+                            ? (float)(u.cargo_l / murks::DIESEL_L_PER_T + u.cargo_t + u.cargo_kg / 1000.0)
+                            : -1.0f;
         if (own && u.dismounts >= 0) {
             const murks::Unit &dm = world_.units[u.dismounts];
             q[SF_CARRY] = dm.embarked ? (float)dm.elements : 0.0f;
@@ -485,7 +500,7 @@ Dictionary MurksWorld::get_unit_info(int id) const {
         d["suppression"] = u.suppression;
         d["pinned"] = u.pinned;
         d["engage_night"] = et.f_night;
-        static const char *kNoun[murks::U_TYPE_COUNT] = {"vehicles", "vehicles", "vehicles", "squads", "vehicles", "guns"};
+        static const char *kNoun[murks::U_TYPE_COUNT] = {"vehicles", "vehicles", "vehicles", "squads", "vehicles", "guns", "trucks"};
         d["element_noun"] = kNoun[u.type < murks::U_TYPE_COUNT ? u.type : 0];
     }
     d["morale"] = u.morale;
@@ -618,7 +633,26 @@ Dictionary MurksWorld::get_unit_info(int id) const {
         d["standoff_hexes"] = world_.standoff_hexes(u);
         d["standoff_pending"] = u.pending_stance.active && u.pending_stance.standoff != u.standoff;
         if (u.pending_stance.active) d["pending_standoff"] = (int)u.pending_stance.standoff;
+        // Holdings and supply.
+        d["orderable"] = world_.orderable(u);
+        if (u.holding >= 0 && u.holding < (int)world_.holdings.size()) d["holding"] = u.holding;
+        if (u.type == murks::U_TRUCK) {
+            d["convoy_state"] = (int)u.convoy_state;
+            d["convoy_state_name"] = murks::convoy_state_name(u.convoy_state);
+            d["convoy_route"] = u.convoy_route;
+            d["cargo_l"] = u.cargo_l;
+            d["cargo_t"] = u.cargo_t;
+            d["cargo_kg"] = u.cargo_kg;
+            d["cargo_tonnes"] = u.cargo_l / murks::DIESEL_L_PER_T + u.cargo_t + u.cargo_kg / 1000.0;
+            d["capacity_t"] = world_.convoy_capacity_t(u);
+            if (u.convoy_route >= 0 && u.convoy_route < (int)world_.routes.size()) {
+                const murks::SupplyRoute &r = world_.routes[u.convoy_route];
+                d["route_source"] = r.source >= 0 ? to_gd(world_.holdings[r.source].name) : String();
+                d["route_dest"] = r.dest >= 0 ? to_gd(world_.holdings[r.dest].name) : String("the trains");
+            }
+        }
     }
+    d["militia"] = u.militia;
     d["pending"] = u.pending.active;
     if (u.pending.active) {
         static const char *kPend[7] = {"Hold", "Move", "Fall back", "Regroup", "Rest & resupply", "Dismount",
@@ -788,6 +822,211 @@ Dictionary MurksWorld::get_stats() const {
     d["ammo_t"] = world_.stock.ammo_t;
     d["food_kg"] = world_.stock.food_kg;
     d["personnel"] = world_.stock.personnel;
+    d["cash"] = world_.stock.cash;
+    d["replacements"] = world_.stock.replacements;
+    d["days_diesel"] = world_.days_of_diesel();
+    d["days_ammo"] = world_.days_of_ammo();
+    d["days_food"] = world_.days_of_food();
+    d["diesel_lph"] = world_.stock.rate_diesel_lph;
+    d["ammo_tph"] = world_.stock.rate_ammo_tph;
+    int owned = 0, trucks = 0, routes = 0;
+    for (const auto &h : world_.holdings)
+        if (h.owner == murks::SIDE_PLAYER) ++owned;
+    for (const auto &u : world_.units)
+        if (u.alive && u.side == murks::SIDE_PLAYER && u.type == murks::U_TRUCK) trucks += u.elements;
+    for (const auto &r : world_.routes)
+        if (r.active) ++routes;
+    d["holdings_owned"] = owned;
+    d["trucks"] = trucks;
+    d["routes_active"] = routes;
     d["units_total"] = (int)world_.units.size();
     return d;
+}
+
+// --- Holdings and supply routes ---------------------------------------------------------
+
+static const char *levy_noun(int k) {
+    static const char *n[murks::LV_COUNT] = {"Food", "Fuel", "Cash", "Men"};
+    return n[k < 0 || k >= murks::LV_COUNT ? 0 : k];
+}
+
+Dictionary MurksWorld::get_holding(int hid) const {
+    Dictionary d;
+    if (hid < 0 || hid >= (int)world_.holdings.size()) return d;
+    const murks::Holding &h = world_.holdings[hid];
+    const bool own = h.owner == murks::SIDE_PLAYER;
+    d["id"] = hid;
+    d["name"] = to_gd(h.name);
+    d["kind"] = (int)h.kind;
+    d["kind_name"] = murks::holding_kind_name(h.kind);
+    murks::Vec2 c = murks::hex_center(h.pos);
+    d["pos"] = Vector2((real_t)c.x, (real_t)c.y);
+    d["hex"] = Vector2i(h.pos.col, h.pos.row);
+    d["radius"] = h.radius;
+    d["population"] = h.population;
+    // The owner as the player knows it: their own places exactly, the rest as last seen.
+    d["owner"] = (int)h.known_owner;
+    d["owner_name"] = h.known_owner == murks::SIDE_PLAYER ? "Company Murks" : h.known_owner == murks::SIDE_HOSTILE ? "Hostile" : "Independent";
+    d["own"] = own;
+    d["location"] = to_gd(world_.place_name(h.pos));
+    // Garrison: own militia exactly; others' when seen.
+    int militia = 0;
+    bool militia_seen = false;
+    if (h.militia_unit >= 0 && h.militia_unit < (int)world_.units.size()) {
+        const murks::Unit &m = world_.units[h.militia_unit];
+        if (m.alive && (own || world_.seen_by(m, murks::SIDE_PLAYER))) {
+            militia = m.elements;
+            militia_seen = true;
+        }
+    }
+    d["militia_squads"] = militia;
+    d["militia_seen"] = militia_seen;
+    d["militia_max"] = world_.militia_max_squads(h);
+    d["militia_unit"] = own ? h.militia_unit : -1;
+    d["present_own"] = world_.present_in(h, murks::SIDE_PLAYER);
+    d["contested"] = h.contested_since >= 0 && own;
+    if (h.contested_since >= 0 && own) d["contested_minutes"] = (int)(world_.time_min - h.contested_since);
+    d["captured_minutes_ago"] = (int)(world_.time_min - h.captured_at);
+    d["fighting"] = world_.time_min - h.last_fight < 60;
+    if (!own) return d;
+    d["loyalty"] = h.loyalty;
+    d["diesel_l"] = h.diesel_l;
+    d["ammo_t"] = h.ammo_t;
+    d["food_kg"] = h.food_kg;
+    d["cash"] = h.cash;
+    d["manpower"] = h.manpower;
+    double cash = 0, food = 0;
+    world_.daily_yield(h, cash, food);
+    d["cash_per_day"] = cash;
+    d["food_per_day"] = food;
+    d["training"] = h.training;
+    d["training_progress"] = h.training_progress;
+    d["can_train"] = h.kind == murks::HK_TOWN && world_.militia_max_squads(h) > 0 && h.loyalty >= 25.0f &&
+                     world_.militia_squads(h) < world_.militia_max_squads(h);
+    d["train_days"] = murks::MILITIA_TRAIN_MIN / 1440;
+    d["squad_men"] = murks::MILITIA_SQUAD_MEN;
+    d["can_levy"] = world_.can_levy(h, murks::SIDE_PLAYER) && (h.kind == murks::HK_TOWN || h.kind == murks::HK_FARM);
+    Array levies;
+    for (int k = 0; k < murks::LV_COUNT; ++k) {
+        Dictionary l;
+        l["kind"] = k;
+        l["name"] = levy_noun(k);
+        const int64_t wait = h.levy_until[k] - world_.time_min;
+        l["hours_until"] = wait > 0 ? (int)((wait + 59) / 60) : 0;
+        bool possible = h.kind == murks::HK_TOWN || (h.kind == murks::HK_FARM && k == murks::LV_FOOD);
+        if (k == murks::LV_MEN && h.manpower <= 0) possible = false;
+        l["possible"] = possible;
+        double amount = 0;
+        switch (k) {
+            case murks::LV_FOOD: amount = h.population * (h.kind == murks::HK_FARM ? 0.5 : 0.1); break;
+            case murks::LV_FUEL: amount = h.population * 0.5; break;
+            case murks::LV_CASH: amount = h.population * 2.0; break;
+            case murks::LV_MEN: amount = h.manpower; break;
+            default: break;
+        }
+        l["amount"] = amount;
+        l["loyalty_cost"] = (k == murks::LV_CASH || k == murks::LV_MEN) ? 15 : 10;
+        levies.push_back(l);
+    }
+    d["levies"] = levies;
+    // The trains parked here draw from the stores.
+    const int hq = world_.acting_hq(0);
+    d["trains_here"] = hq >= 0 && !world_.units[hq].moving() &&
+                       murks::hex_distance(h.pos, world_.units[hq].pos) <= std::max(3, h.radius);
+    PackedInt32Array rs;
+    for (int i = 0; i < (int)world_.routes.size(); ++i) {
+        const murks::SupplyRoute &r = world_.routes[i];
+        if ((r.active || r.suspended_at >= 0) && (r.source == hid || r.dest == hid)) rs.push_back(i);
+    }
+    d["routes"] = rs;
+    return d;
+}
+
+Array MurksWorld::get_holdings() const {
+    Array out;
+    for (int i = 0; i < (int)world_.holdings.size(); ++i) out.push_back(get_holding(i));
+    return out;
+}
+
+int MurksWorld::holding_at(Vector2i hex) const { return world_.holding_at({hex.x, hex.y}); }
+bool MurksWorld::set_training(int hid, bool on) { return world_.set_training(hid, on); }
+String MurksWorld::levy(int hid, int kind) { return to_gd(world_.levy(hid, kind)); }
+
+Dictionary MurksWorld::set_supply_route(int source, int dest) {
+    Dictionary d;
+    std::string err;
+    d["id"] = world_.set_supply_route(source, dest, &err);
+    d["error"] = to_gd(err);
+    return d;
+}
+
+bool MurksWorld::cancel_supply_route(int rid) { return world_.cancel_supply_route(rid); }
+
+bool MurksWorld::is_orderable(int id) const {
+    return id >= 0 && id < (int)world_.units.size() && world_.units[id].alive && world_.orderable(world_.units[id]);
+}
+
+Array MurksWorld::get_supply_routes() const {
+    Array out;
+    const int hq = world_.acting_hq(0);
+    for (int i = 0; i < (int)world_.routes.size(); ++i) {
+        const murks::SupplyRoute &r = world_.routes[i];
+        if (r.side != murks::SIDE_PLAYER || r.source < 0 || r.source >= (int)world_.holdings.size()) continue;
+        const bool working = r.convoy >= 0 && r.convoy < (int)world_.units.size() && world_.units[r.convoy].alive &&
+                             world_.units[r.convoy].convoy_route == i;
+        if (!r.active && r.suspended_at < 0 && !working) continue; // cancelled, and its column is home
+        if (!r.active && !working && r.suspended_at >= 0 && world_.time_min - r.suspended_at > 1440) continue;
+        Dictionary d;
+        d["id"] = i;
+        d["active"] = r.active;
+        d["suspended"] = !r.active && r.suspended_at >= 0;
+        d["source"] = r.source;
+        d["dest"] = r.dest;
+        d["source_name"] = to_gd(world_.holdings[r.source].name);
+        d["dest_name"] = r.dest >= 0 ? to_gd(world_.holdings[r.dest].name) : String("the trains");
+        murks::Vec2 sc = murks::hex_center(world_.holdings[r.source].pos);
+        d["source_pos"] = Vector2((real_t)sc.x, (real_t)sc.y);
+        murks::HexCoord dh = r.dest >= 0 ? world_.holdings[r.dest].pos : (hq >= 0 ? world_.units[hq].pos : world_.holdings[r.source].pos);
+        murks::Vec2 dc = murks::hex_center(dh);
+        d["dest_pos"] = Vector2((real_t)dc.x, (real_t)dc.y);
+        d["convoy"] = working ? r.convoy : -1;
+        d["trips"] = r.trips;
+        d["delivered_l"] = r.delivered_l;
+        d["delivered_t"] = r.delivered_t;
+        d["delivered_kg"] = r.delivered_kg;
+        d["round_trip_min"] = r.last_round_trip_min;
+        d["distance_km"] = murks::hex_distance(world_.holdings[r.source].pos, dh) * 0.5;
+        if (working) {
+            const murks::Unit &c = world_.units[r.convoy];
+            d["convoy_name"] = to_gd(c.name);
+            d["state"] = (int)c.convoy_state;
+            d["state_name"] = murks::convoy_state_name(c.convoy_state);
+            d["trucks"] = c.elements;
+            d["cargo_tonnes"] = c.cargo_l / murks::DIESEL_L_PER_T + c.cargo_t + c.cargo_kg / 1000.0;
+            d["capacity_t"] = world_.convoy_capacity_t(c);
+            d["under_fire"] = world_.time_min - c.last_targeted < 15 || world_.time_min - c.last_hit < 15;
+            d["halted"] = !c.moving() && (c.convoy_state == murks::CV_TO_SOURCE || c.convoy_state == murks::CV_TO_DEST ||
+                                           c.convoy_state == murks::CV_RETURN);
+            d["tonnes_per_day"] = r.last_round_trip_min > 0 ? world_.convoy_capacity_t(c) * 1440.0 / r.last_round_trip_min : 0.0;
+            d["convoy_pos"] = unit_world_pos(c);
+            PackedVector2Array path;
+            if (c.moving()) {
+                path.push_back(unit_world_pos(c));
+                const size_t step = std::max<size_t>(1, (c.path.size() - c.path_i) / 400);
+                for (size_t k = c.path_i; k < c.path.size(); k += step) {
+                    murks::Vec2 cc = murks::hex_center(world_.map.coord_of(c.path[k]));
+                    path.push_back(Vector2((real_t)cc.x, (real_t)cc.y));
+                }
+                murks::Vec2 last = murks::hex_center(world_.map.coord_of(c.path.back()));
+                path.push_back(Vector2((real_t)last.x, (real_t)last.y));
+            }
+            d["path"] = path;
+        } else {
+            d["state"] = -1;
+            d["state_name"] = r.active ? "No column" : "Suspended";
+            d["tonnes_per_day"] = 0.0;
+        }
+        out.push_back(d);
+    }
+    return out;
 }

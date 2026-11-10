@@ -37,9 +37,18 @@ This build proves the risky technical core of the design plan (roadmap phase 1, 
 - **Command friction.** Orders take 5–30+ minutes to reach units, longer out of radio range, in combat, or when tired.
 - **Flashpoint-style combat.** Line of sight from elevation and cover, concealment in forests and towns, night spotting, fog of war with last-known positions, direct and indirect fire, morale, and standing orders that make hurt units fall back.
 - **Simulation fidelity zones.** Hot (within 10 km of an enemy, or within a gun's range), warm (10–40 km) and cold zones.
-- **A thin logistics loop.** Fuel and ammo are carried per unit and refilled from company stocks near the HQ (or, once the HQ is lost, near the platoon that took over the trains, at half rate); food is drawn daily.
+- **A thin logistics loop.** Fuel and ammo are carried per unit and refilled from company stocks near the HQ (or, once the HQ is lost, near the platoon that took over the trains, at half rate); food is drawn daily. The stocks are refilled from holdings, by the trains parking there or by a supply route.
+- **Holdings.** Every town of 5,000 or more within 120 km of the company's home is a holding, plus one fuel depot (40,000 L), one ammo dump (60 t) and four farm collectives at villages nearby. The home town starts as the company's (loyalty 50); the rest are independent. Click a place's pennant (blue the company's, red hostile, grey independent; T town, F farm, D fuel depot, A ammo dump) for its panel: people, stores, loyalty, volunteers, militia, routes and the actions below. Right-click a town for the same actions.
+  - **Capture.** A place changes hands when one side's combat units (not trucks, not militia of another side) are alone in it, halted, for 120 minutes; it then has loyalty 20. Hostile forces take undefended player towns the same way, and that pauses the game. A garrison of militia blocks capture while it stands.
+  - **Loyalty** (hourly): +0.05 with own units or militia present (+0.1 with both), −0.3 with an enemy within 5 km and nobody defending, −2 per hour of fighting inside the place, −10 to −15 per requisition. Clamped 0–100.
+  - **Yields** at 06:00 into the place's own stores, scaled by loyalty: a town pays 0.5 DM a head and 0.02 kg of food a head (ten days' worth at most); a farm collective 400 kg of food a day; a town's garages hold 1 L of diesel a head, once; volunteers join the pool at 0.1% of the population a day while loyalty is 50 or more (up to 1%). Depots produce nothing.
+  - **The trains at a depot.** The HQ (or whoever took over the trains) halted within 3 hexes of an own holding draws from its stores into the company stock every hour, up to the want levels (30,000 L, 60 t, 6,000 kg), at most 10,000 L, 10 t and 2,000 kg an hour, and takes any cash.
+  - **Militia.** Raise militia at an own town (loyalty 25 or more, 2,000 people or more): a squad of 10 every two days from the volunteers, one squad per 2,000 people, six at most. The garrison is a rifle unit of the owner's side that holds the town hex, fires at will, never breaks contact, takes no orders, and counts for neither victory nor defeat nor rations. Its counter has a tinted box with a small "m".
+  - **Requisition** at an own town with one of your units halted in it, at once into the place's stores: food 0.1 kg a head (a farm 0.5), fuel 0.5 L a head, cash 2 DM a head, or every volunteer as company replacements. Loyalty −10 (food, fuel) or −15 (cash, men); once a day per kind.
+  - The company starts with 20,000 DM; the stock bar shows cash, replacements and days of supply at the recent rate of use. The hostile AI captures places it sits in but still rearms itself slowly (its own trains and depots are a later card). Loyalty, yield and training values are first estimates.
+- **Supply routes and convoys.** The company has a **supply column** of six Ural-375D trucks (4.5 t each, 27 t a trip; firepower 0.5, no armour; the trucks are its elements, and each truck knocked out loses its share of the cargo). It counts for rations, not for victory or defeat, and takes orders like any unit while idle. From a holding's panel or its right-click menu, set a **supply route** from that place to the trains (the HQ, or whoever took over) or to another own holding. The column drives to the source on road march (the usual road A* with the enemy-known hex avoidance), loads for 30 minutes what the destination is short of against its want levels (proportionally, up to 27 t: 1 t = 1,190 L of diesel, 1 t of ammunition or 1,000 kg of food), drives to the destination, unloads for 30 minutes and goes back for more until the route is cancelled; a cancelled route sends an empty column home, a loaded one delivers first. The trucks fill their own tanks where they load and unload. A convoy is spotted and shot like any unit: it keeps driving under fire unless its break-contact rule (light losses) sends it back, and resumes its leg after 60 minutes with no enemy known within 5 km; a column with no trucks left is lost with its cargo and the route is suspended (pause-worthy). A route's source lost to the enemy ends it. The supply overlay (**F3**, View menu) draws each route from source to destination with the column's road on top: green on the road, white loading or unloading, amber halted, red under fire, grey suspended; a label gives the state, tonnes aboard and the throughput in t/day from the last round trip. The column's counter shows the tonnes aboard. Rail, fuel tiers (alcohol, horses), escorts and hostile convoys are later steps.
 - **A scenario you can win or lose.** The 7th Guards Remnant hunts the company. It follows the freshest sighting any hostile has made and gets word of the company's whereabouts every six hours or so. You win by breaking it: none of its six fighting platoons left with 30% strength or more. You lose when fewer than three of your fighting units are left. Losing Murks HQ doesn't end the game, but orders then take 25 minutes longer, and after an hour's handover the senior platoon still able to fight (first in the order of battle, at 30% strength or more) takes over the company trains: units halted near it resupply at half the usual rate, and regroup and rest & resupply form up on it. If that platoon is lost or falls below 30%, the next one takes over. Hostile formations regroup the same way on whoever takes over from a lost HQ. The contract and score sit top left; an end screen offers keep playing, load, new game or quit.
-- **Quick save and load** (F5 / F9). A save holds the whole simulation; loading it and playing on gives exactly the same result. Save format v6 (suppression; structs are written field by field, so equal states always save to equal bytes); older saves are refused.
+- **Quick save and load** (F5 / F9). A save holds the whole simulation; loading it and playing on gives exactly the same result. Save format v7 (holdings, routes, company cash and replacements, militia and convoy fields; structs are written field by field, so equal states always save to equal bytes); older saves are refused.
 
 The map is baked from real data by `tools/bake_region.py` (see "The real map" below). If the baked file is missing, or you pass `--procedural`, the game generates a fictional map instead.
 
@@ -50,6 +59,8 @@ The map is baked from real data by `tools/bake_region.py` (see "The real map" be
 ![Whole map](docs/screenshots/03_whole_map_overview.png)
 
 ![Company at Sulechów](docs/screenshots/01_company_close.png)
+
+![Holding panel](docs/screenshots/26_holding_panel.png)
 
 ## Run it (Windows)
 
@@ -88,6 +99,8 @@ The prebuilt extension is in `game/bin/` (`libmurks.windows.template_debug.x86_6
 | J / Shift+J | Form a team from the selection / disband the selection's teams |
 | L | Select the team of the selected unit (double-click does the same) |
 | , (comma) | Dismount the squads of the selected APC/IFV platoons, or mount them up again |
+| Click a pennant | Select a holding: its panel shows stores, loyalty, militia and routes, with Raise militia, Requisition and Supply route |
+| F3 | Supply overlay: routes and convoys |
 | T | Direct command overlay: every unit outlined and linked to its commander, with zones |
 | I | Fire support overlay: the fire net, range rings, relays, units cut off, fire missions |
 
@@ -177,7 +190,7 @@ extension/    GDExtension binding: one class, MurksWorld, with coarse calls (who
 game/         Godot project: scripts/main.gd (input, clock), map_view.gd (streaming), overlay.gd (symbols), hud.gd
 game/data/    Baked real map (.murkz = zlib-compressed MURKSMAP)
 tools/        bake_region.py (real-data pipeline), finish_map.cpp (adds local roads)
-tests/        core_bench.cpp: headless run of map + sim with timings; hq_loss_test.cpp: checks the HQ-loss rules; rules_test.cpp: checks the Historical Values rules; fire_support_test.cpp: checks gun ranges and the fire support net; dismount_test.cpp: checks mounted infantry; suppression_test.cpp: checks suppression; attrition_test.cpp: kill-rate harness (`attrition_test calibrate`); playtest.cpp: real-map 4-day scripted runs over many seeds (`playtest game/data/poland_1989.murkz 4 active 1989 12`, needs zlib)
+tests/        core_bench.cpp: headless run of map + sim with timings; hq_loss_test.cpp: checks the HQ-loss rules; rules_test.cpp: checks the Historical Values rules; fire_support_test.cpp: checks gun ranges and the fire support net; dismount_test.cpp: checks mounted infantry; suppression_test.cpp: checks suppression; holdings_test.cpp: checks holdings, capture, loyalty, requisition, militia, supply routes and convoys; attrition_test.cpp: kill-rate harness (`attrition_test calibrate`); playtest.cpp: real-map 4-day scripted runs over many seeds (`playtest game/data/poland_1989.murkz 4 active 1989 12`, needs zlib)
 SConstruct    Builds the extension into game/bin/
 CMakeLists.txt  Builds the core, benchmark and finish_map on their own (handy in Visual Studio)
 ```
@@ -210,16 +223,17 @@ Pass these after `--` when launching Godot:
 - `--groups=N`: number of hostile bands (default 24, about 212 units). Use 60 or more as a stress test.
 - `--procedural`: ignore the baked map and generate a fictional one.
 - `--autotest=DIR`: scripted run that saves screenshots and timing to `DIR`, then quits.
-- `--uitest`: scripted check of the menus (title screen, right-click menu, armed orders, Esc and the pause menu, dropdowns, View and Orders menus): pushes real input events and menu picks, checks what reaches the simulation, prints PASS / FAIL lines and exits non-zero on a failure. Needs a window (on a Linux server: `xvfb-run godot --path game -- --uitest`).
+- `--uitest`: scripted check of the menus (title screen, right-click menu, armed orders, Esc and the pause menu, dropdowns, View and Orders menus, the holding panel, militia, a supply route and its cancellation): pushes real input events and menu picks, checks what reaches the simulation, prints PASS / FAIL lines and exits non-zero on a failure. Needs a window (on a Linux server: `xvfb-run godot --path game -- --uitest`).
 
 Headless balance check (no window): `godot --headless --path game --script res://tests/playtest.gd -- 4 active` (or `passive`). It plays the scenario for N days and prints contact time, losses, supplies, the outcome and a save/load replay check.
 
 ## Known limits of this proof of concept
 
 - Map data is not yet corrected to 1989 (see above). Natural Earth has main roads only; local roads are generated.
-- One scripted contract. No contract board, holdings, wages, convoys or replacements yet (design plan phases 3–4), so company ammo and diesel stocks only go down.
+- One scripted contract. No contract board or wages yet (design plan phases 3–4). Holdings, militia and supply routes refill the company stocks; replacements are counted (levied men) but not yet spent on losses.
 - Combat values follow simulated real-world performance (weapons, cover, concealment, morale), not game balance, and are not tuned to make fights even. A company defending a town against an attacker of similar size usually holds, as the attacker's rule of thumb of needing about 3:1 at the point of attack would predict.
 - Pathfinding is plain A* on hexes. Very long cross-map orders cost up to ~10 ms; next comes the hierarchical road graph and the 5 km operational layer. Routes to another piece of land (islands, across the sea) are refused at once.
 - One quick-save slot. A save only loads on the map it was made on.
 - Exporting a game: add `*.murkz` to the export preset's "Filters to export non-resource files" so the map is included.
+- A fresh clone has no `game/.godot/` folder, so Godot finds neither the extension nor the script classes until the project is imported once: `godot --headless --path game --import` (or open it in the editor).
 - Running `godot --import` from the command line on a project with no `.godot` folder can crash on exit with this godot-cpp/Godot pairing. Run it again and it works. Opening the project normally in the editor is not affected.

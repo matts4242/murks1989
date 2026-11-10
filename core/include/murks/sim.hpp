@@ -20,7 +20,9 @@
 
 namespace murks {
 
-enum UnitType : uint8_t { U_HQ = 0, U_TANK, U_MECH, U_INFANTRY, U_RECON, U_ARTILLERY, U_TYPE_COUNT };
+// U_TRUCK: a supply column (the company trains' trucks); it carries cargo on supply routes and
+// never counts as a fighting unit.
+enum UnitType : uint8_t { U_HQ = 0, U_TANK, U_MECH, U_INFANTRY, U_RECON, U_ARTILLERY, U_TRUCK, U_TYPE_COUNT };
 enum Mobility : uint8_t { M_TRACKED = 0, M_WHEELED, M_FOOT };
 enum Side : int8_t { SIDE_PLAYER = 0, SIDE_HOSTILE = 1, SIDE_COUNT = 2 };
 // O_DISMOUNT and O_MOUNT only travel as pending orders; they never become a unit's current order.
@@ -140,6 +142,17 @@ struct Unit {
     int64_t mount_at = -1;  // when the mount drill finishes (both halted in the same hex), -1 none
     int squad_men = 0;      // squad units: men per squad (display and ration count)
 
+    // Holdings (see Holding). Militia are the garrison a town raises: they hold their town, take
+    // no orders and never count as part of the company. A supply column (U_TRUCK) working a
+    // route carries cargo and runs the convoy state machine (see SupplyRoute / ConvoyState).
+    bool militia = false;
+    int holding = -1;            // militia: the holding they garrison
+    uint8_t convoy_state = 0;    // ConvoyState (trucks only)
+    int convoy_route = -1;       // the SupplyRoute this column works, -1 none
+    double cargo_l = 0, cargo_t = 0, cargo_kg = 0; // diesel, ammunition, food aboard
+    int64_t convoy_wait_until = -1; // loading / unloading finishes then; or earliest resume after a halt
+    int64_t trip_started = -1;      // when the column left the source with this load
+
     int64_t seen_until[SIDE_COUNT] = {-1, -1};
     int64_t last_seen[SIDE_COUNT] = {-100000, -100000};
     HexCoord last_seen_pos[SIDE_COUNT];
@@ -147,6 +160,72 @@ struct Unit {
 
     bool moving() const { return path_i < path.size(); }
 };
+
+// ------------------------------------------------------------------------------------
+// Holdings and supply (company loop, JA2-style holdings; Shadow Empire-style routes)
+// ------------------------------------------------------------------------------------
+
+// A place the company can hold: a town (taxes, food, recruits, militia), a farm collective
+// (food), a fuel depot or an ammo dump (finite stores). Every holding keeps a stock of its
+// own: yields land there, requisitions go there, and the company draws from it with its
+// trains parked at the place or by a supply route (convoys). Capture, loyalty and yields
+// are first estimates (Work Board MRK-08).
+enum HoldingKind : uint8_t { HK_TOWN = 0, HK_FARM, HK_FUEL_DEPOT, HK_AMMO_DUMP, HK_COUNT };
+const char *holding_kind_name(int kind);
+
+struct Holding {
+    int settlement = -1;        // index into Map::settlements
+    std::string name;           // the settlement's name
+    HexCoord pos;
+    int radius = 1;             // hexes: the place's footprint (units inside count as present)
+    uint8_t kind = HK_TOWN;
+    int8_t owner = -1;          // SIDE_PLAYER, SIDE_HOSTILE or -1 independent
+    int8_t known_owner = -1;    // the owner as far as the player knows (fog of war)
+    float loyalty = 30;         // 0-100 towards the owner; income and militia scale with it
+    int population = 0;
+    double diesel_l = 0, ammo_t = 0, food_kg = 0, cash = 0; // the holding's own stock
+    int manpower = 0;           // men willing to serve (militia and replacements)
+    int militia_unit = -1;      // the garrison unit, -1 none yet
+    bool training = false;      // the owner is raising militia here
+    float training_progress = 0; // 0..1 towards the next squad
+    int64_t contested_since = -1; // an enemy of the owner alone in the place since (-1 no)
+    int64_t captured_at = -100000;
+    int64_t last_fight = -100000; // fighting inside the place (collateral damage)
+    int64_t levy_until[4] = {-1, -1, -1, -1}; // next time each LevyKind is allowed
+};
+
+enum LevyKind : uint8_t { LV_FOOD = 0, LV_FUEL, LV_CASH, LV_MEN, LV_COUNT };
+const char *levy_kind_name(int kind);
+
+// A supply route: a truck column shuttles between a source holding and the company trains
+// (the HQ, or whoever took them over) or another own holding. Throughput follows from
+// trucks x load / round trip, so distance, roads and ambushes set what arrives.
+enum ConvoyState : uint8_t { CV_IDLE = 0, CV_TO_SOURCE, CV_LOADING, CV_TO_DEST, CV_UNLOADING, CV_RETURN };
+const char *convoy_state_name(int state);
+
+struct SupplyRoute {
+    bool active = false;
+    int8_t side = SIDE_PLAYER;
+    int source = -1;            // holding index
+    int dest = -1;              // holding index, or -1 = the company trains
+    int convoy = -1;            // unit id of the column working it (-1 suspended)
+    int trips = 0;
+    double delivered_l = 0, delivered_t = 0, delivered_kg = 0;
+    int last_round_trip_min = 0; // minutes source -> destination -> source, last completed
+    int64_t suspended_at = -1;   // the column was lost then (-1 never)
+};
+
+constexpr int CAPTURE_MIN = 120;          // minutes one side alone in a place before it changes hands (estimate)
+constexpr int MILITIA_TRAIN_MIN = 2 * 1440; // per squad of 10 (estimate)
+constexpr int MILITIA_SQUAD_MEN = 10;
+constexpr int MILITIA_PER_POP = 2000;     // one squad per 2,000 people
+constexpr int MILITIA_MAX_SQUADS = 6;
+constexpr int LEVY_COOLDOWN_MIN = 1440;   // per holding and kind
+constexpr int CONVOY_LOAD_MIN = 30;       // loading or unloading a column (estimate)
+constexpr int CONVOY_RESUME_MIN = 60;     // after being driven off or halted, try the leg again
+constexpr double TRUCK_LOAD_T = 4.5;      // Ural-375D payload, tonnes
+constexpr double DIESEL_L_PER_T = 1190.0; // 0.84 kg per litre
+constexpr double WANT_DIESEL_L = 30000, WANT_AMMO_T = 60, WANT_FOOD_KG = 6000; // the trains' want levels
 
 // Time a unit needs to acquire a target and to work through each engagement cycle. Crew
 // condition does not change how many vehicles fight (that is the binary in-the-fight count);
@@ -252,6 +331,7 @@ enum EventKind : uint8_t {
     EV_RETREAT,
     EV_SUPPLY,
     EV_UNDER_FIRE,
+    EV_HOLDING, // a holding changes hands, raises militia, is levied
 };
 
 struct Event {
@@ -265,6 +345,10 @@ struct Event {
 struct CompanyStock {
     double diesel_l = 30000, ammo_t = 60, food_kg = 6000;
     int personnel = 0;
+    double cash = 20000;   // Deutsche Mark (1989 prices); wages and purchases come later (MRK-07)
+    int replacements = 0;  // men levied from holdings, waiting to fill losses (MRK-10)
+    // Consumption, smoothed hourly: what the trains hand out per hour. Days of supply follow.
+    double rate_diesel_lph = 0, rate_ammo_tph = 0;
 };
 
 struct SimStats {
@@ -399,9 +483,44 @@ public:
     const SimStats &stats() const { return stats_; }
     void reseed_rng(uint64_t s) { rng_.reseed(s * 31ull + 7); } // for tests and harnesses
 
+    // Holdings. holding_at: the holding whose footprint holds the hex, -1 none. in_place: the
+    // unit stands inside the holding's footprint.
+    int holding_at(HexCoord h) const;
+    bool in_place(const Holding &h, HexCoord pos) const { return hex_distance(h.pos, pos) <= h.radius; }
+    // Units of `side` present in the place (alive, on the map, not trucks); militia count for
+    // their owner.
+    int present_in(const Holding &h, int side) const;
+    // Daily yield into the holding's own stock at its present loyalty (cash DM, food kg).
+    void daily_yield(const Holding &h, double &cash, double &food_kg) const;
+    int militia_max_squads(const Holding &h) const;
+    int militia_squads(const Holding &h) const; // squads in the fight now
+    // Raise militia at an own town (on/off). false if the holding can't (not a town, not owned,
+    // loyalty under 25).
+    bool set_training(int hid, bool on);
+    // Requisition at an own town with an own unit present: moves goods into the holding's stock
+    // (men into the company's replacement pool) at a loyalty cost. Returns "" on success, else
+    // the reason.
+    std::string levy(int hid, int what);
+    // Does `side` have a unit (not militia, not a truck) halted inside the place?
+    bool can_levy(const Holding &h, int side) const;
+    // Supply routes (player side). set_supply_route: source holding -> dest holding (or -1 = the
+    // trains), worked by a free supply column; returns the route id or -1 (reason in *error).
+    int set_supply_route(int source, int dest, std::string *error = nullptr);
+    bool cancel_supply_route(int rid);
+    int free_convoy(int side) const;    // an idle supply column of this side, -1 none
+    double convoy_capacity_t(const Unit &u) const { return u.elements * TRUCK_LOAD_T; }
+    // Days of supply at the smoothed consumption (1e9 when nothing is being used).
+    double days_of_diesel() const;
+    double days_of_ammo() const;
+    double days_of_food() const;
+    // A unit the player may order: not militia, and not a column working a route.
+    bool orderable(const Unit &u) const;
+
     Map map;
     std::vector<Unit> units;
     std::vector<Formation> formations;
+    std::vector<Holding> holdings;
+    std::vector<SupplyRoute> routes;
     CompanyStock stock;
     int64_t time_min = 0; // minutes since 1989-04-14 00:00
     uint32_t seed = 1989;
@@ -431,6 +550,18 @@ private:
     void update_logistics();
     void update_hunters();
     void check_outcome();
+    // Holdings and supply.
+    void setup_holdings();
+    void update_holdings();              // hourly: presence, capture, loyalty, militia training
+    void update_trains_at_depot(int hq); // hourly: the trains draw from an own holding they stand at
+    void update_convoys();               // every tick: the convoy state machine
+    bool convoy_arrive_or_repath(Unit &u, HexCoord target, int reach); // true once halted within reach
+    void load_convoy(Unit &u, SupplyRoute &r);
+    void unload_convoy(Unit &u, SupplyRoute &r);
+    void convoy_suspend(Unit &u, const char *why);
+    void capture(Holding &h, int side);
+    void add_militia_squad(Holding &h);
+    double used_diesel_l_ = 0, used_ammo_t_ = 0; // this hour, for the consumption rates
     void push_event(EventKind k, int unit, bool pause, const std::string &text);
     void start_path(Unit &u, HexCoord target, OrderKind kind, bool announce);
     HexCoord regroup_point(const Unit &u) const;

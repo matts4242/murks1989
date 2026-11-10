@@ -64,6 +64,10 @@ public:
         SF_CARRY,      // APC/IFV platoons: squads aboard (0 while they are out), else -1
         SF_MOUNT_LINK, // carriers with squads out: the squad unit's id; squads on foot: their vehicles' id; else -1
         SF_SUPP,       // own units: suppression 0-100, +1000 when pinned; else -1
+        // Holdings and supply (MRK-08 / MRK-09).
+        SF_MILITIA,    // own or seen units: 1 for a town's militia (garrison, takes no orders), else 0
+        SF_CONVOY,     // own supply columns: ConvoyState (0 with the trains .. 5 returning), else -1
+        SF_CARGO_T,    // own supply columns: tonnes aboard, else -1
         UNIT_STRIDE
     };
     enum SnapshotFlag {
@@ -131,6 +135,18 @@ public:
     PackedVector2Array get_visible_hexes(int id) const;
     Array poll_events();
     Dictionary get_stats() const;
+
+    // Holdings (towns, farm collectives, depots) and supply routes. What the player sees of a
+    // place they don't hold is limited to what they know: owner as last seen, no stocks.
+    Array get_holdings() const;
+    Dictionary get_holding(int hid) const;
+    int holding_at(Vector2i hex) const;             // holding whose footprint holds the hex, -1 none
+    bool set_training(int hid, bool on);            // raise militia at an own town
+    String levy(int hid, int kind);                 // requisition (0 food, 1 fuel, 2 cash, 3 men); "" = done
+    Dictionary set_supply_route(int source, int dest); // {"id": route or -1, "error": reason}
+    bool cancel_supply_route(int rid);
+    Array get_supply_routes() const;                // every route still worth showing (active or suspended)
+    bool is_orderable(int id) const;                // not militia, not a column working a route
 
 protected:
     static void _bind_methods();

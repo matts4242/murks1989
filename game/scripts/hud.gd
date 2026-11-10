@@ -47,8 +47,13 @@ const SHAPES := [["Keep", "Hold the team's present layout around its leader."],
 const VIEW_TOGGLES := [["Group", "Company grouping on the theater map", KEY_O],
 	["Direct command", "Direct command: who takes orders from whom", KEY_T],
 	["Fire support", "Fire support net and gun ranges", KEY_I],
+	["Supply", "Supply routes and convoys", KEY_F3],
 	["Grid", "Hex grid", KEY_G], ["Sight", "Line of sight of the selected unit", KEY_V],
 	["Zones", "Simulation fidelity zones", KEY_Z]]
+const LEVY_TIPS := ["0.1 kg a head from the town's larders (a farm collective gives 0.5). Loyalty -10.",
+	"0.5 L a head from garages and stations. Loyalty -10.",
+	"2 DM a head in taxes taken at once. Loyalty -15.",
+	"Every volunteer in the pool joins the company as replacements. Loyalty -15."]
 const SPEED_ITEMS := [["Pause", KEY_SPACE], ["1 min per second", KEY_1], ["5 min per second", KEY_2],
 	["30 min per second", KEY_3], ["2 hours per second", KEY_4], ["Max", KEY_5]]
 
@@ -88,6 +93,16 @@ var ord := {"has_own": false, "mode": -1, "roe": 0, "brk": 0, "pending": false, 
 	"in_team": false, "can_form": false, "shape": -1, "spacing": -1, "team": "",
 	"standoff": 255, "default_standoff": 0, "can_dismount": false, "can_mount": false}
 
+# Holding panel (a town, farm collective or depot selected by its pennant)
+var holding_panel: PanelContainer
+var holding_text: RichTextLabel
+var train_button: Button
+var levy_menu: MenuButton
+var route_menu: MenuButton
+var hold := {}                      # the holding shown, as world.get_holding gives it
+var hold_routes: Array = []         # its routes
+var hold_targets: Array = []        # other own holdings a route can end at
+
 var order_popup: PopupMenu          # right-click menu
 var log_box: VBoxContainer
 var status_label: Label
@@ -119,6 +134,7 @@ func _ready() -> void:
 	theme = _make_theme()
 	_build_top_bar()
 	_build_unit_panel()
+	_build_holding_panel()
 	_build_log()
 	_build_status()
 	_build_banners()
@@ -385,11 +401,14 @@ func fill_orders(pm: PopupMenu, at_hex: bool, ctx: Dictionary) -> void:
 			pm.add_separator(String(ctx.get("title", "Map")))
 			if ctx.has("info"):
 				_note(pm, String(ctx["info"]))
+			_fill_place(pm, ctx)
 			_add(pm, "Centre the map here", "cmd", "centre_here")
 			_add(pm, "Whole map", "menu", "whole_map", KEY_M)
 			pm.add_separator()
 		_note(pm, "Select one of your units to give orders")
 		return
+	if at_hex and ctx.has("holding"):
+		_fill_place(pm, ctx)
 	if at_hex:
 		pm.add_separator(String(ctx.get("title", "Orders")))
 		if ctx.has("info"):
@@ -440,6 +459,53 @@ func fill_orders(pm: PopupMenu, at_hex: bool, ctx: Dictionary) -> void:
 	if String(ord["delay"]) != "":
 		pm.add_separator()
 		_note(pm, "Orders arrive in %s (command delay)" % ord["delay"])
+
+
+## The place under the cursor: select it, and for the company's own places raise militia,
+## requisition, and set a supply route from its stores.
+func _fill_place(pm: PopupMenu, ctx: Dictionary) -> void:
+	if not ctx.has("holding"):
+		return
+	var hd: Dictionary = ctx["holding"]
+	var own: bool = hd.get("own", false)
+	pm.add_separator("%s · %s" % [String(hd["name"]), String(hd["kind_name"])])
+	var line := String(hd["owner_name"])
+	if own:
+		line += " · loyalty %d%%" % int(hd.get("loyalty", 0.0))
+	if int(hd.get("militia_squads", 0)) > 0:
+		line += " · militia %d squad%s" % [int(hd["militia_squads"]), "" if int(hd["militia_squads"]) == 1 else "s"]
+	_note(pm, line)
+	_add(pm, "Select " + String(hd["name"]), "cmd", "holding_select_%d" % int(hd["id"]), 0, true, -1, "Open the place's panel: stocks, loyalty, militia, requisitions and routes.")
+	if not own:
+		pm.add_separator()
+		return
+	if int(hd["kind"]) == 0:
+		_add(pm, "Raise militia", "cmd", "holding_train_%d" % int(hd["id"]), 0, hd.get("can_train", false) or hd.get("training", false),
+			1 if hd.get("training", false) else 0, "A squad of %d every %d days from the town's volunteers, up to %d. It garrisons the town and takes no orders." % [
+			int(hd.get("squad_men", 10)), int(hd.get("train_days", 2)), int(hd.get("militia_max", 0))])
+	var lv := _submenu(pm, "Requisition", hd.get("can_levy", false))
+	for l in hd.get("levies", []):
+		var wait := int(l["hours_until"])
+		var txt := "%s: %s" % [String(l["name"]), _levy_amount(int(l["kind"]), float(l["amount"]))]
+		if wait > 0:
+			txt += "  (again in %d h)" % wait
+		_add(lv, txt, "cmd", "levy_%d_%d" % [int(hd["id"]), int(l["kind"])], 0, l["possible"] and wait == 0, -1, LEVY_TIPS[int(l["kind"])])
+	if not hd.get("can_levy", false):
+		_note(pm, "Requisition needs one of your units halted in the place")
+	var rt := _submenu(pm, "Supply route from here to")
+	_add(rt, "The trains (the HQ)", "cmd", "route_%d_-1" % int(hd["id"]), 0, true, -1, "A supply column shuttles what the company is short of from these stores to the HQ.")
+	for t in ctx.get("own_holdings", []):
+		if int(t["id"]) != int(hd["id"]):
+			_add(rt, "%s (%s)" % [String(t["name"]), String(t["kind_name"]).to_lower()], "cmd", "route_%d_%d" % [int(hd["id"]), int(t["id"])])
+	pm.add_separator()
+
+
+func _levy_amount(kind: int, amount: float) -> String:
+	match kind:
+		0: return "%s kg" % _thousands(int(amount))
+		1: return "%s L" % _thousands(int(amount))
+		2: return "%s DM" % _thousands(int(amount))
+	return "%d men" % int(amount)
 
 
 func _fill_team(pm: PopupMenu) -> void:
@@ -579,6 +645,151 @@ func _build_unit_panel() -> void:
 	unit_text.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	col.add_child(unit_text)
 	_build_orders(col)
+
+
+func _build_holding_panel() -> void:
+	holding_panel = PanelContainer.new()
+	holding_panel.set_anchors_preset(Control.PRESET_TOP_RIGHT)
+	_offsets(holding_panel, -392, 52, -8, 52)
+	holding_panel.custom_minimum_size = Vector2(384, 0)
+	holding_panel.visible = false
+	add_child(holding_panel)
+	var col := VBoxContainer.new()
+	col.add_theme_constant_override("separation", 5)
+	holding_panel.add_child(col)
+	holding_text = RichTextLabel.new()
+	holding_text.bbcode_enabled = true
+	holding_text.fit_content = true
+	holding_text.scroll_active = false
+	holding_text.custom_minimum_size = Vector2(340, 0)
+	holding_text.add_theme_font_size_override("normal_font_size", 14)
+	holding_text.add_theme_font_size_override("bold_font_size", 16)
+	holding_text.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	col.add_child(holding_text)
+	col.add_child(HSeparator.new())
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 4)
+	col.add_child(row)
+	train_button = _button("Raise militia", true)
+	train_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	train_button.pressed.connect(func() -> void:
+		if hold.has("id"):
+			command.emit("holding_train_%d" % int(hold["id"])))
+	row.add_child(train_button)
+	levy_menu = MenuButton.new()
+	levy_menu.text = "Requisition ▾"
+	levy_menu.flat = false
+	levy_menu.focus_mode = Control.FOCUS_NONE
+	levy_menu.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	levy_menu.tooltip_text = "Take food, fuel, cash or men from the place at once. Costs loyalty; once a day per kind; needs one of your units halted there."
+	var lp := levy_menu.get_popup()
+	lp.set_meta("acts", [])
+	lp.id_pressed.connect(_on_menu_id.bind(lp))
+	lp.about_to_popup.connect(_fill_levy_menu.bind(lp))
+	row.add_child(levy_menu)
+	route_menu = MenuButton.new()
+	route_menu.text = "Supply route ▾"
+	route_menu.flat = false
+	route_menu.focus_mode = Control.FOCUS_NONE
+	route_menu.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	route_menu.tooltip_text = "Send the supply column shuttling from this place's stores to the trains or another holding, or cancel a route."
+	var rp := route_menu.get_popup()
+	rp.set_meta("acts", [])
+	rp.id_pressed.connect(_on_menu_id.bind(rp))
+	rp.about_to_popup.connect(_fill_route_menu.bind(rp))
+	row.add_child(route_menu)
+
+
+func _fill_levy_menu(pm: PopupMenu) -> void:
+	_reset(pm)
+	if hold.is_empty():
+		return
+	for l in hold.get("levies", []):
+		var wait := int(l["hours_until"])
+		var txt := "%s: %s, loyalty -%d" % [String(l["name"]), _levy_amount(int(l["kind"]), float(l["amount"])), int(l["loyalty_cost"])]
+		if wait > 0:
+			txt += "  (again in %d h)" % wait
+		_add(pm, txt, "cmd", "levy_%d_%d" % [int(hold["id"]), int(l["kind"])], 0, l["possible"] and wait == 0 and hold.get("can_levy", false), -1, LEVY_TIPS[int(l["kind"])])
+	if not hold.get("can_levy", false):
+		_note(pm, "Needs one of your units halted in the place")
+
+
+func _fill_route_menu(pm: PopupMenu) -> void:
+	_reset(pm)
+	if hold.is_empty():
+		return
+	pm.add_separator("From %s to" % String(hold["name"]))
+	_add(pm, "The trains (the HQ)", "cmd", "route_%d_-1" % int(hold["id"]), 0, true, -1, "A supply column shuttles what the company is short of from these stores to the HQ.")
+	for t in hold_targets:
+		if int(t["id"]) != int(hold["id"]):
+			_add(pm, "%s (%s)" % [String(t["name"]), String(t["kind_name"]).to_lower()], "cmd", "route_%d_%d" % [int(hold["id"]), int(t["id"])])
+	if not hold_routes.is_empty():
+		pm.add_separator("Routes here")
+		for r in hold_routes:
+			var txt := "%s → %s: %s" % [String(r["source_name"]), String(r["dest_name"]), "suspended" if r.get("suspended", false) else String(r.get("state_name", "")).to_lower()]
+			_add(pm, "Cancel " + txt, "cmd", "cancel_route_%d" % int(r["id"]), 0, r.get("active", false))
+
+
+## The holding panel: what the place is, its stores and people, militia, routes; actions below.
+func show_holding(hd: Dictionary, routes: Array, own_holdings: Array) -> void:
+	hold = hd
+	hold_targets = own_holdings
+	hold_routes = []
+	for r in routes:
+		if int(r["source"]) == int(hd["id"]) or int(r["dest"]) == int(hd["id"]):
+			hold_routes.append(r)
+	unit_panel.visible = false
+	holding_panel.visible = true
+	var own: bool = hd.get("own", false)
+	var t := "[b]%s[/b]   %s\n" % [hd["name"], hd["kind_name"]]
+	t += "[color=#b8c0a8]%s · %s people[/color]\n" % [hd["location"], _thousands(int(hd["population"]))]
+	var oc := "#9fc8ff" if own else ("#ff8c7a" if int(hd["owner"]) == 1 else "#c8c8c0")
+	t += "Held by [color=%s]%s[/color]" % [oc, hd["owner_name"]]
+	if hd.get("fighting", false):
+		t += "   [color=#ff6b4a]fighting in the place[/color]"
+	t += "\n"
+	var ms := int(hd.get("militia_squads", 0))
+	if ms > 0 or own:
+		t += "Militia: %d of %d squads%s\n" % [ms, int(hd.get("militia_max", 0)), "" if own or hd.get("militia_seen", false) else " seen"]
+	if not own:
+		t += "\n[color=#b8c0a8]Hold the place with your units for %d hours, unopposed, to take it. A garrison blocks that.[/color]\n" % 2
+		holding_text.text = t
+		train_button.visible = false
+		levy_menu.visible = false
+		route_menu.visible = false
+		return
+	train_button.visible = int(hd["kind"]) == 0
+	levy_menu.visible = true
+	route_menu.visible = true
+	t += _bar("Loyalty", float(hd["loyalty"]))
+	if hd.get("contested", false):
+		t += "[color=#ff6b4a]Enemy alone in the place for %d min: taken at 120[/color]\n" % int(hd.get("contested_minutes", 0))
+	t += "\n[b]Stores[/b]   diesel %s L · ammo %.1f t · food %s kg · cash %s DM\n" % [
+		_thousands(int(hd["diesel_l"])), float(hd["ammo_t"]), _thousands(int(hd["food_kg"])), _thousands(int(hd["cash"]))]
+	if float(hd.get("cash_per_day", 0.0)) > 0.0 or float(hd.get("food_per_day", 0.0)) > 0.0:
+		t += "Each day at 06:00: +%s DM, +%s kg food (scaled by loyalty)\n" % [_thousands(int(hd["cash_per_day"])), _thousands(int(hd["food_per_day"]))]
+	if int(hd["kind"]) == 0:
+		t += "Volunteers: %d men in the pool\n" % int(hd["manpower"])
+	t += "[color=#9fc8ff]%s[/color]\n" % ("The trains are parked here and draw from these stores." if hd.get("trains_here", false) else "Park the HQ here (or send a supply route) to move the stores to the company.")
+	if hd.get("training", false):
+		t += "Raising militia: next squad in %.1f days\n" % ((1.0 - float(hd.get("training_progress", 0.0))) * int(hd.get("train_days", 2)))
+	train_button.set_pressed_no_signal(hd.get("training", false))
+	train_button.disabled = not (hd.get("can_train", false) or hd.get("training", false))
+	if hold_routes.is_empty():
+		t += "No supply route."
+	else:
+		for r in hold_routes:
+			var state := "suspended" if r.get("suspended", false) else String(r.get("state_name", "")).to_lower()
+			t += "Route %s → %s: %s" % [r["source_name"], r["dest_name"], state]
+			if int(r.get("trips", 0)) > 0:
+				t += " · %d trip%s, %.1f t delivered, %.1f t/day" % [int(r["trips"]), "" if int(r["trips"]) == 1 else "s",
+					float(r["delivered_l"]) / 1190.0 + float(r["delivered_t"]) + float(r["delivered_kg"]) / 1000.0, float(r.get("tonnes_per_day", 0.0))]
+			t += "\n"
+	holding_text.text = t
+
+
+func hide_holding() -> void:
+	holding_panel.visible = false
 
 
 ## Orders: everything selected (one unit, a team or a company). Every order and setting travels
@@ -1078,12 +1289,15 @@ func _controls_body() -> Control:
 		["Time", [["Space", "Pause or resume"], ["1 – 5", "1 min, 5 min, 30 min, 2 h per second, max"],
 			[". (period)", "Step 15 minutes while paused"], ["P / U", "WeGo pulse / auto-pause on contact"]]],
 		["View", [["O  T  I", "Company grouping, direct command, fire support"],
+			["F3", "Supply routes and convoys"],
 			["G  V  Z", "Hex grid, line of sight, fidelity zones"], ["M", "Whole map"]]],
+		["Holdings", [["Click a pennant", "Open the place's panel"],
+			["Right-click a town", "Raise militia, requisition, supply route"]]],
 		["Game", [["F5 / F9", "Quick save / quick load"], ["F1 / F2", "Controls / map data credits"],
 			["Esc", "Pause menu"]]]]
 	var cols := HBoxContainer.new()
 	cols.add_theme_constant_override("separation", 28)
-	var halves := [[0, 1], [2, 3, 4]]
+	var halves := [[0, 1], [2, 3, 5, 4]]
 	for h in halves:
 		var col := VBoxContainer.new()
 		col.add_theme_constant_override("separation", 4)
@@ -1165,8 +1379,15 @@ func set_toggle(name: String, on: bool) -> void:
 
 func refresh(time_text: String, night: bool, stats: Dictionary, fps: float, map_stats: String) -> void:
 	time_label.text = time_text + ("  night" if night else "")
-	stock_label.text = "Diesel %s L   Ammo %.1f t   Food %s kg   Men %d" % [
-		_thousands(int(stats["diesel_l"])), float(stats["ammo_t"]), _thousands(int(stats["food_kg"])), int(stats["personnel"])]
+	stock_label.text = "Diesel %s L%s   Ammo %.1f t%s   Food %s kg%s   Men %d%s   Cash %s DM" % [
+		_thousands(int(stats["diesel_l"])), _days(float(stats.get("days_diesel", 1e9))),
+		float(stats["ammo_t"]), _days(float(stats.get("days_ammo", 1e9))),
+		_thousands(int(stats["food_kg"])), _days(float(stats.get("days_food", 1e9))),
+		int(stats["personnel"]), (" (+%d)" % int(stats["replacements"])) if int(stats.get("replacements", 0)) > 0 else "",
+		_thousands(int(stats.get("cash", 0.0)))]
+	stock_label.tooltip_text = "Company stocks and days of supply at the recent rate of use; men on the rolls (+ replacements waiting); cash. %d holding%s, %d trucks, %d route%s running." % [
+		int(stats.get("holdings_owned", 0)), "" if int(stats.get("holdings_owned", 0)) == 1 else "s", int(stats.get("trucks", 0)),
+		int(stats.get("routes_active", 0)), "" if int(stats.get("routes_active", 0)) == 1 else "s"]
 	perf_label.text = "%d fps · sim %.0f us/min · %d units\nhot %d / warm %d / cold %d · %s" % [
 		int(fps), float(stats["avg_tick_us"]), int(stats["alive"]), int(stats["hot"]), int(stats["warm"]), int(stats["cold"]), map_stats]
 	var now := Time.get_ticks_msec()
@@ -1194,6 +1415,7 @@ func set_events(events: Array) -> void:
 		if kind == "contact" or kind == "under_fire": col = Color(1.0, 0.7, 0.45)
 		elif kind == "destroyed": col = Color(1.0, 0.45, 0.4)
 		elif kind == "retreat" or kind == "supply": col = Color(1.0, 0.85, 0.4)
+		elif kind == "holding": col = Color(0.75, 0.95, 0.7)
 		elif kind == "order" or kind == "arrived": col = Color(0.7, 0.85, 1.0)
 		b.add_theme_color_override("font_color", col)
 		if e.has("pos"):
@@ -1443,6 +1665,13 @@ func _bar(name: String, v: float) -> String:
 	var n := int(round(clampf(v, 0, 100) / 10.0))
 	var col := "#5fd35f" if v >= 60 else ("#ffc040" if v >= 30 else "#ff5040")
 	return "%-10s [color=%s]%s[/color][color=#444]%s[/color] %d\n" % [name, col, "■".repeat(n), "■".repeat(10 - n), int(v)]
+
+
+## " (12 d)" for a finite days-of-supply figure, "" when nothing is being used.
+func _days(d: float) -> String:
+	if d >= 999.0:
+		return ""
+	return " (%.1f d)" % d if d < 10.0 else " (%d d)" % int(d)
 
 
 func _thousands(v: int) -> String:
