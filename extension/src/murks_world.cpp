@@ -56,6 +56,7 @@ void MurksWorld::_bind_methods() {
     ClassDB::bind_method(D_METHOD("get_hex_width"), &MurksWorld::get_hex_width);
     ClassDB::bind_method(D_METHOD("get_row_spacing"), &MurksWorld::get_row_spacing);
     ClassDB::bind_method(D_METHOD("build_chunk_mesh", "chunk"), &MurksWorld::build_chunk_mesh);
+    ClassDB::bind_method(D_METHOD("build_chunk_detail_mesh", "chunk"), &MurksWorld::build_chunk_detail_mesh);
     ClassDB::bind_method(D_METHOD("build_chunk_grid_mesh", "chunk"), &MurksWorld::build_chunk_grid_mesh);
     ClassDB::bind_method(D_METHOD("build_overview_image"), &MurksWorld::build_overview_image);
     ClassDB::bind_method(D_METHOD("get_hex_info", "hex"), &MurksWorld::get_hex_info);
@@ -182,16 +183,10 @@ Vector2i MurksWorld::world_to_hex(Vector2 pos) const {
     return Vector2i(h.col, h.row);
 }
 
-Ref<ArrayMesh> MurksWorld::build_chunk_mesh(Vector2i chunk) const {
-    Ref<ArrayMesh> mesh;
-    mesh.instantiate();
-    if (!generated_ || chunk.x < 0 || chunk.y < 0 || chunk.x >= world_.map.chunks_x() ||
-        chunk.y >= world_.map.chunks_y())
-        return mesh;
-    murks::ChunkGeometry g;
-    murks::build_chunk_geometry(world_.map, chunk.x, chunk.y, false, g);
-
+// Copies core triangle geometry (positions, vertex colours, indices) into a Godot mesh.
+static void fill_triangle_mesh(const murks::ChunkGeometry &g, Ref<ArrayMesh> &mesh) {
     const int64_t nv = (int64_t)g.xy.size() / 2;
+    if (nv == 0 || g.indices.empty()) return;
     PackedVector2Array verts;
     verts.resize(nv);
     Vector2 *vp = verts.ptrw();
@@ -216,6 +211,30 @@ Ref<ArrayMesh> MurksWorld::build_chunk_mesh(Vector2i chunk) const {
     arrays[Mesh::ARRAY_COLOR] = cols;
     arrays[Mesh::ARRAY_INDEX] = idx;
     mesh->add_surface_from_arrays(Mesh::PRIMITIVE_TRIANGLES, arrays);
+}
+
+Ref<ArrayMesh> MurksWorld::build_chunk_mesh(Vector2i chunk) const {
+    Ref<ArrayMesh> mesh;
+    mesh.instantiate();
+    if (!generated_ || chunk.x < 0 || chunk.y < 0 || chunk.x >= world_.map.chunks_x() ||
+        chunk.y >= world_.map.chunks_y())
+        return mesh;
+    murks::ChunkGeometry g;
+    murks::build_chunk_geometry(world_.map, chunk.x, chunk.y, false, g);
+    fill_triangle_mesh(g, mesh);
+    return mesh;
+}
+
+// Terrain patterns, rail sleepers and bridges for close zoom; drawn over the chunk mesh.
+Ref<ArrayMesh> MurksWorld::build_chunk_detail_mesh(Vector2i chunk) const {
+    Ref<ArrayMesh> mesh;
+    mesh.instantiate();
+    if (!generated_ || chunk.x < 0 || chunk.y < 0 || chunk.x >= world_.map.chunks_x() ||
+        chunk.y >= world_.map.chunks_y())
+        return mesh;
+    murks::ChunkGeometry g;
+    murks::build_chunk_detail(world_.map, chunk.x, chunk.y, g);
+    fill_triangle_mesh(g, mesh);
     return mesh;
 }
 

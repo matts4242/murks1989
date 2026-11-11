@@ -2,23 +2,30 @@ class_name MapView
 extends Node2D
 ## Draws the one map. Far out it shows a one-pixel-per-hex overview texture;
 ## closer in it streams 64 x 64-hex chunk meshes built by the C++ core,
-## creating chunks that come into view and freeing ones far away.
+## creating chunks that come into view and freeing ones far away. Closer still a
+## detail layer adds a pattern inside every hex (tree crowns, building blocks,
+## furrows, marsh marks), rail sleepers and bridges.
 
 const CHUNK_HEXES := 64
 const BUILD_BUDGET_MS := 6.0     # per frame
 const MAX_LOADED := 260          # chunk meshes kept before unloading far ones
 const CHUNK_MODE_PX := 7.0       # hex size on screen at which chunks replace the overview
 const GRID_MODE_PX := 22.0       # hex size on screen at which hex outlines appear
+const DETAIL_MODE_PX := 16.0     # hex size on screen at which terrain patterns appear
+const DETAIL_FULL_PX := 26.0     # ... and at which they reach full strength
 
 var world: MurksWorld
 var overview: Sprite2D
 var chunk_root: Node2D
+var detail_root: Node2D
 var grid_root: Node2D
 var chunks := {}                 # Vector2i -> MeshInstance2D
+var details := {}                # Vector2i -> MeshInstance2D
 var grids := {}                  # Vector2i -> MeshInstance2D
 var chunk_count := Vector2i.ZERO
 var chunk_size_m := Vector2.ZERO
 var show_grid := true
+var show_detail := true
 var builds_last_frame := 0
 var build_ms_last_frame := 0.0
 var total_built := 0
@@ -43,6 +50,8 @@ func setup(w: MurksWorld) -> void:
 
 	chunk_root = Node2D.new()
 	add_child(chunk_root)
+	detail_root = Node2D.new()
+	add_child(detail_root)
 	grid_root = Node2D.new()
 	grid_root.z_index = 1
 	grid_root.modulate = Color(0.05, 0.05, 0.05, 0.22)
@@ -56,6 +65,11 @@ func update_view(center: Vector2, zoom: float, viewport_size: Vector2) -> void:
 	var use_chunks := px_per_hex >= CHUNK_MODE_PX
 	chunk_root.visible = use_chunks
 	grid_root.visible = use_chunks and show_grid and px_per_hex >= GRID_MODE_PX
+	# Patterns fade in over a short zoom range instead of popping.
+	var want_detail := use_chunks and show_detail and px_per_hex >= DETAIL_MODE_PX
+	detail_root.visible = want_detail
+	if want_detail:
+		detail_root.modulate.a = clampf((px_per_hex - DETAIL_MODE_PX) / (DETAIL_FULL_PX - DETAIL_MODE_PX), 0.0, 1.0) * 0.75 + 0.25
 	if not use_chunks:
 		return
 
@@ -70,7 +84,7 @@ func update_view(center: Vector2, zoom: float, viewport_size: Vector2) -> void:
 	for cy in range(c0.y, c1.y + 1):
 		for cx in range(c0.x, c1.x + 1):
 			var key := Vector2i(cx, cy)
-			if not chunks.has(key) or (want_grid and not grids.has(key)):
+			if not chunks.has(key) or (want_grid and not grids.has(key)) or (want_detail and not details.has(key)):
 				needed.append(key)
 
 	if not needed.is_empty():
@@ -83,6 +97,8 @@ func update_view(center: Vector2, zoom: float, viewport_size: Vector2) -> void:
 				_build_chunk(key)
 			if want_grid and not grids.has(key):
 				_build_grid(key)
+			if want_detail and not details.has(key):
+				_build_detail(key)
 			builds_last_frame += 1
 			build_ms_last_frame = (Time.get_ticks_usec() - t0) / 1000.0
 			if build_ms_last_frame > BUILD_BUDGET_MS:
@@ -101,6 +117,14 @@ func _build_chunk(key: Vector2i) -> void:
 	total_built += 1
 
 
+func _build_detail(key: Vector2i) -> void:
+	var mi := MeshInstance2D.new()
+	mi.mesh = world.build_chunk_detail_mesh(key)
+	mi.position = world.get_chunk_origin(key)
+	detail_root.add_child(mi)
+	details[key] = mi
+
+
 func _build_grid(key: Vector2i) -> void:
 	var mi := MeshInstance2D.new()
 	mi.mesh = world.build_chunk_grid_mesh(key)
@@ -110,7 +134,7 @@ func _build_grid(key: Vector2i) -> void:
 
 
 func _unload_outside(lo: Vector2i, hi: Vector2i) -> void:
-	for dict in [chunks, grids]:
+	for dict in [chunks, grids, details]:
 		for key in dict.keys():
 			var k: Vector2i = key
 			if k.x < lo.x or k.y < lo.y or k.x > hi.x or k.y > hi.y:

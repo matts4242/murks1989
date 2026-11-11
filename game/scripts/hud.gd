@@ -48,7 +48,7 @@ const VIEW_TOGGLES := [["Group", "Company grouping on the theater map", KEY_O],
 	["Direct command", "Direct command: who takes orders from whom", KEY_T],
 	["Fire support", "Fire support net and gun ranges", KEY_I],
 	["Supply", "Supply routes and convoys", KEY_F3],
-	["Grid", "Hex grid", KEY_G], ["Sight", "Line of sight of the selected unit", KEY_V],
+	["Grid", "Hex grid", KEY_G], ["Detail", "Terrain detail when zoomed in", KEY_F6], ["Sight", "Line of sight of the selected unit", KEY_V],
 	["Zones", "Simulation fidelity zones", KEY_Z]]
 const LEVY_TIPS := ["0.1 kg a head from the town's larders (a farm collective gives 0.5). Loyalty -10.",
 	"0.5 L a head from garages and stations. Loyalty -10.",
@@ -116,6 +116,7 @@ var loading: Label
 # Dialogs and screens
 var help_panel: Control
 var credits_panel: Control
+var legend_panel: Control
 var title_screen: Control
 var title_brief: RichTextLabel
 var title_continue: Button
@@ -143,6 +144,7 @@ func _ready() -> void:
 	_build_title_screen()
 	help_panel = _build_dialog("Controls", _controls_body())
 	credits_panel = _build_dialog("Map data credits", _credits_body())
+	legend_panel = _build_dialog("Map legend", _legend_body())
 	order_popup = _new_popup()
 	add_child(order_popup)
 	_build_loading()
@@ -366,6 +368,8 @@ func _fill_view(pm: PopupMenu) -> void:
 	_add(pm, "Centre on the selection", "menu", "centre", KEY_C)
 	_add(pm, "Next unit", "menu", "next_unit", KEY_TAB)
 	_add(pm, "Whole map", "menu", "whole_map", KEY_M)
+	pm.add_separator()
+	_add(pm, "Map legend", "menu", "legend", KEY_F4)
 
 
 func _fill_time(pm: PopupMenu) -> void:
@@ -383,6 +387,7 @@ func _fill_time(pm: PopupMenu) -> void:
 func _fill_help(pm: PopupMenu) -> void:
 	_reset(pm)
 	_add(pm, "Controls", "menu", "help", KEY_F1)
+	_add(pm, "Map legend", "menu", "legend", KEY_F4)
 	_add(pm, "Contract briefing", "menu", "briefing")
 	_add(pm, "Map data credits", "menu", "credits", KEY_F2)
 
@@ -1294,6 +1299,7 @@ func _controls_body() -> Control:
 		["Holdings", [["Click a pennant", "Open the place's panel"],
 			["Right-click a town", "Raise militia, requisition, supply route"]]],
 		["Game", [["F5 / F9", "Quick save / quick load"], ["F1 / F2", "Controls / map data credits"],
+			["F4 / F6", "Map legend / terrain detail on or off"],
 			["Esc", "Pause menu"]]]]
 	var cols := HBoxContainer.new()
 	cols.add_theme_constant_override("separation", 28)
@@ -1333,25 +1339,193 @@ func _credits_body() -> Control:
 		"Local roads are generated; borders, roads and rail are not yet corrected to 1989.", 13, Color(0.9, 0.9, 0.85))
 
 
+## The three dialogs share the middle of the screen: opening one closes the others.
+func _toggle_dialog(panel: Control) -> void:
+	var open := not panel.visible
+	for p in [help_panel, credits_panel, legend_panel]:
+		(p as Control).visible = false
+	panel.visible = open
+
+
 func toggle_help() -> void:
-	help_panel.visible = not help_panel.visible
-	if help_panel.visible:
-		credits_panel.visible = false
+	_toggle_dialog(help_panel)
 
 
 func toggle_credits() -> void:
-	credits_panel.visible = not credits_panel.visible
-	if credits_panel.visible:
-		help_panel.visible = false
+	_toggle_dialog(credits_panel)
 
 
-## Closes a controls or credits dialog if one is open; true if it did.
+func toggle_legend() -> void:
+	_toggle_dialog(legend_panel)
+
+
+## Closes a controls, credits or legend dialog if one is open; true if it did.
 func close_dialog() -> bool:
-	if help_panel.visible or credits_panel.visible:
+	if help_panel.visible or credits_panel.visible or legend_panel.visible:
 		help_panel.visible = false
 		credits_panel.visible = false
+		legend_panel.visible = false
 		return true
 	return false
+
+
+# --- Map legend ----------------------------------------------------------------------
+# Colours and shapes repeat what core/src/render_data.cpp draws (base_color, the passes in
+# build_chunk_geometry, and build_chunk_detail). Change both together.
+
+const LEGEND_TERRAIN := [
+	["open", "Open ground", "Pasture and rough ground. Fast going, no cover."],
+	["fields", "Fields", "Crops, stubble or ploughed earth by parcel. Open; slower when wet."],
+	["forest", "Forest", "Light woods: cover from view and fire, slow for vehicles."],
+	["forest_dense", "Dense forest", "Tall, close timber: the best concealment, the slowest going."],
+	["wetland", "Wetland", "Marsh and bog: very slow, little cover."],
+	["urban", "Built-up, light", "Villages and suburbs: good cover."],
+	["urban_dense", "Built-up, dense", "Town and city blocks: the strongest cover."],
+	["water", "Water", "Lakes, sea and wide rivers: darker where deeper."]]
+const LEGEND_LINES := [
+	["road_major", "Main road", "Trunk roads and motorways."],
+	["road", "Road", "Minor and local roads."],
+	["rail", "Railway", "Sleepers show when zoomed in."],
+	["river_major", "Major river", "Crossed at bridges."],
+	["river", "River or stream", ""],
+	["bridge", "Bridge", "Pale deck with dark parapets."]]
+
+
+func _legend_body() -> Control:
+	var cols := HBoxContainer.new()
+	cols.add_theme_constant_override("separation", 30)
+	for part in [["Ground", LEGEND_TERRAIN], ["Roads, rail and water", LEGEND_LINES]]:
+		var col := VBoxContainer.new()
+		col.add_theme_constant_override("separation", 6)
+		cols.add_child(col)
+		col.add_child(_label(String(part[0]), 14, AMBER))
+		for row in part[1]:
+			var line := HBoxContainer.new()
+			line.add_theme_constant_override("separation", 10)
+			col.add_child(line)
+			var sw := Control.new()
+			sw.custom_minimum_size = Vector2(58, 44)
+			sw.draw.connect(_draw_legend_swatch.bind(sw, String(row[0])))
+			line.add_child(sw)
+			var text := VBoxContainer.new()
+			text.add_theme_constant_override("separation", 0)
+			text.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+			line.add_child(text)
+			text.add_child(_label(String(row[1]), 14))
+			if String(row[2]) != "":
+				text.add_child(_label(String(row[2]), 12, MUTED))
+		if part[0] == "Ground":
+			var note := _label("Hill shading: slopes facing north-west are lit,\nslopes facing south-east are in shadow.\nHigh ground turns brown, then white above 1,500 m.", 12, MUTED)
+			col.add_child(note)
+		else:
+			col.add_child(_label("Patterns, sleepers and bridges appear from\nmedium zoom (F6 turns them off).\nTown names are sized by population.", 12, MUTED))
+	return cols
+
+
+func _legend_hex(c: Vector2, rad: float) -> PackedVector2Array:
+	var pts := PackedVector2Array()
+	for i in 6:
+		var a := deg_to_rad(60.0 * i - 30.0)
+		pts.append(c + Vector2(cos(a), sin(a)) * rad)
+	return pts
+
+
+func _legend_blob(sw: Control, c: Vector2, rad: float, n: int, rot: float, col: Color) -> void:
+	var pts := PackedVector2Array()
+	for i in n:
+		var a := rot + TAU * i / n
+		pts.append(c + Vector2(cos(a), sin(a)) * rad)
+	sw.draw_colored_polygon(pts, col)
+
+
+func _draw_legend_swatch(sw: Control, kind: String) -> void:
+	var c := sw.size * 0.5
+	var rad := 21.0
+	var k := rad / 288.7   # metres on the map -> pixels in the swatch
+	var ground := Color8(172, 182, 122)
+	match kind:
+		"open":
+			sw.draw_colored_polygon(_legend_hex(c, rad), ground)
+			for p in [Vector2(-8, -4), Vector2(7, 3), Vector2(-2, 9)]:
+				for i in [-1, 0, 1]:
+					sw.draw_line(c + p + Vector2(i * 1.2, 1.5), c + p + Vector2(i * 2.0, -1.5), Color8(96, 118, 70, 170), 1.0)
+		"fields":
+			sw.draw_colored_polygon(_legend_hex(c, rad), Color8(214, 198, 132))
+			for i in [-1, 0, 1]:
+				var off := Vector2(0, i * 120.0 * k)
+				var half := sqrt(maxf(0.0, pow(205.0 * k, 2) - off.y * off.y))
+				sw.draw_line(c + off - Vector2(half, 0), c + off + Vector2(half, 0), Color8(96, 84, 44, 120), 1.0)
+		"forest", "forest_dense":
+			var dense := kind == "forest_dense"
+			sw.draw_colored_polygon(_legend_hex(c, rad), Color8(74, 108, 66) if dense else Color8(92, 126, 76))
+			var n := 5 if dense else 4
+			for i in n:
+				var a := TAU * i / n + 0.4
+				var p := c + (Vector2.ZERO if i == 0 else Vector2(cos(a), sin(a)) * 11.0)
+				_legend_blob(sw, p + Vector2(1.2, 1.4), 4.4, 4, 0.785, Color8(30, 52, 30, 120))
+				_legend_blob(sw, p, 4.4, 6, 0.3 * i, Color8(59, 96, 55) if dense else Color8(74, 113, 63))
+		"wetland":
+			sw.draw_colored_polygon(_legend_hex(c, rad), Color8(126, 156, 136))
+			for p in [Vector2(0, 2), Vector2(-9, -6), Vector2(9, 8), Vector2(8, -8), Vector2(-8, 10)]:
+				sw.draw_line(c + p - Vector2(3.4, 0), c + p + Vector2(3.4, 0), Color8(70, 118, 160), 1.2)
+				for i in [-1, 0, 1]:
+					sw.draw_line(c + p + Vector2(i * 1.6, -1.0), c + p + Vector2(i * 2.2, -3.4 - (1.2 if i == 0 else 0.0)), Color8(58, 96, 62), 1.0)
+		"urban", "urban_dense":
+			var dense := kind == "urban_dense"
+			sw.draw_colored_polygon(_legend_hex(c, rad), Color8(124, 112, 106) if dense else Color8(164, 152, 138))
+			var roofs := [Color8(168, 86, 66), Color8(96, 92, 92), Color8(188, 176, 160)]
+			var span := 2 if dense else 1
+			var pitch := (86.0 if dense else 120.0) * k
+			var half := Vector2(34.0, 30.0) * k if dense else Vector2(30.0, 24.0) * k
+			var idx := 0
+			for j in range(-span, span + 1):
+				for i in range(-span, span + 1):
+					idx += 1
+					var p := Vector2(i, j) * pitch
+					if p.length() > 205.0 * k or (not dense and idx % 3 == 0):
+						continue
+					sw.draw_rect(Rect2(c + p - half + Vector2(0.8, 0.9), half * 2.0), Color8(40, 34, 32, 110))
+					sw.draw_rect(Rect2(c + p - half, half * 2.0), roofs[idx % 3])
+		"water":
+			sw.draw_colored_polygon(_legend_hex(c, rad), Color8(92, 138, 178))
+		_:
+			# Line features on a strip of open ground.
+			sw.draw_rect(Rect2(Vector2(0, c.y - 15), Vector2(sw.size.x, 30)), ground)
+			var a := Vector2(2, c.y)
+			var b := Vector2(sw.size.x - 2, c.y)
+			match kind:
+				"road_major":
+					sw.draw_line(a, b, Color8(96, 40, 28), 64.0 * 2 * k)
+					sw.draw_line(a, b, Color8(222, 104, 58), 46.0 * 2 * k)
+				"road":
+					sw.draw_line(a, b, Color8(84, 66, 46), 40.0 * 2 * k)
+					sw.draw_line(a, b, Color8(236, 222, 176), 26.0 * 2 * k)
+				"rail":
+					sw.draw_line(a, b, Color8(34, 34, 38), 2.6)
+					for i in 6:
+						var x := a.x + (i + 0.5) * (b.x - a.x) / 6.0
+						sw.draw_line(Vector2(x, c.y - 3.2), Vector2(x, c.y + 3.2), Color8(34, 34, 38), 1.4)
+				"river_major":
+					sw.draw_line(a, b, Color8(52, 94, 146), 92.0 * 2 * k)
+					sw.draw_line(a, b, Color8(84, 136, 188), 76.0 * 2 * k)
+				"river":
+					sw.draw_line(a, b, Color8(58, 100, 150), 54.0 * 2 * k)
+					sw.draw_line(a, b, Color8(98, 148, 196), 40.0 * 2 * k)
+				"bridge":
+					var top := Vector2(c.x, c.y - 15)
+					var bot := Vector2(c.x, c.y + 15)
+					sw.draw_line(top, bot, Color8(58, 100, 150), 54.0 * 2 * k)
+					sw.draw_line(top, bot, Color8(98, 148, 196), 40.0 * 2 * k)
+					sw.draw_line(a, b, Color8(84, 66, 46), 40.0 * 2 * k)
+					sw.draw_line(a, b, Color8(236, 222, 176), 26.0 * 2 * k)
+					var l := 150.0 * k
+					var w := 46.0 * k
+					sw.draw_line(c - Vector2(l, 0), c + Vector2(l, 0), Color8(240, 236, 222), (46.0 - 12.0) * 2 * k)
+					for sgn in [-1.0, 1.0]:
+						sw.draw_line(c + Vector2(-l, w * sgn), c + Vector2(l, w * sgn), Color8(30, 28, 26), 1.4)
+						for e in [-1.0, 1.0]:
+							var q := c + Vector2(l * e, w * sgn)
+							sw.draw_line(q, q + Vector2(e, sgn) * 2.6, Color8(30, 28, 26), 1.4)
 
 
 # --- Updates -------------------------------------------------------------------------

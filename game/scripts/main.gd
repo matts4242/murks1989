@@ -155,6 +155,7 @@ func _start_world() -> void:
 	selected = [0]
 	hud.loading.visible = false
 	hud.set_toggle("Grid", map_view.show_grid)
+	hud.set_toggle("Detail", map_view.show_detail)
 	hud.set_toggle("Auto-pause", auto_pause)
 	hud.set_toggle("Group", group_companies)
 	set_speed(0)
@@ -494,7 +495,7 @@ func _unhandled_input(event: InputEvent) -> void:
 		# Title screen or pause menu: only Esc and the help keys get through.
 		if event is InputEventKey and event.pressed and not event.echo:
 			var k := (event as InputEventKey).keycode
-			if k in [KEY_ESCAPE, KEY_F1, KEY_F2]:
+			if k in [KEY_ESCAPE, KEY_F1, KEY_F2, KEY_F4]:
 				_on_key(k)
 		return
 	if event is InputEventMouseButton:
@@ -574,6 +575,8 @@ func _on_key(key: Key) -> void:
 		KEY_F3: _on_toggle("Supply")
 		KEY_F1: hud.toggle_help()
 		KEY_F2: hud.toggle_credits()
+		KEY_F4: hud.toggle_legend()
+		KEY_F6: _on_toggle("Detail")
 		KEY_F5: quick_save()
 		KEY_F9: quick_load()
 
@@ -583,6 +586,9 @@ func _on_toggle(name: String) -> void:
 		"Grid":
 			map_view.show_grid = not map_view.show_grid
 			hud.set_toggle(name, map_view.show_grid)
+		"Detail":
+			map_view.show_detail = not map_view.show_detail
+			hud.set_toggle(name, map_view.show_detail)
 		"Sight":
 			show_los = not show_los
 			hud.set_toggle(name, show_los)
@@ -645,6 +651,7 @@ func _on_menu_action(name: String) -> void:
 		"pause_menu": _open_pause()
 		"help": hud.toggle_help()
 		"credits": hud.toggle_credits()
+		"legend": hud.toggle_legend()
 		"briefing": hud.show_banner(briefing_text, 10.0)
 		"centre":
 			if not selected.is_empty():
@@ -1536,6 +1543,49 @@ func _run_uitest() -> void:
 	view.get_popup().hide()
 	check.call(map_view.show_grid != grid_was, "View > Hex grid toggles the grid")
 
+	# Map visuals (MRK-24): the terrain detail layer follows the zoom and its View toggle,
+	# and the legend opens from the View menu and closes with Esc.
+	var zoom_was := camera.zoom
+	camera.zoom = Vector2.ONE * 0.08   # 40 px per hex
+	for i in 30:
+		map_view.update_view(camera.get_screen_center_position(), camera.zoom.x, get_viewport_rect().size)
+		await get_tree().process_frame
+	check.call(map_view.detail_root.visible and map_view.details.size() > 0, "terrain detail is drawn when zoomed in (%d chunks)" % map_view.details.size())
+	var some_detail := false
+	for mi in map_view.details.values():
+		if (mi as MeshInstance2D).mesh.get_surface_count() > 0:
+			some_detail = true
+	check.call(some_detail, "detail chunks carry geometry")
+	_push_key(KEY_F6)
+	await _frames(2)
+	check.call(not map_view.show_detail and not map_view.detail_root.visible, "F6 turns terrain detail off")
+	view.show_popup()
+	await _frames(2)
+	check.call(_menu_pick(view.get_popup(), "Terrain detail when zoomed in"), "View menu has Terrain detail")
+	view.get_popup().hide()
+	await _frames(2)
+	check.call(map_view.show_detail and map_view.detail_root.visible, "View > Terrain detail turns it back on")
+	camera.zoom = Vector2.ONE * 0.02   # 10 px per hex
+	await _frames(2)
+	check.call(not map_view.detail_root.visible and map_view.chunk_root.visible, "terrain detail is hidden at theater zoom")
+	camera.zoom = zoom_was
+	await _frames(2)
+	view.show_popup()
+	await _frames(2)
+	check.call(_menu_pick(view.get_popup(), "Map legend"), "View menu has Map legend")
+	view.get_popup().hide()
+	await _frames(2)
+	check.call(hud.legend_panel.visible, "the legend opens")
+	_push_key(KEY_F1)
+	await _frames(2)
+	check.call(hud.help_panel.visible and not hud.legend_panel.visible, "opening Controls closes the legend")
+	_push_key(KEY_F4)
+	await _frames(2)
+	check.call(hud.legend_panel.visible and not hud.help_panel.visible, "F4 opens the legend in its place")
+	_push_key(KEY_ESCAPE)
+	await _frames(2)
+	check.call(not hud.legend_panel.visible and not hud.pause_screen.visible, "Esc closes the legend without opening the pause menu")
+
 	# Orders menu > Team > Form team, then the Formation dropdown sets wedge.
 	selected = [1, 2, 3]
 	_update_orders_state()
@@ -1681,6 +1731,14 @@ func _run_autotest() -> void:
 	hud.toggle_help()
 	await _shot("25_controls", hq, 0.05)
 	hud.toggle_help()
+	# Map visuals (MRK-24): terrain patterns close in, forest and town, and the legend.
+	hud.toggle_legend()
+	await _shot("28_map_legend", hq, 0.08)
+	hud.toggle_legend()
+	selected = []
+	await _shot("29_terrain_close", hq + Vector2(3000, -1500), 0.16)
+	await _shot("30_terrain_medium", hq, 0.045)
+	selected = [0]
 	selected = [0]
 	# Holdings: the home town's panel, then a supply route from its stores to the trains.
 	holdings = world.get_holdings()

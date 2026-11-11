@@ -59,4 +59,9 @@ find_package(ZLIB)
 if(ZLIB_FOUND)
     add_executable(playtest tests/playtest.cpp)
     target_link_libraries(playtest PRIVATE murks_core ZLIB::ZLIB)
+    # Draws the map geometry to an image without Godot and times chunk builds (needs zlib).
+    #   build/render_shot game/data/poland_1989.murkz shot.ppm 880 560 40
+    #   build/render_shot game/data/poland_1989.murkz bench
+    add_executable(render_shot tests/render_shot.cpp)
+    target_link_libraries(render_shot PRIVATE murks_core ZLIB::ZLIB)
 endif()

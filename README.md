@@ -33,6 +33,7 @@ This build proves the risky technical core of the design plan (roadmap phase 1, 
 - **Stand-off.** Each unit can stay and fight or keep known enemies at a distance: 1, 2 or 3 km, or its own weapon range. With a stand-off, a unit on the move halts before closing inside it, and a unit an enemy comes closer to pulls back out to it (checked every 5 minutes). It is a standing order: the per-unit setting travels down the chain like fire orders, and "Default" follows the company default, which the player sets in the Orders panel and which applies at once. An assault ignores stand-off; team members go by their leader's. Counters show "S/O 2.0km" and the unit panel says what the unit does. The company default starts at "stay and fight".
 - **Map marks.** Selected units show their route in blue with an arrowhead and arrival time, a dashed arrow and yellow tag for an order still travelling ("Road march +35′"), and a dashed line to their company HQ. Shots in sight draw a tracer and an impact flash, artillery a muzzle flash and a spread of bursts, fire from shooters you can't see shows as incoming bursts on your unit, and a destroyed unit explodes and leaves a wreck mark. The hex under the mouse is outlined. These are display only; they don't change any simulation result.
 - **Streaming.** Far out you see a one-pixel-per-hex overview; closer in, 64 × 64-hex chunk meshes are built in C++ and streamed in and out as the camera moves.
+- **Map look (work board MRK-24).** A Flashpoint-style game map with crisp hexes: every hex shows exactly one terrain type and nothing blends across hex edges. Pasture is olive green; fields come in parcels a few hexes across (ripe grain, stubble, green crop, ploughed earth); forest is green, darker where the timber is tall and dense; wetland is grey-green; built-up hexes are grey, darker for dense blocks; water is blue, darker where deeper. Hill shading lies under everything. Roads and rivers have a dark outline: main roads orange-red, other roads pale, railways black. From about 16 px per hex a detail layer fades in with a pattern inside each hex (tree crowns with shadows, building blocks on a street grid, furrows that share a direction within a parcel, marsh marks with reeds, a few grass tufts), sleepers on the railways and bridges where a road or railway crosses a river. All of it is placed by a hash of the hex coordinates, so the map never changes between runs. **F4** (View > Map legend) shows the legend; **F6** turns the detail layer off. It is drawing only: no simulation or save-format change.
 - **One clock.** A fixed one-minute tick, pause, five speeds, auto-pause on contact, a speed cap while units are in contact, and an optional WeGo pulse.
 - **Command friction.** Orders take 5–30+ minutes to reach units, longer out of radio range, in combat, or when tired.
 - **Flashpoint-style combat.** Line of sight from elevation and cover, concealment in forests and towns, night spotting, fog of war with last-known positions, direct and indirect fire, morale, and standing orders that make hurt units fall back.
@@ -57,6 +58,10 @@ The map is baked from real data by `tools/bake_region.py` (see "The real map" be
 ![Title screen](docs/screenshots/20_title_screen.png)
 
 ![Whole map](docs/screenshots/03_whole_map_overview.png)
+
+![Terrain close in: forest, fields by parcel, a town and a railway](docs/screenshots/29_terrain_close.png)
+
+![Map legend](docs/screenshots/28_map_legend.png)
 
 ![Company at Sulechów](docs/screenshots/01_company_close.png)
 
@@ -95,6 +100,8 @@ The prebuilt extension is in `game/bin/` (`libmurks.windows.template_debug.x86_6
 | U | Auto-pause on contacts and losses |
 | F1 | Show / hide the controls dialog |
 | F2 | Map data credits |
+| F4 | Map legend |
+| F6 | Terrain detail (patterns inside hexes when zoomed in) on / off |
 | F5 / F9 | Quick save / quick load (one slot, in Godot's user folder) |
 | J / Shift+J | Form a team from the selection / disband the selection's teams |
 | L | Select the team of the selected unit (double-click does the same) |
@@ -134,6 +141,7 @@ Measured in a 2-core cloud Linux VM. Your PC will be faster.
 | Procedural map generation (2.2 M hexes) | ~2.6 s at startup |
 | Map memory | 30.3 MB real map, 17.3 MB procedural (8 bytes per hex) |
 | Chunk mesh build (4,096 hexes) | ~0.5 ms in C++ |
+| Detail layer build per chunk (close zoom only) | ~1.9 ms average, 5.7 ms worst (dense forest) in C++ |
 | Worst single frame while panning 720 km at chunk zoom | ~7 ms of chunk building |
 | Simulation, 212 units | ~0.2–0.5 ms per game minute (2 days in 0.85 s) |
 | Simulation, 499 units (`--groups=60`) | ~0.8 ms per game minute |
@@ -190,7 +198,7 @@ extension/    GDExtension binding: one class, MurksWorld, with coarse calls (who
 game/         Godot project: scripts/main.gd (input, clock), map_view.gd (streaming), overlay.gd (symbols), hud.gd
 game/data/    Baked real map (.murkz = zlib-compressed MURKSMAP)
 tools/        bake_region.py (real-data pipeline), finish_map.cpp (adds local roads)
-tests/        core_bench.cpp: headless run of map + sim with timings; hq_loss_test.cpp: checks the HQ-loss rules; rules_test.cpp: checks the Historical Values rules; fire_support_test.cpp: checks gun ranges and the fire support net; dismount_test.cpp: checks mounted infantry; suppression_test.cpp: checks suppression; holdings_test.cpp: checks holdings, capture, loyalty, requisition, militia, supply routes and convoys; attrition_test.cpp: kill-rate harness (`attrition_test calibrate`); playtest.cpp: real-map 4-day scripted runs over many seeds (`playtest game/data/poland_1989.murkz 4 active 1989 12`, needs zlib)
+tests/        core_bench.cpp: headless run of map + sim with timings; hq_loss_test.cpp: checks the HQ-loss rules; rules_test.cpp: checks the Historical Values rules; fire_support_test.cpp: checks gun ranges and the fire support net; dismount_test.cpp: checks mounted infantry; suppression_test.cpp: checks suppression; holdings_test.cpp: checks holdings, capture, loyalty, requisition, militia, supply routes and convoys; attrition_test.cpp: kill-rate harness (`attrition_test calibrate`); playtest.cpp: real-map 4-day scripted runs over many seeds (`playtest game/data/poland_1989.murkz 4 active 1989 12`, needs zlib); render_shot.cpp: draws the map geometry to an image without Godot and times the chunk builds (`render_shot game/data/poland_1989.murkz shot.ppm 470 860 40`, or `... bench`, needs zlib)
 SConstruct    Builds the extension into game/bin/
 CMakeLists.txt  Builds the core, benchmark and finish_map on their own (handy in Visual Studio)
 ```
@@ -223,7 +231,7 @@ Pass these after `--` when launching Godot:
 - `--groups=N`: number of hostile bands (default 24, about 212 units). Use 60 or more as a stress test.
 - `--procedural`: ignore the baked map and generate a fictional one.
 - `--autotest=DIR`: scripted run that saves screenshots and timing to `DIR`, then quits.
-- `--uitest`: scripted check of the menus (title screen, right-click menu, armed orders, Esc and the pause menu, dropdowns, View and Orders menus, the holding panel, militia, a supply route and its cancellation): pushes real input events and menu picks, checks what reaches the simulation, prints PASS / FAIL lines and exits non-zero on a failure. Needs a window (on a Linux server: `xvfb-run godot --path game -- --uitest`).
+- `--uitest`: scripted check of the menus (title screen, right-click menu, armed orders, Esc and the pause menu, dropdowns, View and Orders menus, the terrain detail layer and the map legend, the holding panel, militia, a supply route and its cancellation): pushes real input events and menu picks, checks what reaches the simulation, prints PASS / FAIL lines and exits non-zero on a failure. Needs a window (on a Linux server: `xvfb-run godot --path game -- --uitest`).
 
 Headless balance check (no window): `godot --headless --path game --script res://tests/playtest.gd -- 4 active` (or `passive`). It plays the scenario for N days and prints contact time, losses, supplies, the outcome and a save/load replay check.
 

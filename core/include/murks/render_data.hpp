@@ -30,6 +30,9 @@ inline uint32_t rgba8(int r, int g, int b, int a = 255) {
 void chunk_origin(int cx, int cy, double &ox, double &oy);
 uint32_t hex_color(const Map &map, int c, int r);
 void build_chunk_geometry(const Map &map, int cx, int cy, bool with_grid, ChunkGeometry &out);
+// Close-zoom detail layer (terrain patterns, rail sleepers, bridges) as coloured triangles
+// with alpha, drawn over the chunk mesh. Built only when the player zooms in.
+void build_chunk_detail(const Map &map, int cx, int cy, ChunkGeometry &out);
 // One pixel per hex, rows top to bottom, RGBA8.
 void build_overview_rgba(const Map &map, std::vector<uint8_t> &rgba);
 

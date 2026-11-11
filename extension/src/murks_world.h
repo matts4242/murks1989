@@ -96,6 +96,7 @@ public:
     float get_row_spacing() const;
 
     Ref<ArrayMesh> build_chunk_mesh(Vector2i chunk) const;
+    Ref<ArrayMesh> build_chunk_detail_mesh(Vector2i chunk) const;
     Ref<ArrayMesh> build_chunk_grid_mesh(Vector2i chunk) const;
     Ref<Image> build_overview_image() const;
     Dictionary get_hex_info(Vector2i hex) const;
