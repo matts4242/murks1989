@@ -104,9 +104,9 @@ const SIDE_COL := [Color("#2c5ea8"), Color("#b0342b")]
 const BOX_PAPER := Color("#f4f2ea")
 const SYMBOL_INK := Color("#141712")
 const SIGNAL := Color("#d39a17")
-const MIN_COUNTER := 32.0
-const THEATER_COUNTER := 28.0
-const COMPANY_COUNTER := 36.0
+const MIN_COUNTER := 24.0
+const THEATER_COUNTER := 22.0
+const COMPANY_COUNTER := 28.0
 const ECHELONS := ["coy", "plt", "plt", "plt", "sec", "btty", "col"] # by unit type (col: a supply column)
 const HOLDING_COL := [Color("#2c5ea8"), Color("#b0342b"), Color("#7a7f74")] # owner: company, hostile, independent
 const HOLDING_GLYPH := ["T", "F", "D", "A"]  # town, farm collective, fuel depot, ammo dump
@@ -145,10 +145,12 @@ func hex_px() -> float:
 	return HEX_R * main.camera.zoom.x
 
 
-## Counter side length: the counter fills its hex (1.28 x the hex corner radius) once
-## the hex is big enough, and never gets smaller than MIN_COUNTER.
+## Counter side length: about half the width of its hex (0.9 x the hex corner radius), so
+## the ground under and around a unit stays readable; never smaller than MIN_COUNTER and
+## never larger than MAX_COUNTER.
+const MAX_COUNTER := 64.0
 func counter_size() -> float:
-	return clampf(hex_px() * 1.28, MIN_COUNTER, 112.0)
+	return clampf(hex_px() * 0.9, MIN_COUNTER, MAX_COUNTER)
 
 
 ## Everything the counter needs from one snapshot row.
@@ -316,8 +318,8 @@ func _draw_counter(c: Vector2, s: float, it: Dictionary) -> void:
 					draw_rect(r, Color(0, 0, 0, 0.35))
 					draw_rect(r, Color(1, 1, 1, 0.9), false, 1.0)
 		var label: String = it["label"]
-		if label != "" and s >= 44.0:
-			var fs := int(s * 0.2)
+		if label != "" and s >= 34.0:
+			var fs := maxi(10, int(s * 0.22))
 			var tw := font.get_string_size(label, HORIZONTAL_ALIGNMENT_LEFT, -1, fs).x
 			var lp := Vector2(c.x - tw * 0.5, c.y + h + fs + clampf(s * 0.11, 4.0, 9.0) + 6.0)
 			draw_string_outline(font, lp, label, HORIZONTAL_ALIGNMENT_LEFT, -1, fs, 3, Color(0, 0, 0, 0.8))

@@ -1415,7 +1415,7 @@ func _legend_body() -> Control:
 			if String(row[2]) != "":
 				text.add_child(_label(String(row[2]), 12, MUTED))
 		if part[0] == "Ground":
-			var note := _label("Hill shading: slopes facing north-west are lit,\nslopes facing south-east are in shadow.\nHigh ground turns brown, then white above 1,500 m.", 12, MUTED)
+			var note := _label("Hill shading: slopes facing north-west are lit,\nslopes facing south-east are in shadow.\nHigh ground turns brown, then white above 1,500 m.\nClose in, forest shows conifers (dark, pointed), broadleaf\n(round) and young plantations (rows); towns show blocks,\nslab estates, works, old quarters, villages and farms.\nThat variety is decoration: only light or dense counts.", 12, MUTED)
 			col.add_child(note)
 		else:
 			col.add_child(_label("Patterns, sleepers and bridges appear from\nmedium zoom (F6 turns them off).\nTown names are sized by population.", 12, MUTED))
