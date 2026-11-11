@@ -104,7 +104,7 @@ const SIDE_COL := [Color("#2c5ea8"), Color("#b0342b")]
 const BOX_PAPER := Color("#f4f2ea")
 const SYMBOL_INK := Color("#141712")
 const SIGNAL := Color("#d39a17")
-const MIN_COUNTER := 24.0
+const MIN_COUNTER := 10.0
 const THEATER_COUNTER := 22.0
 const COMPANY_COUNTER := 28.0
 const ECHELONS := ["coy", "plt", "plt", "plt", "sec", "btty", "col"] # by unit type (col: a supply column)
@@ -145,12 +145,13 @@ func hex_px() -> float:
 	return HEX_R * main.camera.zoom.x
 
 
-## Counter side length: about half the width of its hex (0.9 x the hex corner radius), so
-## the ground under and around a unit stays readable; never smaller than MIN_COUNTER and
-## never larger than MAX_COUNTER.
-const MAX_COUNTER := 64.0
+## Counter side length: a fixed share of the hex (0.9 x the hex corner radius, about half
+## the hex's width), so a counter and its pips always sit inside their own hex. Below
+## MIN_COUNTER pixels it stops shrinking; that still fits the hex down to 14 px per hex,
+## where company grouping takes over. Only with grouping switched off, further out than
+## that, is a counter larger than its hex (nothing could be shown otherwise).
 func counter_size() -> float:
-	return clampf(hex_px() * 0.9, MIN_COUNTER, MAX_COUNTER)
+	return maxf(hex_px() * 0.9, MIN_COUNTER)
 
 
 ## Everything the counter needs from one snapshot row.
@@ -167,6 +168,7 @@ func _row_item(o: int, i: int) -> Dictionary:
 		"team": int(snap[o + 20]), "role": int(snap[o + 21]), "tcol": int(snap[o + 22]), "standoff": int(snap[o + 24]),
 		"carry": int(snap[o + SF_CARRY]), "supp": snap[o + SF_SUPP],
 		"militia": snap[o + SF_MILITIA] > 0.5, "convoy": int(snap[o + SF_CONVOY]), "cargo": snap[o + SF_CARGO_T]}
+	item["veh"] = vehicle_of(id, int(snap[o + 2]))
 	if item["militia"]:
 		# A town's garrison: one dot a squad, three from the third.
 		item["echelon"] = "sec" if int(snap[o + 19]) <= 2 else "plt"
@@ -218,14 +220,25 @@ func _draw_units(xf: Transform2D, view: Rect2) -> void:
 	var order: Array = stacks.values()
 	order.sort_custom(func(a: Array, b: Array) -> bool: return (a[0]["pos"] as Vector2).y < (b[0]["pos"] as Vector2).y)
 	for st in order:
-		st.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return _layer(a) < _layer(b))
+		st.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+			var la := _layer(a)
+			var lb := _layer(b)
+			return la < lb if la != lb else _veh_rank(a) < _veh_rank(b))
+		# A stack shares the hex: counters shrink a little and fan out along the diagonal,
+		# with the most important vehicle on top, so the whole stack stays inside the hex.
 		var m: int = st.size()
+		var ss := s * maxf(0.7, 1.0 - 0.08 * (m - 1))
+		var step := minf(ss * 0.16, (s * 1.25 - ss) / maxf(1.0, m - 1.0))
 		for k in m:
 			var it: Dictionary = st[k]
-			var off := (k - (m - 1) * 0.5) * s * 0.16
+			var off := (k - (m - 1) * 0.5) * step
 			var c: Vector2 = (it["pos"] as Vector2) + Vector2(off, -off)
-			_draw_counter(c, s, it)
-			drawn.append({"rect": Rect2(c - Vector2(s, s) * 0.5, Vector2(s, s)), "id": it["id"], "side": it["side"]})
+			_draw_counter(c, ss, it)
+			drawn.append({"rect": Rect2(c - Vector2(ss, ss) * 0.5, Vector2(ss, ss)), "id": it["id"], "side": it["side"]})
+
+
+func _veh_rank(it: Dictionary) -> int:
+	return int(VEHICLE_RANK.get(String(it.get("veh", "")), 0))
 
 
 func _layer(it: Dictionary) -> int:
@@ -283,7 +296,10 @@ func _draw_counter(c: Vector2, s: float, it: Dictionary) -> void:
 		# Militia: the garrison's box is tinted, and a small 'm' sits in its corner.
 		draw_rect(box, Color(0.85, 0.78, 0.55, 0.45 if ghost else 0.7))
 		draw_rect(box, ink, false, lw)
-	_draw_symbol(box, int(it["type"]), ink, lw)
+	if show_vehicles and String(it.get("veh", "")) != "":
+		_draw_vehicle(box, String(it["veh"]), ink, paper, side == 1, int(it["type"]) == 0)
+	else:
+		_draw_symbol(box, int(it["type"]), ink, lw)
 	if it.get("militia", false) and s >= 22.0:
 		draw_string(font, Vector2(box.end.x - s * 0.16, box.end.y - s * 0.03), "m", HORIZONTAL_ALIGNMENT_LEFT, -1, int(s * 0.18), ink)
 	_draw_echelon(String(it["echelon"]), Vector2(c.x, c.y - s * 0.35), s, Color(1, 1, 1, 0.6 if ghost else 1.0))
@@ -318,7 +334,7 @@ func _draw_counter(c: Vector2, s: float, it: Dictionary) -> void:
 					draw_rect(r, Color(0, 0, 0, 0.35))
 					draw_rect(r, Color(1, 1, 1, 0.9), false, 1.0)
 		var label: String = it["label"]
-		if label != "" and s >= 34.0:
+		if label != "" and s >= 40.0:
 			var fs := maxi(10, int(s * 0.22))
 			var tw := font.get_string_size(label, HORIZONTAL_ALIGNMENT_LEFT, -1, fs).x
 			var lp := Vector2(c.x - tw * 0.5, c.y + h + fs + clampf(s * 0.11, 4.0, 9.0) + 6.0)
@@ -470,6 +486,189 @@ func _stadium(r: Rect2, ink: Color, lw: float) -> void:
 		pts.append(Vector2(box.end.x - rad, box.position.y + rad) + Vector2(cos(a), sin(a)) * rad)
 	pts.append(pts[0])
 	draw_polyline(pts, ink, lw, true)
+
+
+# --- Vehicle silhouettes ----------------------------------------------------------------
+# With "Vehicles on counters" on (View menu, F7) the symbol box shows the unit's most
+# important vehicle in side view instead of its NATO symbol: own units face right, hostile
+# ones left. The vehicle comes from the unit's equipment list; where that names several
+# things ("UAZ-469, R-145 radio"), the one that ranks highest below wins. A company counter
+# on the theater map shows the highest-ranking vehicle among its units, and in a stack
+# sharing a hex the highest-ranking unit lies on top.
+
+var show_vehicles := true
+var _veh_cache := {}      # unit id -> silhouette key
+var _veh_cache_tick := 0
+
+## Importance when choosing which vehicle stands for a unit, a company or a stack.
+const VEHICLE_RANK := {"tank": 100, "tank_w": 100, "spg": 90, "mlrs": 88, "ifv": 80, "apc_t": 72, "apc_w": 70,
+	"gun": 60, "mortar": 55, "recon": 50, "truck": 30, "jeep": 20, "inf": 10}
+## Equipment names (start of a word; a letter suffix such as the A in T-55A is allowed).
+const VEHICLE_KEYS := {
+	"tank": ["T-54", "T-55", "T-62", "T-64", "T-72", "T-80", "T-34", "PT-76"],
+	"tank_w": ["M1", "M60", "M48", "Leopard", "Chieftain", "Challenger", "AMX-30", "Centurion"],
+	"spg": ["2S1", "2S3", "2S5", "2S7", "2S19", "2S9", "2S4", "DANA", "M109", "M110"],
+	"mlrs": ["BM-21", "RM-70", "BM-27", "MLRS", "LARS"],
+	"ifv": ["BMP-1", "BMP-2", "BMP-3", "BMD-1", "M2", "M3", "Marder", "Warrior", "AMX-10P"],
+	"apc_t": ["MT-LB", "M113", "BTR-50", "OT-62", "FV432"],
+	"apc_w": ["BTR-60", "BTR-70", "BTR-80", "BTR-152", "OT-64", "VAB", "Fuchs", "SKOT"],
+	"gun": ["D-30", "M-30", "M1938", "D-20", "ML-20", "D-1", "2A65", "2A36", "MT-12", "D-44"],
+	"mortar": ["2S12", "2B11", "M-1943", "PM-43", "2B9", "mortar", "mortars"],
+	"recon": ["BRDM-1", "BRDM-2", "Luchs", "Scimitar", "Scorpion", "FUG"],
+	"truck": ["Ural-375", "Ural-4320", "Ural", "ZIL-131", "ZIL-157", "GAZ-66", "KrAZ-255", "Tatra", "W50", "truck", "trucks"],
+	"jeep": ["UAZ-469", "UAZ", "GAZ-69", "Jeep", "Iltis", "M151", "Trabant"],
+	"inf": ["men", "squad", "squads", "militia", "rifles"]}
+## Used when the equipment names nothing known: by unit type (HQ, tank, mech, infantry, recon, artillery, supply).
+const VEHICLE_BY_TYPE := ["jeep", "tank", "ifv", "inf", "recon", "spg", "truck"]
+
+
+## The silhouette key for a unit; looked up once from its equipment and remembered.
+func vehicle_of(id: int, type: int) -> String:
+	var tick := Engine.get_process_frames() / 600
+	if tick != _veh_cache_tick:   # equipment can change (new game, load, dismounts)
+		_veh_cache_tick = tick
+		_veh_cache.clear()
+	if _veh_cache.has(id):
+		return _veh_cache[id]
+	var key := ""
+	if type == 3:
+		key = "inf"   # squads on foot, also when their equipment names the carrier they left
+	else:
+		var info: Dictionary = main.world.get_unit_info(id)
+		key = classify_equipment(String(info.get("equipment", "")))
+		if key == "":
+			key = VEHICLE_BY_TYPE[clampi(type, 0, VEHICLE_BY_TYPE.size() - 1)]
+	_veh_cache[id] = key
+	return key
+
+
+## The highest-ranking vehicle class named in an equipment string, or "" if none is known.
+static func classify_equipment(equipment: String) -> String:
+	var best := ""
+	var best_rank := -1
+	var words := equipment.replace(",", " ").replace("(", " ").replace(")", " ").replace(";", " ").split(" ", false)
+	for w in words:
+		for cls in VEHICLE_KEYS:
+			var rank: int = VEHICLE_RANK[cls]
+			if rank <= best_rank:
+				continue
+			for k in VEHICLE_KEYS[cls]:
+				var key := String(k)
+				if not w.begins_with(key):
+					continue
+				# "2S1" must not match "2S19", "M2" not "M240": only letters may follow.
+				var rest := w.substr(key.length())
+				var ok := true
+				for ch in rest:
+					if not ((ch >= "A" and ch <= "Z") or (ch >= "a" and ch <= "z")):
+						ok = false
+						break
+				if ok and (rest.length() <= 3):
+					best = cls
+					best_rank = rank
+					break
+	return best
+
+
+## Draws a side-view vehicle in the symbol box. Shapes are given in a 100 x 60 frame
+## (x forward to the right, y down) and mirrored for the hostile side.
+func _draw_vehicle(r: Rect2, key: String, ink: Color, paper: Color, flip: bool, hq: bool) -> void:
+	var pad := r.size.y * 0.1
+	var area := r.grow(-pad)
+	var k := minf(area.size.x / 100.0, area.size.y / 60.0)
+	var org := area.get_center() - Vector2(50.0, 30.0) * k
+	var P := func(x: float, y: float) -> Vector2:
+		return org + Vector2((100.0 - x) if flip else x, y) * k
+	var poly := func(pts: Array, col: Color) -> void:
+		var out := PackedVector2Array()
+		for i in range(0, pts.size(), 2):
+			out.append(P.call(float(pts[i]), float(pts[i + 1])))
+		draw_colored_polygon(out, col)
+	var line := func(x0: float, y0: float, x1: float, y1: float, w: float) -> void:
+		draw_line(P.call(x0, y0), P.call(x1, y1), ink, maxf(1.0, w * k), true)
+	var wheels := func(xs: Array, y: float, rad: float, col: Color) -> void:
+		for x in xs:
+			draw_circle(P.call(float(x), y), maxf(0.8, rad * k), col)
+	var track := func(x0: float, x1: float, n: int) -> void:
+		# Running gear: a track band with road wheels showing in the paper colour.
+		poly.call([x0 + 4, 40, x1 - 4, 40, x1, 46, x1 - 6, 54, x0 + 6, 54, x0, 46], ink)
+		if k * 3.2 >= 1.0:
+			for i in n:
+				draw_circle(P.call(x0 + 8.0 + (x1 - x0 - 16.0) * i / maxf(1.0, n - 1.0), 47.0), 3.2 * k, paper)
+	match key:
+		"tank":   # low hull, rounded turret well forward, long gun
+			track.call(6, 94, 5)
+			poly.call([8, 40, 14, 31, 88, 31, 96, 40], ink)
+			poly.call([36, 31, 40, 20, 46, 16, 60, 16, 66, 20, 70, 31], ink)
+			line.call(66, 23, 104, 23, 3.4)
+		"tank_w":  # tall slab-sided turret set back, long gun
+			track.call(6, 94, 6)
+			poly.call([8, 40, 12, 30, 90, 30, 96, 40], ink)
+			poly.call([28, 30, 28, 14, 62, 14, 72, 22, 72, 30], ink)
+			line.call(70, 21, 106, 21, 3.6)
+		"spg":   # big box turret at the rear, barrel raised
+			track.call(6, 94, 6)
+			poly.call([8, 40, 12, 31, 86, 31, 96, 40], ink)
+			poly.call([14, 31, 16, 10, 54, 10, 60, 31], ink)
+			line.call(56, 18, 102, 4, 4.2)
+		"mlrs":  # truck with a rocket pack raised over the bed
+			poly.call([6, 40, 96, 40, 96, 46, 6, 46], ink)
+			poly.call([72, 22, 90, 22, 96, 32, 96, 40, 72, 40], ink)
+			poly.call([6, 34, 58, 12, 64, 24, 12, 44], ink)
+			wheels.call([18, 34, 82], 50, 7, ink)
+		"ifv":   # wedge nose, small turret, thin gun
+			track.call(4, 94, 6)
+			poly.call([4, 40, 4, 28, 70, 26, 98, 38, 96, 40], ink)
+			poly.call([40, 27, 44, 16, 58, 16, 62, 27], ink)
+			line.call(58, 20, 90, 20, 2.4)
+		"apc_t":  # plain box on tracks
+			track.call(6, 94, 5)
+			poly.call([6, 40, 6, 20, 78, 20, 96, 34, 96, 40], ink)
+			line.call(50, 20, 60, 12, 2.4)
+		"apc_w":  # boat hull on four big wheels, small turret
+			poly.call([2, 26, 74, 24, 98, 36, 90, 46, 8, 46], ink)
+			poly.call([54, 25, 57, 15, 68, 15, 71, 25], ink)
+			line.call(68, 19, 86, 19, 2.2)
+			wheels.call([16, 36, 64, 84], 50, 7.5, ink)
+		"recon":  # short scout car on two axles
+			poly.call([8, 32, 30, 22, 66, 22, 96, 36, 92, 46, 8, 46], ink)
+			poly.call([40, 23, 43, 14, 56, 14, 59, 23], ink)
+			line.call(56, 18, 74, 18, 2.2)
+			wheels.call([24, 78], 49, 9, ink)
+		"gun":   # towed gun: wheel, shield, raised barrel, trail
+			line.call(40, 46, 4, 56, 3.4)
+			poly.call([34, 20, 42, 20, 46, 46, 36, 46], ink)
+			line.call(30, 36, 100, 14, 4.0)
+			wheels.call([42], 46, 10, ink)
+			if k * 4.0 >= 1.0:
+				wheels.call([42], 46, 4, paper)
+		"mortar":  # tube on a baseplate with a bipod
+			line.call(22, 56, 60, 56, 3.4)
+			line.call(30, 54, 68, 8, 5.0)
+			line.call(56, 24, 74, 56, 2.4)
+			line.call(56, 24, 50, 56, 2.4)
+		"truck":  # cab, bonnet and a covered load bed
+			poly.call([4, 12, 64, 12, 64, 40, 4, 40], ink)
+			poly.call([68, 18, 84, 18, 90, 30, 98, 32, 98, 44, 68, 44], ink)
+			poly.call([4, 40, 98, 40, 98, 45, 4, 45], ink)
+			wheels.call([16, 32, 84], 50, 7.5, ink)
+			if k * 3.4 >= 1.0:
+				poly.call([72, 22, 82, 22, 86, 29, 72, 29], paper)
+		"jeep":   # light field car
+			poly.call([10, 30, 30, 30, 34, 16, 62, 16, 70, 30, 92, 32, 92, 46, 10, 46], ink)
+			wheels.call([26, 76], 49, 9, ink)
+			if k * 3.4 >= 1.0:
+				poly.call([40, 20, 58, 20, 63, 29, 40, 29], paper)
+		_:        # infantry: a rifleman
+			draw_circle(P.call(50, 9), maxf(1.0, 6.5 * k), ink)
+			poly.call([43, 17, 57, 17, 58, 38, 42, 38], ink)
+			line.call(46, 36, 38, 58, 4.4)
+			line.call(54, 36, 62, 58, 4.4)
+			line.call(28, 32, 78, 18, 2.6)
+	if hq:
+		# Command vehicle: a whip aerial with a pennant.
+		line.call(34, 22, 26, -2, 1.6)
+		poly.call([26, -2, 44, 3, 27, 9], ink)
 
 
 ## Echelon marks above the symbol box: one dot a section, three a platoon, a bar a company or battery.
@@ -631,6 +830,9 @@ func _draw_grouped(xf: Transform2D, view: Rect2) -> void:
 		cl["sum"] += s
 		var t := int(snap[o + 2])
 		cl["types"][t] = cl["types"].get(t, 0) + 1
+		var veh := vehicle_of(int(snap[o]), t)
+		if int(VEHICLE_RANK.get(veh, 0)) > int(VEHICLE_RANK.get(String(cl.get("veh", "")), -1)):
+			cl["veh"] = veh
 		if snap[o + 5] >= 0.0:
 			cl["str_sum"] += snap[o + 5]
 			cl["str_n"] += 1
@@ -714,6 +916,7 @@ func _draw_grouped(xf: Transform2D, view: Rect2) -> void:
 			else:
 				label = "Hostile ×%d" % ids.size()
 			item["type"] = _dominant_type(cl["types"])
+			item["veh"] = String(cl.get("veh", ""))
 			item["echelon"] = "coy"
 			item["strength"] = cl["str_sum"] / cl["str_n"] if cl["str_n"] > 0 else -1.0
 			item["elem"] = cl["el"]

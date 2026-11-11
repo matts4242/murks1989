@@ -48,7 +48,8 @@ const VIEW_TOGGLES := [["Group", "Company grouping on the theater map", KEY_O],
 	["Direct command", "Direct command: who takes orders from whom", KEY_T],
 	["Fire support", "Fire support net and gun ranges", KEY_I],
 	["Supply", "Supply routes and convoys", KEY_F3],
-	["Grid", "Hex grid", KEY_G], ["Detail", "Terrain detail when zoomed in", KEY_F6], ["Sight", "Line of sight of the selected unit", KEY_V],
+	["Grid", "Hex grid", KEY_G], ["Detail", "Terrain detail when zoomed in", KEY_F6],
+	["Vehicles", "Vehicles on counters (off: NATO symbols)", KEY_F7], ["Sight", "Line of sight of the selected unit", KEY_V],
 	["Zones", "Simulation fidelity zones", KEY_Z]]
 const LEVY_TIPS := ["0.1 kg a head from the town's larders (a farm collective gives 0.5). Loyalty -10.",
 	"0.5 L a head from garages and stations. Loyalty -10.",
@@ -1300,6 +1301,7 @@ func _controls_body() -> Control:
 			["Right-click a town", "Raise militia, requisition, supply route"]]],
 		["Game", [["F5 / F9", "Quick save / quick load"], ["F1 / F2", "Controls / map data credits"],
 			["F4 / F6", "Map legend / terrain detail on or off"],
+			["F7", "Counters show vehicles or NATO symbols"],
 			["Esc", "Pause menu"]]]]
 	var cols := HBoxContainer.new()
 	cols.add_theme_constant_override("separation", 28)

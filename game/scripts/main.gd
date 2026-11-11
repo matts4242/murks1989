@@ -156,6 +156,7 @@ func _start_world() -> void:
 	hud.loading.visible = false
 	hud.set_toggle("Grid", map_view.show_grid)
 	hud.set_toggle("Detail", map_view.show_detail)
+	hud.set_toggle("Vehicles", overlay.show_vehicles)
 	hud.set_toggle("Auto-pause", auto_pause)
 	hud.set_toggle("Group", group_companies)
 	set_speed(0)
@@ -577,6 +578,7 @@ func _on_key(key: Key) -> void:
 		KEY_F2: hud.toggle_credits()
 		KEY_F4: hud.toggle_legend()
 		KEY_F6: _on_toggle("Detail")
+		KEY_F7: _on_toggle("Vehicles")
 		KEY_F5: quick_save()
 		KEY_F9: quick_load()
 
@@ -589,6 +591,10 @@ func _on_toggle(name: String) -> void:
 		"Detail":
 			map_view.show_detail = not map_view.show_detail
 			hud.set_toggle(name, map_view.show_detail)
+		"Vehicles":
+			overlay.show_vehicles = not overlay.show_vehicles
+			hud.set_toggle(name, overlay.show_vehicles)
+			hud.show_toast("Counters show each unit's main vehicle." if overlay.show_vehicles else "Counters show NATO symbols.")
 		"Sight":
 			show_los = not show_los
 			hud.set_toggle(name, show_los)
@@ -1443,6 +1449,7 @@ func quick_load() -> void:
 		hud.show_toast("No quick save yet. F5 saves.", 3.0)
 		return
 	var err: String = world.load_state(FileAccess.get_file_as_bytes(SAVE_FILE))
+	overlay._veh_cache.clear()
 	if err != "":
 		hud.show_toast("Could not load the save: " + err, 5.0)
 		return
@@ -1585,6 +1592,38 @@ func _run_uitest() -> void:
 	_push_key(KEY_ESCAPE)
 	await _frames(2)
 	check.call(not hud.legend_panel.visible and not hud.pause_screen.visible, "Esc closes the legend without opening the pause menu")
+
+	# Counters: a fixed share of the hex at every zoom the hex can hold one, each showing
+	# its unit's most important vehicle; F7 switches to NATO symbols and back.
+	var fits := true
+	for z in [0.03, 0.06, 0.12, 0.3]:
+		camera.zoom = Vector2.ONE * float(z)
+		await _frames(1)
+		var hex_w: float = 500.0 * float(z)
+		# A square of side a fits a pointy-top hex of width w up to a = 0.732 w.
+		if overlay.counter_size() > hex_w * 0.732:
+			fits = false
+		if z >= 0.06 and absf(overlay.counter_size() / hex_w - 0.52) > 0.01:
+			fits = false
+	camera.zoom = zoom_was
+	await _frames(2)
+	check.call(fits, "counters fit inside their hex from 15 to 150 px per hex, at 52% of its width once above the minimum")
+	check.call(Overlay.classify_equipment("4x T-55A") == "tank" and Overlay.classify_equipment("UAZ-469, R-145 radio") == "jeep"
+		and Overlay.classify_equipment("3x BMP-1") == "ifv" and Overlay.classify_equipment("3x BTR-60PB") == "apc_w"
+		and Overlay.classify_equipment("4x 2S1 Gvozdika") == "spg" and Overlay.classify_equipment("6x Ural-375D") == "truck"
+		and Overlay.classify_equipment("2x BRDM-2") == "recon" and Overlay.classify_equipment("6x D-30, 6x Ural-375D") == "gun"
+		and Overlay.classify_equipment("3x 2S19") == "spg" and Overlay.classify_equipment("M240 teams") == ""
+		and Overlay.classify_equipment("3 squads of 8 men") == "inf", "equipment names map to the right vehicle, the most important one first")
+	check.call(overlay.vehicle_of(0, 0) == "jeep" and overlay.vehicle_of(1, 1) == "tank", "the HQ shows its field car, 1st Tank its T-55")
+	_push_key(KEY_F7)
+	await _frames(2)
+	check.call(not overlay.show_vehicles, "F7 switches counters to NATO symbols")
+	view.show_popup()
+	await _frames(2)
+	check.call(_menu_pick(view.get_popup(), "Vehicles on counters (off: NATO symbols)"), "View menu has Vehicles on counters")
+	view.get_popup().hide()
+	await _frames(2)
+	check.call(overlay.show_vehicles, "View > Vehicles on counters turns them back on")
 
 	# Orders menu > Team > Form team, then the Formation dropdown sets wedge.
 	selected = [1, 2, 3]
@@ -1736,6 +1775,10 @@ func _run_autotest() -> void:
 	await _shot("28_map_legend", hq, 0.08)
 	hud.toggle_legend()
 	selected = []
+	await _shot("31_counters_vehicles", hq + Vector2(900, 300), 0.24)
+	overlay.show_vehicles = false
+	await _shot("32_counters_nato", hq + Vector2(900, 300), 0.24)
+	overlay.show_vehicles = true
 	await _shot("29_terrain_close", hq + Vector2(3000, -1500), 0.16)
 	await _shot("30_terrain_medium", hq, 0.045)
 	selected = [0]
