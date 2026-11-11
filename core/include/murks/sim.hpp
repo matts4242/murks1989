@@ -86,9 +86,12 @@ constexpr float ADJUST_RADIUS_M = 2000.0f;
 constexpr float ADJUST_FACTOR = 0.5f, ADJUST_FACTOR_2 = 0.75f;
 constexpr int ADJUST_MIN_DELAY = 3;
 constexpr int ADJUST_WINDOW = 30;
-// A unit on the move receives any order or adjustment at this factor (first estimate, see
-// command_delay; not yet sourced).
-constexpr float MOVING_ORDER_FACTOR = 1.25f;
+// Flashpoint Campaigns: Cold War's order delay (FM01 sec 21, Issuing Orders), chosen by the user
+// on 2026-11-11 for MRK-20: a unit already carrying out the same kind of order (Move to Move,
+// just with new waypoints) takes the change in SAME_ORDER_DELAY minutes; a unit that is not
+// moving and gets an order that needs movement takes START_MOVING_DELAY minutes more.
+constexpr int SAME_ORDER_DELAY = 2;
+constexpr int START_MOVING_DELAY = 5;
 
 // Why a route is paused: the unit halted short of an enemy-held hex or at its stand-off line,
 // and picks the route up again once that is clear.
@@ -455,6 +458,10 @@ public:
     int standoff_hexes(const Unit &u) const;       // effective stand-off in hexes, 0 = stay and fight
     uint8_t default_standoff = 0;                  // company default stand-off (player side)
     int command_delay(const Unit &u) const;
+    // Delay for an order of this kind (and, for a move, this mode) to a unit, with Flashpoint's
+    // same-order and start-moving rules on top of command_delay. Route adjustments: route_delay.
+    int order_delay(const Unit &u, OrderKind kind, MoveMode mode = MV_HASTY) const;
+    bool same_kind_order(const Unit &u, OrderKind kind, MoveMode mode) const;
     // Is this route an adjustment of the unit's route in progress (see ADJUST_*)?
     bool is_adjustment(const Unit &u, const std::vector<Waypoint> &route) const;
 

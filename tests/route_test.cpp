@@ -1,7 +1,7 @@
 // Headless checks of waypoint routes (MRK-20): waypoints visited in order with their halts, one
 // command delay for the whole route, move mode per leg, route edits as adjustments (50% / 75% /
-// full, at least 3 minutes; big changes and Assault are new orders), the x1.25 on-the-move
-// factor, a route paused by an enemy-held hex or the stand-off line and resumed once clear,
+// full, at least 3 minutes; big changes and Assault are new orders), Flashpoint's order delay
+// (Move to Move 2 minutes, +5 minutes to start a halted unit moving), a route paused by an enemy-held hex or the stand-off line and resumed once clear,
 // orders that drop the route, the 16-waypoint limit, leg planning for the map, and save/load
 // replaying a route exactly. Exit code 0 = all passed. Usage: route_test
 #include "murks/sim.hpp"
@@ -103,10 +103,10 @@ int main() {
         World w = flat_world();
         int t = add(w, 0, U_TANK, "3x T-72M", {10, 30});
         std::vector<Waypoint> r{wp(20, 30, MV_HASTY, 10), wp(20, 40, MV_HASTY, 5), wp(30, 40), wp(30, 50)};
-        const int expect = w.command_delay(w.units[t]);
+        const int expect = w.command_delay(w.units[t]) + START_MOVING_DELAY;
         bool adj = true;
         const int d = w.order_route(t, r, &adj);
-        check(d == expect && !adj, "a new route costs the unit's normal command delay");
+        check(d == expect && !adj, "a new route costs the unit's normal command delay, +5 to start moving");
         check(w.units[t].pending.route.size() == 4, "the whole route travels as one pending order");
         int idx = 0, activations = 0;
         int64_t arrive[4] = {-1, -1, -1, -1}, leave[4] = {-1, -1, -1, -1};
@@ -195,50 +195,46 @@ int main() {
         World w = flat_world();
         int t = add(w, 0, U_TANK, "3x T-72M", {10, 30});
         const int base = w.command_delay(w.units[t]);
+        const int go = START_MOVING_DELAY;
         bool adj = false;
         int d = w.route_delay(t, {wp(13, 30)}, &adj);
-        check(adj && d == std::max(ADJUST_MIN_DELAY, (int)std::ceil(base * 0.5f)),
-              "halted, a move of 1.5 km is an adjustment at 50% (adjust position)");
+        check(adj && d == std::max(ADJUST_MIN_DELAY, (int)std::ceil(base * 0.5f)) + go,
+              "halted, a move of 1.5 km is an adjustment at 50%, +5 to start moving");
         d = w.route_delay(t, {wp(20, 30)}, &adj);
-        check(!adj && d == base, "halted, a 5 km move is a new order at full delay");
+        check(!adj && d == base + go, "halted, a 5 km move is a new order: full delay +5");
         d = w.route_delay(t, {wp(12, 30, MV_ASSAULT)}, &adj);
-        check(!adj && d == base, "an assault is always a new order");
+        check(!adj && d == base + go, "an assault is always a new order");
+        check(w.order_delay(w.units[t], O_RETREAT) == base + go, "fall back from a halt: +5 to start moving");
+        check(w.order_delay(w.units[t], O_HOLD) == base, "hold needs no movement: no +5");
 
+        // Edits while halted: 50%, then 75% within 30 minutes, then full (each +5 to start).
+        d = w.order_route(t, {wp(13, 30)}, &adj);
+        check(adj && d == std::max(3, (int)std::ceil(base * 0.5f)) + go, "1st adjustment: 50%");
+        d = w.order_route(t, {wp(12, 31)}, &adj);
+        check(adj && d == std::max(3, (int)std::ceil(base * 0.75f)) + go, "2nd within 30 min: 75%");
+        d = w.order_route(t, {wp(13, 31)}, &adj);
+        check(adj && d == base + go, "3rd: full delay");
+
+        // Under way: Move to Move takes 2 minutes, whatever the change.
         w.order_route(t, {wp(40, 30), wp(40, 50)});
         for (int i = 0; i < 80 && !w.units[t].moving(); ++i) w.tick();
         check(w.units[t].moving(), "the route is under way");
-        Unit halted = w.units[t];
-        halted.path.clear();
-        halted.path_i = 0;
-        const int d_halt = w.command_delay(halted), d_move = w.command_delay(w.units[t]);
-        std::printf("     same unit halted %d min, on the move %d min\n", d_halt, d_move);
-        check(d_move > d_halt && std::abs(d_move - (int)std::ceil(d_halt * MOVING_ORDER_FACTOR)) <= 1,
-              "a unit on the move gets orders at x1.25");
-        // Edits: shift the second waypoint 1.5 km, then again, then again.
-        const int mb = w.command_delay(w.units[t]);
+        const int streak = w.units[t].adjust_streak;
         d = w.order_route(t, {wp(40, 30), wp(43, 50)}, &adj);
-        check(adj && d == std::max(3, (int)std::ceil(mb * 0.5f)), "1st adjustment: 50%");
+        check(adj && d == SAME_ORDER_DELAY, "on the move, a route edit takes 2 minutes");
+        check(w.units[t].adjust_streak == streak, "a Move to Move change leaves the edit streak alone");
         check(w.units[t].on_route() && w.units[t].route[w.units[t].wp_i].at == HexCoord{40, 30} &&
                   w.units[t].moving(),
-              "the unit keeps following its old route until the adjustment arrives");
-        w.tick();
-        d = w.order_route(t, {wp(40, 30), wp(42, 50)}, &adj);
-        check(adj && d == std::max(3, (int)std::ceil(w.command_delay(w.units[t]) * 0.75f)),
-              "2nd within 30 min: 75%");
-        w.tick();
-        d = w.order_route(t, {wp(40, 30), wp(41, 50)}, &adj);
-        check(adj && d == w.command_delay(w.units[t]), "3rd: full delay");
+              "the unit keeps following its old route until the change arrives");
         d = w.route_delay(t, {wp(40, 30), wp(40, 60)}, &adj);
-        check(!adj, "moving the destination 5 km is a new order");
+        check(!adj && d == SAME_ORDER_DELAY, "moving the destination 5 km is a new order, still Move to Move");
         d = w.route_delay(t, {wp(40, 30), wp(48, 40), wp(40, 50)}, &adj);
         check(!adj, "a new waypoint 4 km off the old route is a new order");
         d = w.route_delay(t, {wp(40, 30), wp(41, 40), wp(40, 50)}, &adj);
         check(adj, "a new waypoint 0.5 km off the old route is an adjustment");
-        // Let the edit arrive and run a while: 30 quiet minutes later the streak starts again.
-        for (int i = 0; i < 60; ++i) w.tick();
-        d = w.route_delay(t, {wp(40, 30), wp(42, 50)}, &adj);
-        check(adj && d == std::max(3, (int)std::ceil(w.command_delay(w.units[t]) * 0.5f)),
-              "after 30 quiet minutes an adjustment is back at 50%");
+        d = w.route_delay(t, {wp(40, 31, MV_ASSAULT)}, &adj);
+        check(d == base, "switching a move to an assault is a new kind of order: full delay, no +5");
+        for (int i = 0; i < 5; ++i) w.tick();
         check(count(w, "adjusts its route") >= 1, "the adjustment is reported when it arrives");
 
         // The 3-minute floor: a unit with a short delay.
@@ -248,8 +244,8 @@ int main() {
         const int sb = v.command_delay(v.units[s]);
         d = v.route_delay(s, {wp(12, 10)}, &adj);
         std::printf("     next to the HQ: full %d min, adjustment %d min\n", sb, d);
-        check(adj && d == std::max(ADJUST_MIN_DELAY, (int)std::ceil(sb * 0.5f)) && d >= ADJUST_MIN_DELAY,
-              "an adjustment takes at least 3 minutes");
+        check(adj && d == std::max(ADJUST_MIN_DELAY, (int)std::ceil(sb * 0.5f)) + START_MOVING_DELAY,
+              "an adjustment takes at least 3 minutes, +5 to start moving");
     }
 
     std::printf("Halted by an enemy-held hex, resumes once clear:\n");

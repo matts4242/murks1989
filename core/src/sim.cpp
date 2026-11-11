@@ -1523,12 +1523,29 @@ int World::command_delay(const Unit &u) const {
         }
     }
     if (u.zone == Z_HOT && (time_min - u.last_fired < 10 || time_min - u.last_hit < 10)) d *= 1.5f;
-    // On the move the chain has to catch the unit up first (MRK-20 first estimate, unsourced:
-    // Flashpoint Campaigns: Cold War has no such factor; it adds 5 minutes to start a halted unit
-    // moving and charges 2 minutes to change a move already under way).
-    if (u.moving()) d *= MOVING_ORDER_FACTOR;
     d *= 1.0f + (100.0f - u.readiness) / 200.0f;
     return (int)std::ceil(d);
+}
+
+bool World::same_kind_order(const Unit &u, OrderKind kind, MoveMode mode) const {
+    if (kind == O_MOVE) {
+        // A unit on a route is carrying out its move order even while it halts at a waypoint or
+        // waits for an enemy-held hex or its stand-off line to clear. Assault is its own kind.
+        MoveMode cur;
+        if (u.on_route()) cur = u.route[u.wp_i].mode;
+        else if (u.moving() && u.order == O_MOVE) cur = u.mode;
+        else return false;
+        return (cur == MV_ASSAULT) == (mode == MV_ASSAULT);
+    }
+    return (kind == O_RETREAT || kind == O_REGROUP || kind == O_REST) && u.order == kind && u.moving();
+}
+
+int World::order_delay(const Unit &u, OrderKind kind, MoveMode mode) const {
+    if (same_kind_order(u, kind, mode)) return SAME_ORDER_DELAY;
+    int d = command_delay(u);
+    const bool needs_move = kind == O_MOVE || kind == O_RETREAT || kind == O_REGROUP || kind == O_REST;
+    if (needs_move && !u.moving()) d += START_MOVING_DELAY;
+    return d;
 }
 
 namespace {
@@ -1586,12 +1603,16 @@ int World::route_delay(int unit_id, const std::vector<Waypoint> &route, bool *ad
     if (unit_id < 0 || unit_id >= (int)units.size() || !units[unit_id].alive || !orderable(units[unit_id])) return -1;
     if (!valid_route(map, route)) return -1;
     const Unit &u = units[unit_id];
+    const bool adj = is_adjustment(u, route);
+    if (adjust) *adjust = adj;
+    // Move to Move: a unit already on its move order takes any change in 2 minutes.
+    if (same_kind_order(u, O_MOVE, route.front().mode)) return SAME_ORDER_DELAY;
+    const int start = u.moving() ? 0 : START_MOVING_DELAY;
     const int base = command_delay(u);
-    if (!is_adjustment(u, route)) return base;
-    if (adjust) *adjust = true;
+    if (!adj) return base + start;
     const int streak = time_min - u.last_adjust_at <= ADJUST_WINDOW ? u.adjust_streak + 1 : 1;
     const float f = streak == 1 ? ADJUST_FACTOR : streak == 2 ? ADJUST_FACTOR_2 : 1.0f;
-    return std::max(ADJUST_MIN_DELAY, (int)std::ceil(base * f));
+    return std::max(ADJUST_MIN_DELAY, (int)std::ceil(base * f)) + start;
 }
 
 int World::order_route(int unit_id, const std::vector<Waypoint> &route, bool *adjust) {
@@ -1600,7 +1621,9 @@ int World::order_route(int unit_id, const std::vector<Waypoint> &route, bool *ad
     if (adjust) *adjust = adj;
     if (delay < 0) return -1;
     Unit &u = units[unit_id];
-    if (adj) {
+    if (same_kind_order(u, O_MOVE, route.front().mode)) {
+        // Move to Move costs 2 minutes whatever the change, so it leaves the edit streak alone.
+    } else if (adj) {
         u.adjust_streak = time_min - u.last_adjust_at <= ADJUST_WINDOW ? u.adjust_streak + 1 : 1;
         u.last_adjust_at = time_min;
     } else {
@@ -1622,7 +1645,7 @@ int World::order_move(int unit_id, HexCoord target, MoveMode mode) {
 int World::order_fall_back(int unit_id) {
     if (unit_id < 0 || unit_id >= (int)units.size() || !units[unit_id].alive || !orderable(units[unit_id])) return -1;
     Unit &u = units[unit_id];
-    int delay = command_delay(u);
+    int delay = order_delay(u, O_RETREAT);
     u.pending = {true, O_RETREAT, u.pos, time_min, time_min + delay, MV_HASTY};
     return delay;
 }
@@ -1630,7 +1653,7 @@ int World::order_fall_back(int unit_id) {
 int World::order_regroup(int unit_id, bool rest) {
     if (unit_id < 0 || unit_id >= (int)units.size() || !units[unit_id].alive || !orderable(units[unit_id])) return -1;
     Unit &u = units[unit_id];
-    int delay = command_delay(u);
+    int delay = order_delay(u, rest ? O_REST : O_REGROUP);
     u.pending = {true, rest ? O_REST : O_REGROUP, u.pos, time_min, time_min + delay, MV_HASTY};
     return delay;
 }
