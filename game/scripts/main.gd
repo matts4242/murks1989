@@ -1615,16 +1615,15 @@ func _run_uitest() -> void:
 		and Overlay.classify_equipment("3x 2S19") == "spg" and Overlay.classify_equipment("M240 teams") == ""
 		and Overlay.classify_equipment("3 squads of 8 men") == "inf", "equipment names map to the right vehicle, the most important one first")
 	check.call(overlay.vehicle_of(0, 0) == "jeep" and overlay.vehicle_of(1, 1) == "tank", "the HQ shows its field car, 1st Tank its T-55")
-	check.call(Overlay.classify_equipment("3 squads of 8 men (BMP-1)") == "ifv" and Overlay.classify_equipment("35 men, 3x BTR-60PB") == "apc_w",
-		"infantry equipment that names a carrier maps to that carrier")
+	check.call(Overlay.classify_equipment(Overlay.strip_brackets("3 squads of 8 men (BMP-1)")) == "inf"
+		and Overlay.classify_equipment(Overlay.strip_brackets("35 men, 3x BTR-60PB")) == "apc_w",
+		"dismounted squads map to infantry; infantry with its own vehicles maps to the vehicle")
 	var foot_ok := false
 	for i in snapshot.size() / stride:
 		if int(snapshot[i * stride + 2]) == 3:
-			var fi: Dictionary = world.get_unit_info(int(snapshot[i * stride]))
-			var want := Overlay.classify_equipment(String(fi.get("equipment", "")))
-			foot_ok = overlay.vehicle_of(int(snapshot[i * stride]), 3) == ("" if want == "inf" else want)
+			foot_ok = overlay.vehicle_of(int(snapshot[i * stride]), 3) == ""
 			break
-	check.call(foot_ok, "infantry shows its transport, or the NATO symbol when it has none")
+	check.call(foot_ok, "infantry on foot shows the NATO symbol")
 	_push_key(KEY_F7)
 	await _frames(2)
 	check.call(not overlay.show_vehicles, "F7 switches counters to NATO symbols")
@@ -1704,6 +1703,20 @@ func _run_uitest() -> void:
 	check.call(hud.order_popup.visible and not has_move, "nothing selected: map menu without move orders")
 	hud.order_popup.hide()
 
+	# Last in the test because it moves the clock: 1st Mech dismounts; the squads take the
+	# NATO symbol, the carriers keep their BMP.
+	var units_before := snapshot.size() / stride
+	var dismount_ok := false
+	if world.order_dismount(3) >= 0:
+		for k in 40:
+			world.advance(1, 200.0)
+		_refresh_snapshot()
+		for i in snapshot.size() / stride:
+			var uid := int(snapshot[i * stride])
+			var di: Dictionary = world.get_unit_info(uid)
+			if int(snapshot[i * stride + 2]) == 3 and String(di.get("equipment", "")).contains("(BMP-1)"):
+				dismount_ok = overlay.vehicle_of(uid, 3) == "" and overlay.vehicle_of(3, 2) == "ifv"
+	check.call(dismount_ok, "dismounted squads show the NATO symbol while their BMPs keep the vehicle (units %d -> %d)" % [units_before, snapshot.size() / stride])
 	print("UITEST done: %d passed, %d failed" % [res[0], res[1]])
 	get_tree().quit(1 if res[1] > 0 else 0)
 

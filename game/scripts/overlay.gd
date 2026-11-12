@@ -491,7 +491,7 @@ func _stadium(r: Rect2, ink: Color, lw: float) -> void:
 # --- Vehicle silhouettes ----------------------------------------------------------------
 # With "Vehicles on counters" on (View menu, F7) the symbol box shows the unit's most
 # important vehicle in side view instead of its NATO symbol: own units face right, hostile
-# ones left. Infantry shows its transport if it has one, otherwise the NATO symbol. The vehicle comes from the unit's equipment list; where that names several
+# ones left. Infantry on foot (dismounted, or with no transport) shows the NATO symbol. The vehicle comes from the unit's equipment list; where that names several
 # things ("UAZ-469, R-145 radio"), the one that ranks highest below wins. A company counter
 # on the theater map shows the highest-ranking vehicle among its units, and in a stack
 # sharing a hex the highest-ranking unit lies on top.
@@ -530,16 +530,32 @@ func vehicle_of(id: int, type: int) -> String:
 		_veh_cache.clear()
 	if _veh_cache.has(id):
 		return _veh_cache[id]
-	# Infantry has no silhouette of its own: squads show the vehicle that carries them when
-	# their equipment names one ("3 squads of 8 men (BMP-1)"), otherwise "" = the NATO symbol.
+	# Infantry has no silhouette of its own. Squads that have dismounted ("3 squads of 8 men
+	# (BMP-1)": the carrier they left is only named in brackets) show the NATO symbol, and so
+	# does infantry with no transport. Only infantry that still has its vehicles with it
+	# ("35 men, 3x BTR-60PB") shows the vehicle.
 	var info: Dictionary = main.world.get_unit_info(id)
-	var key := classify_equipment(String(info.get("equipment", "")))
+	var key := classify_equipment(strip_brackets(String(info.get("equipment", ""))))
 	if key == "" and type != 3:
 		key = VEHICLE_BY_TYPE[clampi(type, 0, VEHICLE_BY_TYPE.size() - 1)]
 	if key == "inf":
 		key = ""
 	_veh_cache[id] = key
 	return key
+
+
+## The equipment string without anything in round brackets.
+static func strip_brackets(text: String) -> String:
+	var out := ""
+	var depth := 0
+	for ch in text:
+		if ch == "(":
+			depth += 1
+		elif ch == ")":
+			depth = maxi(0, depth - 1)
+		elif depth == 0:
+			out += ch
+	return out
 
 
 ## The highest-ranking vehicle class named in an equipment string, or "" if none is known.
