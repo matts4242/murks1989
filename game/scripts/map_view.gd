@@ -4,8 +4,9 @@ extends Node2D
 ## closer in it streams 64 x 64-hex chunk meshes built by the C++ core,
 ## creating chunks that come into view and freeing ones far away. Closer still a
 ## detail layer adds a pattern inside every hex (tree crowns, building blocks,
-## furrows, marsh marks), rail sleepers and bridges. The topographic mode swaps
-## that detail for a pale wash and contour lines baked from the elevation data.
+## furrows, marsh marks), rail sleepers and bridges. The topographic mode keeps
+## all of that and lays over it a slope tint with downhill wedges and contour
+## lines baked from the elevation data, drawn as darker ground, not as a separate sheet.
 
 const CHUNK_HEXES := 64
 const BUILD_BUDGET_MS := 6.0     # per frame
@@ -15,7 +16,7 @@ const GRID_MODE_PX := 22.0       # hex size on screen at which hex outlines appe
 const DETAIL_MODE_PX := 16.0     # hex size on screen at which terrain patterns appear
 const DETAIL_FULL_PX := 26.0     # ... and at which they reach full strength
 const TOPO_CLOSE_PX := 20.0      # hex size on screen from which every 20 m line is drawn
-const TOPO_WASH := Color(0.925, 0.925, 0.925, 0.42)
+const TOPO_DETAIL_ALPHA := 0.6    # terrain patterns step back a little under the contours
 
 var world: MurksWorld
 var overview: Sprite2D
@@ -25,7 +26,8 @@ var grid_root: Node2D
 var chunks := {}                 # Vector2i -> MeshInstance2D
 var details := {}                # Vector2i -> MeshInstance2D
 var grids := {}                  # Vector2i -> MeshInstance2D
-var wash: Polygon2D              # pale veil over the ground in topographic mode
+var slope_root: Node2D           # slope tint and downhill wedges in topographic mode
+var slopes := {}                 # Vector2i -> MeshInstance2D
 var contour_root: Node2D
 var contours := {}               # Vector2i -> {"lod", "nodes", "twin", "labels", "spots"}
 var show_topo := false
@@ -60,10 +62,9 @@ func setup(w: MurksWorld) -> void:
 	add_child(chunk_root)
 	detail_root = Node2D.new()
 	add_child(detail_root)
-	wash = Polygon2D.new()
-	wash.color = TOPO_WASH
-	wash.visible = false
-	add_child(wash)
+	slope_root = Node2D.new()   # over the patterns, so its tint and wedges read through woods and towns
+	slope_root.visible = false
+	add_child(slope_root)
 	contour_root = Node2D.new()
 	add_child(contour_root)
 	grid_root = Node2D.new()
@@ -81,20 +82,19 @@ func update_view(center: Vector2, zoom: float, viewport_size: Vector2) -> void:
 	grid_root.visible = use_chunks and show_grid and px_per_hex >= GRID_MODE_PX
 	# Patterns fade in over a short zoom range instead of popping.
 	var want_topo := use_chunks and show_topo and world.has_contours()
-	var want_detail := use_chunks and show_detail and px_per_hex >= DETAIL_MODE_PX and not want_topo
+	var want_detail := use_chunks and show_detail and px_per_hex >= DETAIL_MODE_PX
 	contour_root.visible = want_topo
-	wash.visible = want_topo
+	slope_root.visible = want_topo
 	topo_lod = 0 if px_per_hex >= TOPO_CLOSE_PX else 1
 	detail_root.visible = want_detail
 	if want_detail:
-		detail_root.modulate.a = clampf((px_per_hex - DETAIL_MODE_PX) / (DETAIL_FULL_PX - DETAIL_MODE_PX), 0.0, 1.0) * 0.75 + 0.25
+		detail_root.modulate.a = (clampf((px_per_hex - DETAIL_MODE_PX) / (DETAIL_FULL_PX - DETAIL_MODE_PX), 0.0, 1.0) * 0.75 + 0.25) \
+			* (TOPO_DETAIL_ALPHA if want_topo else 1.0)
 	if not use_chunks:
 		return
 
 	var half := viewport_size * 0.5 / zoom
 	if want_topo:
-		var m := half * 1.2
-		wash.polygon = PackedVector2Array([center - m, center + Vector2(m.x, -m.y), center + m, center + Vector2(-m.x, m.y)])
 		# Index contours are drawn twice, most of a pixel apart, so they read heavier.
 		var nudge := Vector2(0.7, 0.7) / zoom
 		for entry in contours.values():
@@ -111,7 +111,7 @@ func update_view(center: Vector2, zoom: float, viewport_size: Vector2) -> void:
 		for cx in range(c0.x, c1.x + 1):
 			var key := Vector2i(cx, cy)
 			if not chunks.has(key) or (want_grid and not grids.has(key)) or (want_detail and not details.has(key)) \
-					or (want_topo and (not contours.has(key) or int(contours[key]["lod"]) != topo_lod)):
+					or (want_topo and (not slopes.has(key) or not contours.has(key) or int(contours[key]["lod"]) != topo_lod)):
 				needed.append(key)
 
 	if not needed.is_empty():
@@ -126,6 +126,8 @@ func update_view(center: Vector2, zoom: float, viewport_size: Vector2) -> void:
 				_build_grid(key)
 			if want_detail and not details.has(key):
 				_build_detail(key)
+			if want_topo and not slopes.has(key):
+				_build_slope(key)
 			if want_topo and (not contours.has(key) or int(contours[key]["lod"]) != topo_lod):
 				_build_contours(key, topo_lod)
 			builds_last_frame += 1
@@ -152,6 +154,14 @@ func _build_detail(key: Vector2i) -> void:
 	mi.position = world.get_chunk_origin(key)
 	detail_root.add_child(mi)
 	details[key] = mi
+
+
+func _build_slope(key: Vector2i) -> void:
+	var mi := MeshInstance2D.new()
+	mi.mesh = world.build_chunk_slope_mesh(key)
+	mi.position = world.get_chunk_origin(key)
+	slope_root.add_child(mi)
+	slopes[key] = mi
 
 
 func _build_contours(key: Vector2i, lod: int) -> void:
@@ -199,7 +209,7 @@ func _build_grid(key: Vector2i) -> void:
 
 
 func _unload_outside(lo: Vector2i, hi: Vector2i) -> void:
-	for dict in [chunks, grids, details]:
+	for dict in [chunks, grids, details, slopes]:
 		for key in dict.keys():
 			var k: Vector2i = key
 			if k.x < lo.x or k.y < lo.y or k.x > hi.x or k.y > hi.y:

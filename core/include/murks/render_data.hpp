@@ -33,6 +33,16 @@ void build_chunk_geometry(const Map &map, int cx, int cy, bool with_grid, ChunkG
 // Close-zoom detail layer (terrain patterns, rail sleepers, bridges) as coloured triangles
 // with alpha, drawn over the chunk mesh. Built only when the player zooms in.
 void build_chunk_detail(const Map &map, int cx, int cy, ChunkGeometry &out);
+// Slope of a hex from the per-hex heights the simulation itself uses: the steepest grade
+// to a neighbouring hex, in percent (100 x rise / 500 m), and the direction (0..5, as
+// `neighbor`) in which the ground falls most steeply (-1 on level ground and on water).
+double hex_slope(const Map &map, int c, int r, int &down_dir);
+// Slope class of a grade in percent: 0 level (< 3), 1 gentle (< 7), 2 moderate (< 15),
+// 3 steep (< 30), 4 very steep.
+int slope_class(double percent);
+// Slope layer for the topographic mode: every hex tinted by its slope class (level ground
+// stays clear) with a wedge pointing downhill, as coloured triangles with alpha.
+void build_chunk_slope(const Map &map, int cx, int cy, ChunkGeometry &out);
 // One pixel per hex, rows top to bottom, RGBA8.
 void build_overview_rgba(const Map &map, std::vector<uint8_t> &rgba);
 

@@ -2,8 +2,9 @@
 //
 //   build/render_shot game/data/poland_1989.murkz shot.ppm <col> <row> <px per hex> [width height]
 //   build/render_shot game/data/poland_1989.murkz bench
-// With MURKS_CONTOURS=game/data/poland_1989.murkc the contour lines are drawn on top
-// (every 20 m from 20 px per hex, every 100 m further out).
+// With MURKS_CONTOURS=game/data/poland_1989.murkc the picture is the topographic mode:
+// slope tint and downhill wedges, then contour lines on top (every 20 m from 20 px per
+// hex, every 100 m further out).
 //
 // The picture is what the Godot layer shows: the chunk mesh (terrain, rivers, roads, rail),
 // and from 16 px per hex the close-zoom detail layer on top. Used to check map styling
@@ -162,13 +163,20 @@ int main(int argc, char **argv) {
     int cx0 = std::max(0, (int)std::floor(cv.ox / cw) - 1), cx1 = std::min(map.chunks_x() - 1, (int)std::floor((cv.ox + cv.w / cv.scale) / cw) + 1);
     int cy0 = std::max(0, (int)std::floor(cv.oy / ch) - 1), cy1 = std::min(map.chunks_y() - 1, (int)std::floor((cv.oy + cv.h / cv.scale) / ch) + 1);
     ChunkGeometry g;
+    const bool topo = std::getenv("MURKS_CONTOURS") != nullptr;
     for (int pass = 0; pass < 2; ++pass) {
-        if (pass == 1 && (pxhex < 16.0 || std::getenv("MURKS_CONTOURS"))) break; // topographic mode hides the patterns
+        if (pass == 1 && pxhex < 16.0) break;
         for (int cy = cy0; cy <= cy1; ++cy)
             for (int cx = cx0; cx <= cx1; ++cx) {
                 if (pass == 0) build_chunk_geometry(map, cx, cy, false, g);
                 else build_chunk_detail(map, cx, cy, g);
+                if (pass == 1 && topo) // patterns step back under the contours, as in the game
+                    for (uint32_t &c : g.rgba) c = (c & 0x00FFFFFFu) | ((uint32_t)(((c >> 24) & 255) * 0.6) << 24);
                 cv.draw(g);
+                if (topo && pass == (pxhex < 16.0 ? 0 : 1)) { // slope tint and downhill wedges lie over the patterns
+                    build_chunk_slope(map, cx, cy, g);
+                    cv.draw(g);
+                }
             }
     }
     if (const char *cpath = std::getenv("MURKS_CONTOURS")) {
@@ -176,8 +184,6 @@ int main(int argc, char **argv) {
         ContourSet cs;
         if (load_murkz(cpath, craw) && cs.load(craw.data(), craw.size())) {
             const bool close = pxhex >= 20.0;
-            // The topographic mode lays a pale wash over the ground so the lines stand out.
-            for (float &v : cv.px) v += (236.0f - v) * 0.42f;
             std::vector<float> xy;
             std::vector<uint32_t> col;
             size_t segs = 0, labels = 0;

@@ -63,7 +63,7 @@ The map is baked from real data by `tools/bake_region.py` (see "The real map" be
 
 ![Counters inside their hexes, showing each unit's main vehicle](docs/screenshots/31_counters_vehicles.png)
 
-![Topographic mode: contour lines every 20 m with heights](docs/screenshots/33_topo_close.png)
+![Topographic mode: contour lines, slope tint and downhill wedges](docs/screenshots/33_topo_close.png)
 
 ![Map legend](docs/screenshots/28_map_legend.png)
 
@@ -107,7 +107,7 @@ The prebuilt extension is in `game/bin/` (`libmurks.windows.template_debug.x86_6
 | F4 | Map legend |
 | F6 | Terrain detail (patterns inside hexes when zoomed in) on / off |
 | F7 | Counters show vehicles / NATO symbols |
-| F8 | Topographic map: contour lines and heights on / off |
+| F8 | Topographic map: contours, slope and heights on / off |
 | F5 / F9 | Quick save / quick load (one slot, in Godot's user folder) |
 | J / Shift+J | Form a team from the selection / disband the selection's teams |
 | L | Select the team of the selected unit (double-click does the same) |
@@ -185,7 +185,7 @@ pip install contourpy scipy
 python tools/bake_contours.py --bbox 10 49 24.2 55 --out game/data/poland_1989.murkc
 ```
 
-**F8** (View > Topographic map) lays a pale wash over the ground, hides the terrain patterns and draws the contours in brown: every 20 m from 20 px per hex with every 100 m line heavier, and only every 100 m further out with every 500 m line heavier. Index contours carry their height and summits are marked with a triangle and their height in metres; figures that would crowd each other are left out. Contours are not drawn on the whole-map overview (below 7 px per hex).
+**F8** (View > Topographic map) keeps the normal terrain and draws the relief into it. Contour lines are dark and translucent, so they darken the ground under them instead of lying on it as a separate sheet: every 20 m from 20 px per hex with every 100 m line heavier, and only every 100 m further out with every 500 m line heavier. Index contours carry their height and summits are marked with a triangle and their height in metres; figures that would crowd each other are left out. To make slope readable at a glance, every hex that is not level gets a warm tint by its steepest grade to a neighbouring hex (gentle 3-7% yellow, moderate 7-15% orange, steep 15-30% red, very steep over 30% dark red) and a wedge pointing downhill, longer on steeper ground. The slope comes from the per-hex heights the simulation uses, so it agrees with line of sight. The status bar and the order menu title give the slope of the hex under the cursor in every mode ("steep slope 18% (10°) down to the south-east"). The terrain patterns stay, a little fainter. Contours are not drawn on the whole-map overview (below 7 px per hex). Slope is information only for now: movement rules do not use it yet (work board MRK-04).
 
 On Windows the `--finish-map` path is `build\Release\finish_map.exe`. The first run reads several hundred MB of source data and caches the processed tiles in `~/murks_cache`.
 

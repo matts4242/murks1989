@@ -745,7 +745,7 @@ func _open_order_menu(screen_pos: Vector2) -> void:
 	var hi: Dictionary = world.get_hex_info(hex)
 	var where := "off the map"
 	if not hi.is_empty():
-		var bits: Array[String] = [String(hi["terrain"]), "%d m" % int(hi["elevation"])]
+		var bits: Array[String] = [String(hi["terrain"]), "%d m" % int(hi["elevation"]), _slope_text(hi)]
 		if hi.get("major_road", false): bits.append("main road")
 		elif hi.get("road", false): bits.append("road")
 		if hi.get("bridge", false): bits.append("bridge")
@@ -1296,13 +1296,23 @@ func _order_hold() -> void:
 		hud.show_toast("Hold orders sent to %d unit%s." % [own.size(), "" if own.size() == 1 else "s"])
 
 
+## "level", or the steepest grade of a hex with the way the ground falls: "slope 12% (7°) down to the south-east".
+func _slope_text(info: Dictionary) -> String:
+	var pct := float(info.get("slope_percent", 0.0))
+	if int(info.get("slope_class", 0)) == 0 or String(info.get("slope_down", "")) == "":
+		return "level" if pct < 3.0 else "slope %d%%" % roundi(pct)
+	var names := ["level", "gentle", "moderate", "steep", "very steep"]
+	return "%s slope %d%% (%d°) down to the %s" % [names[clampi(int(info["slope_class"]), 0, 4)], roundi(pct),
+		roundi(float(info["slope_degrees"])), String(info["slope_down"])]
+
+
 func _update_status() -> void:
 	var hex := world.world_to_hex(get_global_mouse_position())
 	var info: Dictionary = world.get_hex_info(hex)
 	if info.is_empty():
 		hud.set_status("")
 		return
-	var bits: Array[String] = [String(info["terrain"]), "%d m" % int(info["elevation"])]
+	var bits: Array[String] = [String(info["terrain"]), "%d m" % int(info["elevation"]), _slope_text(info)]
 	if info.get("major_road", false): bits.append("main road")
 	elif info.get("road", false): bits.append("road")
 	if info.get("rail", false): bits.append("railway")
@@ -1749,7 +1759,15 @@ func _run_uitest() -> void:
 	check.call(map_view.show_topo and map_view.contour_root.visible and topo_nodes > 0 and map_view.topo_lod == 0,
 		"F8 shows contour lines every 20 m close in (%d meshes)" % topo_nodes)
 	check.call(topo_labels > 0, "index contours and summits carry heights (%d)" % topo_labels)
-	check.call(not map_view.detail_root.visible and map_view.wash.visible, "topographic mode swaps the terrain patterns for a pale wash")
+	var slope_geo := 0
+	for mi in map_view.slopes.values():
+		slope_geo += (mi as MeshInstance2D).mesh.get_surface_count()
+	check.call(map_view.detail_root.visible and map_view.slope_root.visible and slope_geo > 0,
+		"topographic mode keeps the terrain patterns and adds the slope tint (%d chunks with slopes)" % slope_geo)
+	var steep: Dictionary = world.get_hex_info(Vector2i(900, 1330))
+	var flat: Dictionary = world.get_hex_info(world.world_to_hex(cam_was))
+	check.call(float(steep["slope_percent"]) > float(flat["slope_percent"]) and _slope_text(steep).contains("down to the") ,
+		"the hex readout gives the slope: hills \"%s\", home \"%s\"" % [_slope_text(steep), _slope_text(flat)])
 	camera.zoom = Vector2.ONE * 0.024   # 12 px per hex
 	for i in 40:
 		map_view.update_view(camera.get_screen_center_position(), camera.zoom.x, get_viewport_rect().size)
@@ -1763,10 +1781,10 @@ func _run_uitest() -> void:
 	check.call(map_view.topo_lod == 1 and coarse, "further out only the 100 m lines are drawn")
 	view.show_popup()
 	await _frames(2)
-	check.call(_menu_pick(view.get_popup(), "Topographic map: contour lines and heights"), "View menu has Topographic map")
+	check.call(_menu_pick(view.get_popup(), "Topographic map: contours, slope and heights"), "View menu has Topographic map")
 	view.get_popup().hide()
 	await _frames(2)
-	check.call(not map_view.show_topo and not map_view.contour_root.visible and not map_view.wash.visible, "View > Topographic map turns it off again")
+	check.call(not map_view.show_topo and not map_view.contour_root.visible and not map_view.slope_root.visible, "View > Topographic map turns it off again")
 	camera.position = cam_was
 	camera.zoom = zoom_was
 	await _frames(2)

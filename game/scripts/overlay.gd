@@ -69,8 +69,8 @@ func _draw() -> void:
 # Height figures along the index contours and spot heights on summits, for the chunks whose
 # contour lines the map view is showing. Figures that would crowd each other are left out.
 
-const TOPO_INK := Color("#5a3212")
-const TOPO_HALO := Color(0.93, 0.92, 0.88, 0.9)
+const TOPO_INK := Color("#2a1a0c")
+const TOPO_HALO := Color(0.95, 0.94, 0.86, 0.8)
 
 func _draw_topo(xf: Transform2D, zoom: float, view: Rect2) -> void:
 	var px := 500.0 * zoom

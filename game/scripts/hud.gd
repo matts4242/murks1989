@@ -50,7 +50,7 @@ const VIEW_TOGGLES := [["Group", "Company grouping on the theater map", KEY_O],
 	["Supply", "Supply routes and convoys", KEY_F3],
 	["Grid", "Hex grid", KEY_G], ["Detail", "Terrain detail when zoomed in", KEY_F6],
 	["Vehicles", "Vehicles on counters (off: NATO symbols)", KEY_F7],
-	["Topo", "Topographic map: contour lines and heights", KEY_F8], ["Sight", "Line of sight of the selected unit", KEY_V],
+	["Topo", "Topographic map: contours, slope and heights", KEY_F8], ["Sight", "Line of sight of the selected unit", KEY_V],
 	["Zones", "Simulation fidelity zones", KEY_Z]]
 const LEVY_TIPS := ["0.1 kg a head from the town's larders (a farm collective gives 0.5). Loyalty -10.",
 	"0.5 L a head from garages and stations. Loyalty -10.",
@@ -1303,7 +1303,7 @@ func _controls_body() -> Control:
 		["Game", [["F5 / F9", "Quick save / quick load"], ["F1 / F2", "Controls / map data credits"],
 			["F4 / F6", "Map legend / terrain detail on or off"],
 			["F7", "Counters show vehicles or NATO symbols"],
-			["F8", "Topographic map: contour lines and heights"],
+			["F8", "Topographic map: contours, slope and heights"],
 			["Esc", "Pause menu"]]]]
 	var cols := HBoxContainer.new()
 	cols.add_theme_constant_override("separation", 28)
@@ -1395,7 +1395,11 @@ const LEGEND_LINES := [
 	["bridge", "Bridge", "Pale deck with dark parapets."],
 	["contour", "Contour line (F8)", "Every 20 m close in, every 100 m further out."],
 	["contour_index", "Index contour", "Every 100 m (500 m further out), with its height."],
-	["spot", "Spot height", "A summit and its height in metres."]]
+	["spot", "Spot height", "A summit and its height in metres."],
+	["slope1", "Gentle slope, 3-7%", "The wedge points downhill."],
+	["slope2", "Moderate slope, 7-15%", ""],
+	["slope3", "Steep slope, 15-30%", ""],
+	["slope4", "Very steep, over 30%", "Lines close together mean the same."]]
 
 
 func _legend_body() -> Control:
@@ -1518,17 +1522,28 @@ func _draw_legend_swatch(sw: Control, kind: String) -> void:
 				"river":
 					sw.draw_line(a, b, Color8(58, 100, 150), 54.0 * 2 * k)
 					sw.draw_line(a, b, Color8(98, 148, 196), 40.0 * 2 * k)
+				"slope1", "slope2", "slope3", "slope4":
+					var si := int(kind.substr(5))
+					var tints := [Color8(236, 212, 96, 46), Color8(232, 150, 52, 78), Color8(206, 84, 40, 108), Color8(140, 32, 46, 140)]
+					var wedges := [Color8(96, 70, 20, 120), Color8(104, 52, 14, 165), Color8(98, 28, 12, 200), Color8(70, 8, 20, 230)]
+					sw.draw_colored_polygon(_legend_hex(c, 21.0), ground)
+					sw.draw_colored_polygon(_legend_hex(c, 21.0), tints[si - 1])
+					var wl := (70.0 + 28.0 * si) * k
+					var ww := (18.0 + 9.0 * si) * k
+					var dn := Vector2(0.5, 0.866)
+					var sd := Vector2(-dn.y, dn.x)
+					sw.draw_colored_polygon(PackedVector2Array([c + dn * wl, c - dn * wl * 0.6 + sd * ww, c - dn * wl * 0.6 - sd * ww]), wedges[si - 1])
 				"contour", "contour_index":
 					var pts := PackedVector2Array()
 					for i in 13:
 						var t := i / 12.0
 						pts.append(Vector2(lerpf(a.x, b.x, t), c.y + sin(t * 5.0) * 7.0))
-					sw.draw_polyline(pts, Color8(104, 58, 26) if kind == "contour_index" else Color8(134, 86, 46), 2.0 if kind == "contour_index" else 1.0, true)
+					sw.draw_polyline(pts, Color8(44, 26, 12, 185) if kind == "contour_index" else Color8(52, 34, 18, 105), 2.0 if kind == "contour_index" else 1.0, true)
 					if kind == "contour_index":
-						sw.draw_string(get_theme_default_font(), Vector2(c.x - 9, c.y + 13), "300", HORIZONTAL_ALIGNMENT_LEFT, -1, 10, Color8(90, 50, 18))
+						sw.draw_string(get_theme_default_font(), Vector2(c.x - 9, c.y + 13), "300", HORIZONTAL_ALIGNMENT_LEFT, -1, 10, Color8(42, 26, 12))
 				"spot":
-					sw.draw_colored_polygon(PackedVector2Array([c + Vector2(-12, -5), c + Vector2(-7.5, 3), c + Vector2(-16.5, 3)]), Color8(90, 50, 18))
-					sw.draw_string(get_theme_default_font(), c + Vector2(-4, 4), "412", HORIZONTAL_ALIGNMENT_LEFT, -1, 11, Color8(90, 50, 18))
+					sw.draw_colored_polygon(PackedVector2Array([c + Vector2(-12, -5), c + Vector2(-7.5, 3), c + Vector2(-16.5, 3)]), Color8(42, 26, 12))
+					sw.draw_string(get_theme_default_font(), c + Vector2(-4, 4), "412", HORIZONTAL_ALIGNMENT_LEFT, -1, 11, Color8(42, 26, 12))
 				"bridge":
 					var top := Vector2(c.x, c.y - 15)
 					var bot := Vector2(c.x, c.y + 15)

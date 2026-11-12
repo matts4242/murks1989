@@ -100,6 +100,7 @@ public:
     Ref<ArrayMesh> build_chunk_detail_mesh(Vector2i chunk) const;
     Ref<ArrayMesh> build_chunk_grid_mesh(Vector2i chunk) const;
     // Contour lines and spot heights (drawing data baked beside the map; optional).
+    Ref<ArrayMesh> build_chunk_slope_mesh(Vector2i chunk) const;
     bool load_contour_bytes(const PackedByteArray &bytes);
     bool has_contours() const;
     Ref<ArrayMesh> build_chunk_contour_mesh(Vector2i chunk, int step, int index_step, int part) const;

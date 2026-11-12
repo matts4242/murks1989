@@ -77,8 +77,9 @@ void ContourSet::build_lines(int cx, int cy, int step, int index_step, int part,
     rgba.clear();
     Entry e;
     if (!entry(cx, cy, e)) return;
-    // Brown, as on a printed map: index contours dark, the others lighter.
-    const uint32_t minor = rgba8(134, 86, 46, 205), index = rgba8(104, 58, 26, 255);
+    // Dark, translucent lines: they darken whatever ground lies under them instead of
+    // sitting on it in a colour of their own. Index contours are stronger.
+    const uint32_t minor = rgba8(52, 34, 18, 105), index = rgba8(44, 26, 12, 185);
     size_t at = e.offset;
     std::vector<float> pts;
     for (uint32_t i = 0; i < e.lines; ++i) {

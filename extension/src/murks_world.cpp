@@ -9,6 +9,7 @@
 #include <godot_cpp/variant/packed_color_array.hpp>
 #include <godot_cpp/variant/packed_int32_array.hpp>
 
+#include <cmath>
 #include <cstring>
 
 using namespace godot;
@@ -58,6 +59,7 @@ void MurksWorld::_bind_methods() {
     ClassDB::bind_method(D_METHOD("build_chunk_mesh", "chunk"), &MurksWorld::build_chunk_mesh);
     ClassDB::bind_method(D_METHOD("build_chunk_detail_mesh", "chunk"), &MurksWorld::build_chunk_detail_mesh);
     ClassDB::bind_method(D_METHOD("build_chunk_grid_mesh", "chunk"), &MurksWorld::build_chunk_grid_mesh);
+    ClassDB::bind_method(D_METHOD("build_chunk_slope_mesh", "chunk"), &MurksWorld::build_chunk_slope_mesh);
     ClassDB::bind_method(D_METHOD("load_contour_bytes", "bytes"), &MurksWorld::load_contour_bytes);
     ClassDB::bind_method(D_METHOD("has_contours"), &MurksWorld::has_contours);
     ClassDB::bind_method(D_METHOD("build_chunk_contour_mesh", "chunk", "step", "index_step", "part"), &MurksWorld::build_chunk_contour_mesh);
@@ -244,6 +246,19 @@ Ref<ArrayMesh> MurksWorld::build_chunk_detail_mesh(Vector2i chunk) const {
     return mesh;
 }
 
+// Slope tint and downhill wedges for the topographic mode; drawn over the chunk mesh.
+Ref<ArrayMesh> MurksWorld::build_chunk_slope_mesh(Vector2i chunk) const {
+    Ref<ArrayMesh> mesh;
+    mesh.instantiate();
+    if (!generated_ || chunk.x < 0 || chunk.y < 0 || chunk.x >= world_.map.chunks_x() ||
+        chunk.y >= world_.map.chunks_y())
+        return mesh;
+    murks::ChunkGeometry g;
+    murks::build_chunk_slope(world_.map, chunk.x, chunk.y, g);
+    fill_triangle_mesh(g, mesh);
+    return mesh;
+}
+
 // The contour file must have been baked for this map: same number of chunks.
 bool MurksWorld::load_contour_bytes(const PackedByteArray &bytes) {
     if (!generated_ || !contours_.load(bytes.ptr(), (size_t)bytes.size())) {
@@ -363,6 +378,16 @@ Dictionary MurksWorld::get_hex_info(Vector2i hex) const {
     d["terrain"] = murks::terrain_name(x.terrain);
     d["elevation"] = (int)x.elev;
     d["cover"] = (int)x.cover;
+    {
+        // Steepest grade to a neighbouring hex, and which way the ground falls.
+        static const char *kDir[6] = {"east", "north-east", "north-west", "west", "south-west", "south-east"};
+        int dir;
+        double pct = murks::hex_slope(world_.map, hex.x, hex.y, dir);
+        d["slope_percent"] = pct;
+        d["slope_degrees"] = std::atan(pct / 100.0) * 180.0 / 3.14159265358979323846;
+        d["slope_class"] = murks::slope_class(pct);
+        d["slope_down"] = dir >= 0 ? to_gd(std::string(kDir[dir])) : String();
+    }
     d["road"] = (x.features & murks::F_ROAD) != 0;
     d["major_road"] = (x.features & murks::F_MAJOR_ROAD) != 0;
     d["rail"] = (x.features & murks::F_RAIL) != 0;
