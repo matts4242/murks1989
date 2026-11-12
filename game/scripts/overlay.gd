@@ -491,7 +491,7 @@ func _stadium(r: Rect2, ink: Color, lw: float) -> void:
 # --- Vehicle silhouettes ----------------------------------------------------------------
 # With "Vehicles on counters" on (View menu, F7) the symbol box shows the unit's most
 # important vehicle in side view instead of its NATO symbol: own units face right, hostile
-# ones left. The vehicle comes from the unit's equipment list; where that names several
+# ones left. Infantry shows its transport if it has one, otherwise the NATO symbol. The vehicle comes from the unit's equipment list; where that names several
 # things ("UAZ-469, R-145 radio"), the one that ranks highest below wins. A company counter
 # on the theater map shows the highest-ranking vehicle among its units, and in a stack
 # sharing a hex the highest-ranking unit lies on top.
@@ -519,7 +519,7 @@ const VEHICLE_KEYS := {
 	"jeep": ["UAZ-469", "UAZ", "GAZ-69", "Jeep", "Iltis", "M151", "Trabant"],
 	"inf": ["men", "squad", "squads", "militia", "rifles"]}
 ## Used when the equipment names nothing known: by unit type (HQ, tank, mech, infantry, recon, artillery, supply).
-const VEHICLE_BY_TYPE := ["jeep", "tank", "ifv", "inf", "recon", "spg", "truck"]
+const VEHICLE_BY_TYPE := ["jeep", "tank", "ifv", "", "recon", "spg", "truck"]
 
 
 ## The silhouette key for a unit; looked up once from its equipment and remembered.
@@ -530,14 +530,14 @@ func vehicle_of(id: int, type: int) -> String:
 		_veh_cache.clear()
 	if _veh_cache.has(id):
 		return _veh_cache[id]
-	var key := ""
-	if type == 3:
-		key = "inf"   # squads on foot, also when their equipment names the carrier they left
-	else:
-		var info: Dictionary = main.world.get_unit_info(id)
-		key = classify_equipment(String(info.get("equipment", "")))
-		if key == "":
-			key = VEHICLE_BY_TYPE[clampi(type, 0, VEHICLE_BY_TYPE.size() - 1)]
+	# Infantry has no silhouette of its own: squads show the vehicle that carries them when
+	# their equipment names one ("3 squads of 8 men (BMP-1)"), otherwise "" = the NATO symbol.
+	var info: Dictionary = main.world.get_unit_info(id)
+	var key := classify_equipment(String(info.get("equipment", "")))
+	if key == "" and type != 3:
+		key = VEHICLE_BY_TYPE[clampi(type, 0, VEHICLE_BY_TYPE.size() - 1)]
+	if key == "inf":
+		key = ""
 	_veh_cache[id] = key
 	return key
 
@@ -659,12 +659,6 @@ func _draw_vehicle(r: Rect2, key: String, ink: Color, paper: Color, flip: bool, 
 			wheels.call([26, 76], 49, 9, ink)
 			if k * 3.4 >= 1.0:
 				poly.call([40, 20, 58, 20, 63, 29, 40, 29], paper)
-		_:        # infantry: a rifleman
-			draw_circle(P.call(50, 9), maxf(1.0, 6.5 * k), ink)
-			poly.call([43, 17, 57, 17, 58, 38, 42, 38], ink)
-			line.call(46, 36, 38, 58, 4.4)
-			line.call(54, 36, 62, 58, 4.4)
-			line.call(28, 32, 78, 18, 2.6)
 	if hq:
 		# Command vehicle: a whip aerial with a pennant.
 		line.call(34, 22, 26, -2, 1.6)

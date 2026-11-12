@@ -1615,6 +1615,16 @@ func _run_uitest() -> void:
 		and Overlay.classify_equipment("3x 2S19") == "spg" and Overlay.classify_equipment("M240 teams") == ""
 		and Overlay.classify_equipment("3 squads of 8 men") == "inf", "equipment names map to the right vehicle, the most important one first")
 	check.call(overlay.vehicle_of(0, 0) == "jeep" and overlay.vehicle_of(1, 1) == "tank", "the HQ shows its field car, 1st Tank its T-55")
+	check.call(Overlay.classify_equipment("3 squads of 8 men (BMP-1)") == "ifv" and Overlay.classify_equipment("35 men, 3x BTR-60PB") == "apc_w",
+		"infantry equipment that names a carrier maps to that carrier")
+	var foot_ok := false
+	for i in snapshot.size() / stride:
+		if int(snapshot[i * stride + 2]) == 3:
+			var fi: Dictionary = world.get_unit_info(int(snapshot[i * stride]))
+			var want := Overlay.classify_equipment(String(fi.get("equipment", "")))
+			foot_ok = overlay.vehicle_of(int(snapshot[i * stride]), 3) == ("" if want == "inf" else want)
+			break
+	check.call(foot_ok, "infantry shows its transport, or the NATO symbol when it has none")
 	_push_key(KEY_F7)
 	await _frames(2)
 	check.call(not overlay.show_vehicles, "F7 switches counters to NATO symbols")
