@@ -5,6 +5,7 @@
 // between GDScript and C++ stays small.
 #pragma once
 
+#include "murks/contours.hpp"
 #include "murks/sim.hpp"
 
 #include <godot_cpp/classes/array_mesh.hpp>
@@ -98,6 +99,12 @@ public:
     Ref<ArrayMesh> build_chunk_mesh(Vector2i chunk) const;
     Ref<ArrayMesh> build_chunk_detail_mesh(Vector2i chunk) const;
     Ref<ArrayMesh> build_chunk_grid_mesh(Vector2i chunk) const;
+    // Contour lines and spot heights (drawing data baked beside the map; optional).
+    bool load_contour_bytes(const PackedByteArray &bytes);
+    bool has_contours() const;
+    Ref<ArrayMesh> build_chunk_contour_mesh(Vector2i chunk, int step, int index_step, int part) const;
+    PackedFloat32Array get_chunk_contour_labels(Vector2i chunk, int index_step) const;
+    PackedFloat32Array get_chunk_spot_heights(Vector2i chunk) const;
     Ref<Image> build_overview_image() const;
     Dictionary get_hex_info(Vector2i hex) const;
     Array get_settlements(int min_population) const;
@@ -155,6 +162,7 @@ protected:
 private:
     Vector2 unit_world_pos(const murks::Unit &u) const;
     murks::World world_;
+    murks::ContourSet contours_;
     bool generated_ = false;
 };
 

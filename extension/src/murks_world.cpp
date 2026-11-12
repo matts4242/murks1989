@@ -58,6 +58,11 @@ void MurksWorld::_bind_methods() {
     ClassDB::bind_method(D_METHOD("build_chunk_mesh", "chunk"), &MurksWorld::build_chunk_mesh);
     ClassDB::bind_method(D_METHOD("build_chunk_detail_mesh", "chunk"), &MurksWorld::build_chunk_detail_mesh);
     ClassDB::bind_method(D_METHOD("build_chunk_grid_mesh", "chunk"), &MurksWorld::build_chunk_grid_mesh);
+    ClassDB::bind_method(D_METHOD("load_contour_bytes", "bytes"), &MurksWorld::load_contour_bytes);
+    ClassDB::bind_method(D_METHOD("has_contours"), &MurksWorld::has_contours);
+    ClassDB::bind_method(D_METHOD("build_chunk_contour_mesh", "chunk", "step", "index_step", "part"), &MurksWorld::build_chunk_contour_mesh);
+    ClassDB::bind_method(D_METHOD("get_chunk_contour_labels", "chunk", "index_step"), &MurksWorld::get_chunk_contour_labels);
+    ClassDB::bind_method(D_METHOD("get_chunk_spot_heights", "chunk"), &MurksWorld::get_chunk_spot_heights);
     ClassDB::bind_method(D_METHOD("build_overview_image"), &MurksWorld::build_overview_image);
     ClassDB::bind_method(D_METHOD("get_hex_info", "hex"), &MurksWorld::get_hex_info);
     ClassDB::bind_method(D_METHOD("get_settlements", "min_population"), &MurksWorld::get_settlements);
@@ -124,6 +129,7 @@ Dictionary MurksWorld::generate(int seed, int chunks_x, int chunks_y) {
 Dictionary MurksWorld::load_map_bytes(const PackedByteArray &bytes) {
     Dictionary d;
     generated_ = world_.load_map(bytes.ptr(), (size_t)bytes.size());
+    contours_.clear(); // they belong to the map that was loaded before
     d["ok"] = generated_;
     if (!generated_) return d;
     murks::GenStats st;
@@ -236,6 +242,86 @@ Ref<ArrayMesh> MurksWorld::build_chunk_detail_mesh(Vector2i chunk) const {
     murks::build_chunk_detail(world_.map, chunk.x, chunk.y, g);
     fill_triangle_mesh(g, mesh);
     return mesh;
+}
+
+// The contour file must have been baked for this map: same number of chunks.
+bool MurksWorld::load_contour_bytes(const PackedByteArray &bytes) {
+    if (!generated_ || !contours_.load(bytes.ptr(), (size_t)bytes.size())) {
+        contours_.clear();
+        return false;
+    }
+    if (contours_.chunks_x() != world_.map.chunks_x() || contours_.chunks_y() != world_.map.chunks_y()) {
+        contours_.clear();
+        return false;
+    }
+    return true;
+}
+
+bool MurksWorld::has_contours() const {
+    return contours_.loaded();
+}
+
+// Contour lines of a chunk as a line mesh. part: 1 intermediate lines, 2 index lines, 0 both.
+Ref<ArrayMesh> MurksWorld::build_chunk_contour_mesh(Vector2i chunk, int step, int index_step, int part) const {
+    Ref<ArrayMesh> mesh;
+    mesh.instantiate();
+    std::vector<float> xy;
+    std::vector<uint32_t> rgba;
+    contours_.build_lines(chunk.x, chunk.y, step, index_step, part, xy, rgba);
+    const int64_t nv = (int64_t)xy.size() / 2;
+    if (nv == 0) return mesh;
+    PackedVector2Array verts;
+    verts.resize(nv);
+    Vector2 *vp = verts.ptrw();
+    PackedColorArray cols;
+    cols.resize(nv);
+    Color *cp = cols.ptrw();
+    for (int64_t i = 0; i < nv; ++i) {
+        vp[i] = Vector2(xy[i * 2], xy[i * 2 + 1]);
+        uint32_t c = rgba[i];
+        cp[i] = Color((c & 255) / 255.0f, ((c >> 8) & 255) / 255.0f, ((c >> 16) & 255) / 255.0f, ((c >> 24) & 255) / 255.0f);
+    }
+    Array arrays;
+    arrays.resize(Mesh::ARRAY_MAX);
+    arrays[Mesh::ARRAY_VERTEX] = verts;
+    arrays[Mesh::ARRAY_COLOR] = cols;
+    mesh->add_surface_from_arrays(Mesh::PRIMITIVE_LINES, arrays);
+    return mesh;
+}
+
+// [x, y, angle, height] per label, in world metres: one per index contour long enough to carry it.
+PackedFloat32Array MurksWorld::get_chunk_contour_labels(Vector2i chunk, int index_step) const {
+    PackedFloat32Array out;
+    std::vector<murks::ContourLabel> labels;
+    contours_.labels(chunk.x, chunk.y, index_step, labels);
+    double ox, oy;
+    murks::chunk_origin(chunk.x, chunk.y, ox, oy);
+    out.resize((int64_t)labels.size() * 4);
+    float *p = out.ptrw();
+    for (size_t i = 0; i < labels.size(); ++i) {
+        p[i * 4] = (float)(ox + labels[i].x);
+        p[i * 4 + 1] = (float)(oy + labels[i].y);
+        p[i * 4 + 2] = labels[i].angle;
+        p[i * 4 + 3] = (float)labels[i].level;
+    }
+    return out;
+}
+
+// [x, y, height] per spot height, in world metres.
+PackedFloat32Array MurksWorld::get_chunk_spot_heights(Vector2i chunk) const {
+    PackedFloat32Array out;
+    std::vector<murks::SpotHeight> spots;
+    contours_.spots(chunk.x, chunk.y, spots);
+    double ox, oy;
+    murks::chunk_origin(chunk.x, chunk.y, ox, oy);
+    out.resize((int64_t)spots.size() * 3);
+    float *p = out.ptrw();
+    for (size_t i = 0; i < spots.size(); ++i) {
+        p[i * 3] = (float)(ox + spots[i].x);
+        p[i * 3 + 1] = (float)(oy + spots[i].y);
+        p[i * 3 + 2] = (float)spots[i].elev;
+    }
+    return out;
 }
 
 Ref<ArrayMesh> MurksWorld::build_chunk_grid_mesh(Vector2i chunk) const {

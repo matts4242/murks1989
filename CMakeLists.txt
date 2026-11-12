@@ -14,6 +14,7 @@ add_library(murks_core STATIC
     core/src/generator.cpp
     core/src/map.cpp
     core/src/pathfinder.cpp
+    core/src/contours.cpp
     core/src/render_data.cpp
     core/src/sim.cpp
 )

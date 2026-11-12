@@ -157,6 +157,7 @@ func _start_world() -> void:
 	hud.set_toggle("Grid", map_view.show_grid)
 	hud.set_toggle("Detail", map_view.show_detail)
 	hud.set_toggle("Vehicles", overlay.show_vehicles)
+	hud.set_toggle("Topo", map_view.show_topo)
 	hud.set_toggle("Auto-pause", auto_pause)
 	hud.set_toggle("Group", group_companies)
 	set_speed(0)
@@ -205,7 +206,24 @@ func _load_baked_map(path: String) -> Dictionary:
 	var result: Dictionary = world.load_map_bytes(raw)
 	if not result.get("ok", false):
 		push_warning("Invalid map data in " + path)
+	else:
+		_load_contours(path.get_basename() + ".murkc")
 	return result
+
+
+## Contour lines for the topographic mode: same container as the map, baked beside it by
+## tools/bake_contours.py. Optional; without it the mode is simply not available.
+func _load_contours(path: String) -> void:
+	if not FileAccess.file_exists(path):
+		return
+	var data := FileAccess.get_file_as_bytes(path)
+	if data.size() < 16 or data.slice(0, 8).get_string_from_ascii() != "MURKSZ01":
+		push_warning("Not a Murks contour file: " + path)
+		return
+	var raw_size := data.decode_u64(8)
+	var raw := data.slice(16).decompress(raw_size, FileAccess.COMPRESSION_DEFLATE)
+	if raw.size() != raw_size or not world.load_contour_bytes(raw):
+		push_warning("Could not read contours from " + path)
 
 
 func _home_name() -> String:
@@ -579,6 +597,7 @@ func _on_key(key: Key) -> void:
 		KEY_F4: hud.toggle_legend()
 		KEY_F6: _on_toggle("Detail")
 		KEY_F7: _on_toggle("Vehicles")
+		KEY_F8: _on_toggle("Topo")
 		KEY_F5: quick_save()
 		KEY_F9: quick_load()
 
@@ -591,6 +610,15 @@ func _on_toggle(name: String) -> void:
 		"Detail":
 			map_view.show_detail = not map_view.show_detail
 			hud.set_toggle(name, map_view.show_detail)
+		"Topo":
+			if not world.has_contours():
+				hud.show_toast("This map has no contour data (bake it with tools/bake_contours.py).")
+				hud.set_toggle(name, false)
+				return
+			map_view.show_topo = not map_view.show_topo
+			hud.set_toggle(name, map_view.show_topo)
+			if map_view.show_topo and 500.0 * camera.zoom.x < MapView.CHUNK_MODE_PX:
+				hud.show_toast("Topographic map on: zoom in to see the contour lines.")
 		"Vehicles":
 			overlay.show_vehicles = not overlay.show_vehicles
 			hud.set_toggle(name, overlay.show_vehicles)
@@ -1703,6 +1731,46 @@ func _run_uitest() -> void:
 	check.call(hud.order_popup.visible and not has_move, "nothing selected: map menu without move orders")
 	hud.order_popup.hide()
 
+	# Topographic mode (MRK-23): contour lines from the baked file, every 20 m close in and
+	# every 100 m further out, replacing the terrain patterns; F8 and the View menu toggle it.
+	check.call(world.has_contours(), "the map's contour file is loaded")
+	var cam_was := camera.position
+	camera.position = world.hex_to_world(Vector2i(900, 1330))   # hill country south of Wroclaw
+	camera.zoom = Vector2.ONE * 0.06   # 30 px per hex
+	_push_key(KEY_F8)
+	for i in 40:
+		map_view.update_view(camera.get_screen_center_position(), camera.zoom.x, get_viewport_rect().size)
+		await get_tree().process_frame
+	var topo_nodes := 0
+	var topo_labels := 0
+	for entry in map_view.contours.values():
+		topo_nodes += (entry["nodes"] as Array).size()
+		topo_labels += (entry["labels"] as PackedFloat32Array).size() / 4 + (entry["spots"] as PackedFloat32Array).size() / 3
+	check.call(map_view.show_topo and map_view.contour_root.visible and topo_nodes > 0 and map_view.topo_lod == 0,
+		"F8 shows contour lines every 20 m close in (%d meshes)" % topo_nodes)
+	check.call(topo_labels > 0, "index contours and summits carry heights (%d)" % topo_labels)
+	check.call(not map_view.detail_root.visible and map_view.wash.visible, "topographic mode swaps the terrain patterns for a pale wash")
+	camera.zoom = Vector2.ONE * 0.024   # 12 px per hex
+	for i in 40:
+		map_view.update_view(camera.get_screen_center_position(), camera.zoom.x, get_viewport_rect().size)
+		await get_tree().process_frame
+	var coarse := true
+	for cy in range(-1, 2):
+		for cx in range(-1, 2):
+			var ck := Vector2i(floori(camera.position.x / map_view.chunk_size_m.x) + cx, floori(camera.position.y / map_view.chunk_size_m.y) + cy)
+			if not map_view.contours.has(ck) or int(map_view.contours[ck]["lod"]) != 1:
+				coarse = false
+	check.call(map_view.topo_lod == 1 and coarse, "further out only the 100 m lines are drawn")
+	view.show_popup()
+	await _frames(2)
+	check.call(_menu_pick(view.get_popup(), "Topographic map: contour lines and heights"), "View menu has Topographic map")
+	view.get_popup().hide()
+	await _frames(2)
+	check.call(not map_view.show_topo and not map_view.contour_root.visible and not map_view.wash.visible, "View > Topographic map turns it off again")
+	camera.position = cam_was
+	camera.zoom = zoom_was
+	await _frames(2)
+
 	# Last in the test because it moves the clock: 1st Mech dismounts; the squads take the
 	# NATO symbol, the carriers keep their BMP.
 	var units_before := snapshot.size() / stride
@@ -1798,6 +1866,13 @@ func _run_autotest() -> void:
 	await _shot("28_map_legend", hq, 0.08)
 	hud.toggle_legend()
 	selected = []
+	# Topographic mode (MRK-23): hill country south of Wroclaw close in and further out, then home.
+	map_view.show_topo = true
+	var hills: Vector2 = world.hex_to_world(Vector2i(900, 1330))
+	await _shot("33_topo_close", hills, 0.06)
+	await _shot("34_topo_far", hills, 0.02)
+	await _shot("35_topo_company", hq, 0.05)
+	map_view.show_topo = false
 	await _shot("31_counters_vehicles", hq + Vector2(900, 300), 0.24)
 	overlay.show_vehicles = false
 	await _shot("32_counters_nato", hq + Vector2(900, 300), 0.24)

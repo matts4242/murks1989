@@ -44,6 +44,8 @@ func _draw() -> void:
 	var view := Rect2(Vector2(-60, -60), size + Vector2(120, 120))
 	if main.show_zones:
 		_draw_zones(xf, zoom)
+	if main.map_view.contour_root.visible:
+		_draw_topo(xf, zoom, view)
 	_draw_towns(xf, zoom, view)
 	if main.show_los:
 		_draw_los(xf, zoom)
@@ -61,6 +63,53 @@ func _draw() -> void:
 	_draw_pings(xf)
 	_draw_hover(xf)
 	draw_ms = (Time.get_ticks_usec() - t0) / 1000.0
+
+
+# --- Topographic mode: heights -----------------------------------------------------------
+# Height figures along the index contours and spot heights on summits, for the chunks whose
+# contour lines the map view is showing. Figures that would crowd each other are left out.
+
+const TOPO_INK := Color("#5a3212")
+const TOPO_HALO := Color(0.93, 0.92, 0.88, 0.9)
+
+func _draw_topo(xf: Transform2D, zoom: float, view: Rect2) -> void:
+	var px := 500.0 * zoom
+	var taken := {}
+	var cell := 86.0
+	var fs := 11 if px < 30.0 else 12
+	# Summits first: they are the fewer and the more useful.
+	for entry in main.map_view.contours.values():
+		var spots: PackedFloat32Array = entry["spots"]
+		for i in range(0, spots.size(), 3):
+			var p: Vector2 = xf * Vector2(spots[i], spots[i + 1])
+			if not view.has_point(p):
+				continue
+			var key := Vector2i(floori(p.x / cell), floori(p.y / cell))
+			if taken.has(key):
+				continue
+			taken[key] = true
+			draw_colored_polygon(PackedVector2Array([p + Vector2(0, -5), p + Vector2(4.5, 3), p + Vector2(-4.5, 3)]), TOPO_INK)
+			var text := str(int(spots[i + 2]))
+			draw_string_outline(font, p + Vector2(7, 4), text, HORIZONTAL_ALIGNMENT_LEFT, -1, fs + 1, 4, TOPO_HALO)
+			draw_string(font, p + Vector2(7, 4), text, HORIZONTAL_ALIGNMENT_LEFT, -1, fs + 1, TOPO_INK)
+	if px < 9.0:
+		return
+	for entry in main.map_view.contours.values():
+		var labels: PackedFloat32Array = entry["labels"]
+		for i in range(0, labels.size(), 4):
+			var p: Vector2 = xf * Vector2(labels[i], labels[i + 1])
+			if not view.has_point(p):
+				continue
+			var key := Vector2i(floori(p.x / cell), floori(p.y / cell))
+			if taken.has(key):
+				continue
+			taken[key] = true
+			var text := str(int(labels[i + 3]))
+			var sz := font.get_string_size(text, HORIZONTAL_ALIGNMENT_LEFT, -1, fs)
+			draw_set_transform(p, labels[i + 2], Vector2.ONE)
+			draw_string_outline(font, Vector2(-sz.x * 0.5, sz.y * 0.3), text, HORIZONTAL_ALIGNMENT_LEFT, -1, fs, 5, TOPO_HALO)
+			draw_string(font, Vector2(-sz.x * 0.5, sz.y * 0.3), text, HORIZONTAL_ALIGNMENT_LEFT, -1, fs, TOPO_INK)
+	draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
 
 
 # --- Towns -------------------------------------------------------------------------

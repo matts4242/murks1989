@@ -63,6 +63,8 @@ The map is baked from real data by `tools/bake_region.py` (see "The real map" be
 
 ![Counters inside their hexes, showing each unit's main vehicle](docs/screenshots/31_counters_vehicles.png)
 
+![Topographic mode: contour lines every 20 m with heights](docs/screenshots/33_topo_close.png)
+
 ![Map legend](docs/screenshots/28_map_legend.png)
 
 ![Company at Sulechów](docs/screenshots/01_company_close.png)
@@ -105,6 +107,7 @@ The prebuilt extension is in `game/bin/` (`libmurks.windows.template_debug.x86_6
 | F4 | Map legend |
 | F6 | Terrain detail (patterns inside hexes when zoomed in) on / off |
 | F7 | Counters show vehicles / NATO symbols |
+| F8 | Topographic map: contour lines and heights on / off |
 | F5 / F9 | Quick save / quick load (one slot, in Godot's user folder) |
 | J / Shift+J | Form a team from the selection / disband the selection's teams |
 | L | Select the team of the selected unit (double-click does the same) |
@@ -144,6 +147,7 @@ Measured in a 2-core cloud Linux VM. Your PC will be faster.
 | Procedural map generation (2.2 M hexes) | ~2.6 s at startup |
 | Map memory | 30.3 MB real map, 17.3 MB procedural (8 bytes per hex) |
 | Chunk mesh build (4,096 hexes) | ~0.5 ms in C++ |
+| Contour lines per chunk (topographic mode) | ~0.1 ms average, 0.8 ms worst in C++ (4,800 segments average, 38,000 worst) |
 | Detail layer build per chunk (close zoom only) | ~3.5 ms average, 8.3 ms worst (dense forest) in C++; at most one per frame |
 | Worst single frame while panning 720 km at chunk zoom | ~7 ms of chunk building |
 | Simulation, 212 units | ~0.2–0.5 ms per game minute (2 days in 0.85 s) |
@@ -174,6 +178,15 @@ cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build --config Releas
 python tools/bake_region.py --bbox 10 49 24.2 55 --out game/data/poland_1989.murkz --finish-map build/finish_map
 ```
 
+**Contour lines (work board MRK-23).** `tools/bake_contours.py` reads the same Copernicus GLO-90 tiles, warps them onto a 90 m raster in the map's frame, smooths out single-pixel noise (the data is a surface model, so woods and towns add bumps), traces a line every 20 m, simplifies it to 40 m, drops lines shorter than 900 m, and cuts the rest to the 64 x 64-hex chunks. It also picks spot heights: the highest point within 5 km that stands at least 40 m above the lowest ground around it, up to six per chunk. The result is `game/data/poland_1989.murkc` (160,000 lines, 4.6 million points, 4,400 spot heights, 10.8 MB), which the game loads with the map; without it the topographic mode is simply not offered. It is drawing data only: the simulation still uses the per-hex heights.
+
+```
+pip install contourpy scipy
+python tools/bake_contours.py --bbox 10 49 24.2 55 --out game/data/poland_1989.murkc
+```
+
+**F8** (View > Topographic map) lays a pale wash over the ground, hides the terrain patterns and draws the contours in brown: every 20 m from 20 px per hex with every 100 m line heavier, and only every 100 m further out with every 500 m line heavier. Index contours carry their height and summits are marked with a triangle and their height in metres; figures that would crowd each other are left out. Contours are not drawn on the whole-map overview (below 7 px per hex).
+
 On Windows the `--finish-map` path is `build\Release\finish_map.exe`. The first run reads several hundred MB of source data and caches the processed tiles in `~/murks_cache`.
 
 Not yet corrected to 1989:
@@ -200,7 +213,7 @@ core/         Pure C++17 simulation (no Godot code): hex maths, map (+ file form
 extension/    GDExtension binding: one class, MurksWorld, with coarse calls (whole chunks, snapshots, many ticks)
 game/         Godot project: scripts/main.gd (input, clock), map_view.gd (streaming), overlay.gd (symbols), hud.gd
 game/data/    Baked real map (.murkz = zlib-compressed MURKSMAP)
-tools/        bake_region.py (real-data pipeline), finish_map.cpp (adds local roads)
+tools/        bake_region.py (real-data pipeline), finish_map.cpp (adds local roads), bake_contours.py (contour lines and spot heights)
 tests/        core_bench.cpp: headless run of map + sim with timings; hq_loss_test.cpp: checks the HQ-loss rules; rules_test.cpp: checks the Historical Values rules; fire_support_test.cpp: checks gun ranges and the fire support net; dismount_test.cpp: checks mounted infantry; suppression_test.cpp: checks suppression; holdings_test.cpp: checks holdings, capture, loyalty, requisition, militia, supply routes and convoys; attrition_test.cpp: kill-rate harness (`attrition_test calibrate`); playtest.cpp: real-map 4-day scripted runs over many seeds (`playtest game/data/poland_1989.murkz 4 active 1989 12`, needs zlib); render_shot.cpp: draws the map geometry to an image without Godot and times the chunk builds (`render_shot game/data/poland_1989.murkz shot.ppm 470 860 40`, or `... bench`, needs zlib)
 SConstruct    Builds the extension into game/bin/
 CMakeLists.txt  Builds the core, benchmark and finish_map on their own (handy in Visual Studio)
@@ -245,6 +258,6 @@ Headless balance check (no window): `godot --headless --path game --script res:/
 - Combat values follow simulated real-world performance (weapons, cover, concealment, morale), not game balance, and are not tuned to make fights even. A company defending a town against an attacker of similar size usually holds, as the attacker's rule of thumb of needing about 3:1 at the point of attack would predict.
 - Pathfinding is plain A* on hexes. Very long cross-map orders cost up to ~10 ms; next comes the hierarchical road graph and the 5 km operational layer. Routes to another piece of land (islands, across the sea) are refused at once.
 - One quick-save slot. A save only loads on the map it was made on.
-- Exporting a game: add `*.murkz` to the export preset's "Filters to export non-resource files" so the map is included.
+- Exporting a game: add `*.murkz, *.murkc` to the export preset's "Filters to export non-resource files" so the map and its contour lines are included.
 - A fresh clone has no `game/.godot/` folder, so Godot finds neither the extension nor the script classes until the project is imported once: `godot --headless --path game --import` (or open it in the editor).
 - Running `godot --import` from the command line on a project with no `.godot` folder can crash on exit with this godot-cpp/Godot pairing. Run it again and it works. Opening the project normally in the editor is not affected.
