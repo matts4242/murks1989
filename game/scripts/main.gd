@@ -223,7 +223,7 @@ func _load_contours(path: String) -> void:
 	var raw_size := data.decode_u64(8)
 	var raw := data.slice(16).decompress(raw_size, FileAccess.COMPRESSION_DEFLATE)
 	if raw.size() != raw_size or not world.load_contour_bytes(raw):
-		push_warning("Could not read contours from " + path)
+		push_warning("Could not read relief data from " + path)
 
 
 func _home_name() -> String:
@@ -612,13 +612,11 @@ func _on_toggle(name: String) -> void:
 			hud.set_toggle(name, map_view.show_detail)
 		"Topo":
 			if not world.has_contours():
-				hud.show_toast("This map has no contour data (bake it with tools/bake_contours.py).")
+				hud.show_toast("This map has no relief data (bake it with tools/bake_contours.py).")
 				hud.set_toggle(name, false)
 				return
 			map_view.show_topo = not map_view.show_topo
 			hud.set_toggle(name, map_view.show_topo)
-			if map_view.show_topo and 500.0 * camera.zoom.x < MapView.CHUNK_MODE_PX:
-				hud.show_toast("Topographic map on: zoom in to see the contour lines.")
 		"Vehicles":
 			overlay.show_vehicles = not overlay.show_vehicles
 			hud.set_toggle(name, overlay.show_vehicles)
@@ -1741,50 +1739,57 @@ func _run_uitest() -> void:
 	check.call(hud.order_popup.visible and not has_move, "nothing selected: map menu without move orders")
 	hud.order_popup.hide()
 
-	# Topographic mode (MRK-23): contour lines from the baked file, every 20 m close in and
-	# every 100 m further out, replacing the terrain patterns; F8 and the View menu toggle it.
-	check.call(world.has_contours(), "the map's contour file is loaded")
+	# Topographic mode (MRK-23): the ground steps in height bands drawn by a shader over the
+	# baked height raster (20 m close in, 100 m further out, 500 m on the whole map), with
+	# height figures; nothing is drawn as a line and the terrain patterns stay. F8 and the
+	# View menu toggle it.
+	check.call(world.has_contours() and map_view.relief.texture != null, "the map's relief file is loaded into the band shader")
 	var cam_was := camera.position
 	camera.position = world.hex_to_world(Vector2i(900, 1330))   # hill country south of Wroclaw
 	camera.zoom = Vector2.ONE * 0.06   # 30 px per hex
 	_push_key(KEY_F8)
-	for i in 40:
+	for i in 10:
 		map_view.update_view(camera.get_screen_center_position(), camera.zoom.x, get_viewport_rect().size)
 		await get_tree().process_frame
-	var topo_nodes := 0
 	var topo_labels := 0
-	for entry in map_view.contours.values():
-		topo_nodes += (entry["nodes"] as Array).size()
+	for entry in map_view.relief_labels.values():
 		topo_labels += (entry["labels"] as PackedFloat32Array).size() / 4 + (entry["spots"] as PackedFloat32Array).size() / 3
-	check.call(map_view.show_topo and map_view.contour_root.visible and topo_nodes > 0 and map_view.topo_lod == 0,
-		"F8 shows contour lines every 20 m close in (%d meshes)" % topo_nodes)
-	check.call(topo_labels > 0, "index contours and summits carry heights (%d)" % topo_labels)
-	var slope_geo := 0
-	for mi in map_view.slopes.values():
-		slope_geo += (mi as MeshInstance2D).mesh.get_surface_count()
-	check.call(map_view.detail_root.visible and map_view.slope_root.visible and slope_geo > 0,
-		"topographic mode keeps the terrain patterns and adds the slope tint (%d chunks with slopes)" % slope_geo)
+	var band_mat: ShaderMaterial = map_view.relief.material
+	check.call(map_view.show_topo and map_view.relief.visible and map_view.topo_lod == 0 and is_equal_approx(float(band_mat.get_shader_parameter("interval")), 20.0),
+		"F8 steps the ground every 20 m close in")
+	check.call(topo_labels > 0, "100 m steps and summits carry heights (%d)" % topo_labels)
+	check.call(map_view.detail_root.visible, "topographic mode keeps the terrain patterns")
+	# The picture itself: with the mode on, the same view must differ from the plain map.
+	await RenderingServer.frame_post_draw
+	var with_bands := get_viewport().get_texture().get_image()
+	map_view.show_topo = false
+	await _frames(3)
+	await RenderingServer.frame_post_draw
+	var plain := get_viewport().get_texture().get_image()
+	map_view.show_topo = true
+	await _frames(2)
+	var changed := 0
+	for y in range(120, 780, 6):
+		for x in range(40, 1560, 6):
+			if absf(with_bands.get_pixel(x, y).v - plain.get_pixel(x, y).v) > 0.04:
+				changed += 1
+	check.call(changed > 800, "the bands visibly shade the hills (%d of 27,940 sampled pixels differ)" % changed)
 	var steep: Dictionary = world.get_hex_info(Vector2i(900, 1330))
 	var flat: Dictionary = world.get_hex_info(world.world_to_hex(cam_was))
 	check.call(float(steep["slope_percent"]) > float(flat["slope_percent"]) and _slope_text(steep).contains("down to the") ,
 		"the hex readout gives the slope: hills \"%s\", home \"%s\"" % [_slope_text(steep), _slope_text(flat)])
 	camera.zoom = Vector2.ONE * 0.024   # 12 px per hex
-	for i in 40:
-		map_view.update_view(camera.get_screen_center_position(), camera.zoom.x, get_viewport_rect().size)
-		await get_tree().process_frame
-	var coarse := true
-	for cy in range(-1, 2):
-		for cx in range(-1, 2):
-			var ck := Vector2i(floori(camera.position.x / map_view.chunk_size_m.x) + cx, floori(camera.position.y / map_view.chunk_size_m.y) + cy)
-			if not map_view.contours.has(ck) or int(map_view.contours[ck]["lod"]) != 1:
-				coarse = false
-	check.call(map_view.topo_lod == 1 and coarse, "further out only the 100 m lines are drawn")
+	await _frames(3)
+	check.call(map_view.topo_lod == 1 and is_equal_approx(float(band_mat.get_shader_parameter("interval")), 100.0), "further out the steps are 100 m")
+	camera.zoom = Vector2.ONE * 0.003   # whole-map view
+	await _frames(3)
+	check.call(map_view.relief.visible and map_view.topo_lod == 2, "on the whole-map view the steps are 500 m")
 	view.show_popup()
 	await _frames(2)
-	check.call(_menu_pick(view.get_popup(), "Topographic map: contours, slope and heights"), "View menu has Topographic map")
+	check.call(_menu_pick(view.get_popup(), "Topographic map: height bands and heights"), "View menu has Topographic map")
 	view.get_popup().hide()
 	await _frames(2)
-	check.call(not map_view.show_topo and not map_view.contour_root.visible and not map_view.slope_root.visible, "View > Topographic map turns it off again")
+	check.call(not map_view.show_topo and not map_view.relief.visible, "View > Topographic map turns it off again")
 	camera.position = cam_was
 	camera.zoom = zoom_was
 	await _frames(2)
@@ -1889,6 +1894,7 @@ func _run_autotest() -> void:
 	var hills: Vector2 = world.hex_to_world(Vector2i(900, 1330))
 	await _shot("33_topo_close", hills, 0.06)
 	await _shot("34_topo_far", hills, 0.02)
+	await _shot("36_topo_region", hills, 0.006)
 	await _shot("35_topo_company", hq, 0.05)
 	map_view.show_topo = false
 	await _shot("31_counters_vehicles", hq + Vector2(900, 300), 0.24)

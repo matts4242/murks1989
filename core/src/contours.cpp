@@ -7,155 +7,123 @@ namespace murks {
 
 namespace {
 
-const size_t kHeader = 8 + 16;
-const float kUnit = 4.0f; // metres per coordinate step
+const size_t kHeader = 8 + 4 * 4 + 3 * 4 + 4;
+const float kUnit = 4.0f; // metres per coordinate step of labels and spot heights
 
-template <typename T> T rd(const std::vector<uint8_t> &raw, size_t at) {
+template <typename T> T rd(const uint8_t *p) {
     T v;
-    std::memcpy(&v, raw.data() + at, sizeof(T));
+    std::memcpy(&v, p, sizeof(T));
     return v;
 }
 
-// One line's points: zigzag varint steps, the first from the chunk origin. Returns false
-// if the data runs out. `at` is left behind the line.
-bool read_points(const std::vector<uint8_t> &raw, size_t &at, size_t n, std::vector<float> &pts) {
-    pts.resize(n * 2);
-    int64_t acc[2] = {0, 0};
-    for (size_t k = 0; k < n * 2; ++k) {
-        uint64_t v = 0;
-        int shift = 0;
-        for (;;) {
-            if (at >= raw.size() || shift > 56) return false;
-            uint8_t b = raw[at++];
-            v |= (uint64_t)(b & 0x7F) << shift;
-            if (!(b & 0x80)) break;
-            shift += 7;
-        }
-        acc[k & 1] += (int64_t)(v >> 1) ^ -(int64_t)(v & 1);
-        pts[k] = (float)acc[k & 1] * kUnit;
+// IEEE 754 single to half precision, round to nearest; heights never overflow a half.
+uint16_t to_half(float f) {
+    uint32_t x;
+    std::memcpy(&x, &f, 4);
+    uint32_t sign = (x >> 16) & 0x8000u;
+    int32_t exp = (int32_t)((x >> 23) & 0xFF) - 127 + 15;
+    uint32_t man = x & 0x7FFFFFu;
+    if (exp <= 0) {
+        if (exp < -10) return (uint16_t)sign;
+        man |= 0x800000u;
+        uint32_t shift = (uint32_t)(14 - exp);
+        uint32_t half = man >> shift;
+        if ((man >> (shift - 1)) & 1u) ++half;
+        return (uint16_t)(sign | half);
     }
-    return true;
-}
-
-inline uint32_t rgba8(int r, int g, int b, int a) {
-    return (uint32_t)r | ((uint32_t)g << 8) | ((uint32_t)b << 16) | ((uint32_t)a << 24);
+    if (exp >= 31) return (uint16_t)(sign | 0x7C00u);
+    uint32_t half = sign | ((uint32_t)exp << 10) | (man >> 13);
+    if (man & 0x1000u) ++half;
+    return (uint16_t)half;
 }
 
 } // namespace
 
 void ContourSet::clear() {
-    raw_.clear();
-    chunks_x_ = chunks_y_ = 0;
+    index_.clear();
+    heights_.clear();
+    chunks_x_ = chunks_y_ = raster_w_ = raster_h_ = 0;
 }
 
 bool ContourSet::load(const uint8_t *data, size_t size) {
     clear();
-    if (!data || size < kHeader || std::memcmp(data, "MURKSCT1", 8) != 0) return false;
-    uint32_t h[4];
-    std::memcpy(h, data + 8, 16);
-    if (h[0] == 0 || h[1] == 0 || h[0] > 4096 || h[1] > 4096 || h[2] == 0) return false;
-    if (size < kHeader + (size_t)h[0] * h[1] * 12) return false;
-    raw_.assign(data, data + size);
-    chunks_x_ = (int)h[0];
-    chunks_y_ = (int)h[1];
-    interval_ = (int)h[2];
+    if (!data || size < kHeader || std::memcmp(data, "MURKSCT2", 8) != 0) return false;
+    const uint32_t cx = rd<uint32_t>(data + 8), cy = rd<uint32_t>(data + 12);
+    const uint32_t w = rd<uint32_t>(data + 16), h = rd<uint32_t>(data + 20);
+    const float pixel = rd<float>(data + 24), unit = rd<float>(data + 28), offset = rd<float>(data + 32);
+    const uint32_t raster_at = rd<uint32_t>(data + 36);
+    if (cx == 0 || cy == 0 || cx > 4096 || cy > 4096 || w < 2 || h < 2 || w > 32768 || h > 32768) return false;
+    if (!(pixel > 0.0f) || !(unit > 0.0f)) return false;
+    if (raster_at < kHeader + (size_t)cx * cy * 12 || (size_t)raster_at + (size_t)w * h * 2 > size) return false;
+
+    // Undo the plane prediction: value = residual + left + up - upper-left (modulo 65536).
+    std::vector<uint16_t> q((size_t)w * h);
+    const uint8_t *src = data + raster_at;
+    for (uint32_t i = 0; i < h; ++i) {
+        for (uint32_t j = 0; j < w; ++j) {
+            const size_t k = (size_t)i * w + j;
+            uint16_t v = rd<uint16_t>(src + k * 2);
+            if (j > 0) v = (uint16_t)(v + q[k - 1]);
+            if (i > 0) v = (uint16_t)(v + q[k - w]);
+            if (i > 0 && j > 0) v = (uint16_t)(v - q[k - w - 1]);
+            q[k] = v;
+        }
+    }
+    // To metres, with a light 3 x 3 blur: the file holds whole height steps, and without
+    // it the band edges would follow those steps on nearly level ground.
+    heights_.resize((size_t)w * h);
+    for (uint32_t i = 0; i < h; ++i) {
+        const uint32_t i0 = i > 0 ? i - 1 : 0, i1 = i + 1 < h ? i + 1 : i;
+        for (uint32_t j = 0; j < w; ++j) {
+            const uint32_t j0 = j > 0 ? j - 1 : 0, j1 = j + 1 < w ? j + 1 : j;
+            float s = 4.0f * q[(size_t)i * w + j] +
+                      2.0f * (q[(size_t)i * w + j0] + q[(size_t)i * w + j1] + q[(size_t)i0 * w + j] + q[(size_t)i1 * w + j]) +
+                      q[(size_t)i0 * w + j0] + q[(size_t)i0 * w + j1] + q[(size_t)i1 * w + j0] + q[(size_t)i1 * w + j1];
+            heights_[(size_t)i * w + j] = s / 16.0f * unit - offset;
+        }
+    }
+    index_.assign(data, data + raster_at);
+    chunks_x_ = (int)cx;
+    chunks_y_ = (int)cy;
+    raster_w_ = (int)w;
+    raster_h_ = (int)h;
+    pixel_ = pixel;
     return true;
 }
 
+void ContourSet::heights_half(std::vector<uint16_t> &out) const {
+    out.resize(heights_.size());
+    for (size_t i = 0; i < heights_.size(); ++i) out[i] = to_half(heights_[i]);
+}
+
 bool ContourSet::entry(int cx, int cy, Entry &e) const {
-    if (raw_.empty() || cx < 0 || cy < 0 || cx >= chunks_x_ || cy >= chunks_y_) return false;
-    size_t at = kHeader + ((size_t)cy * chunks_x_ + cx) * 12;
-    e.offset = rd<uint32_t>(raw_, at);
-    e.lines = rd<uint32_t>(raw_, at + 4);
-    e.spots = rd<uint32_t>(raw_, at + 8);
-    return e.offset <= raw_.size();
+    if (index_.empty() || cx < 0 || cy < 0 || cx >= chunks_x_ || cy >= chunks_y_) return false;
+    const uint8_t *p = index_.data() + kHeader + ((size_t)cy * chunks_x_ + cx) * 12;
+    e.offset = rd<uint32_t>(p);
+    e.labels = rd<uint32_t>(p + 4);
+    e.spots = rd<uint32_t>(p + 8);
+    return (size_t)e.offset + (size_t)e.labels * 8 + (size_t)e.spots * 6 <= index_.size();
 }
 
-void ContourSet::build_lines(int cx, int cy, int step, int index_step, int part, std::vector<float> &xy,
-                             std::vector<uint32_t> &rgba) const {
-    xy.clear();
-    rgba.clear();
-    Entry e;
-    if (!entry(cx, cy, e)) return;
-    // Dark, translucent lines: they darken whatever ground lies under them instead of
-    // sitting on it in a colour of their own. Index contours are stronger.
-    const uint32_t minor = rgba8(52, 34, 18, 105), index = rgba8(44, 26, 12, 185);
-    size_t at = e.offset;
-    std::vector<float> pts;
-    for (uint32_t i = 0; i < e.lines; ++i) {
-        if (at + 4 > raw_.size()) return;
-        int level = rd<int16_t>(raw_, at);
-        size_t n = rd<uint16_t>(raw_, at + 2);
-        at += 4;
-        if (!read_points(raw_, at, n, pts)) return;
-        if (step <= 0 || level % step != 0) continue;
-        const bool is_index = index_step > 0 && level % index_step == 0;
-        if ((part == 1 && is_index) || (part == 2 && !is_index)) continue;
-        const uint32_t col = is_index ? index : minor;
-        for (size_t k = 1; k < n; ++k) {
-            xy.push_back(pts[k * 2 - 2]);
-            xy.push_back(pts[k * 2 - 1]);
-            xy.push_back(pts[k * 2]);
-            xy.push_back(pts[k * 2 + 1]);
-            rgba.push_back(col);
-            rgba.push_back(col);
-        }
-    }
-}
-
-void ContourSet::labels(int cx, int cy, int index_step, std::vector<ContourLabel> &out) const {
+void ContourSet::labels(int cx, int cy, int step, std::vector<ContourLabel> &out) const {
     out.clear();
     Entry e;
-    if (!entry(cx, cy, e) || index_step <= 0) return;
-    const float kMinLength = 3000.0f; // a label needs a line long enough to be worth naming
-    size_t at = e.offset;
-    std::vector<float> pts;
-    for (uint32_t i = 0; i < e.lines; ++i) {
-        if (at + 4 > raw_.size()) return;
-        int level = rd<int16_t>(raw_, at);
-        size_t n = rd<uint16_t>(raw_, at + 2);
-        at += 4;
-        if (!read_points(raw_, at, n, pts)) return;
-        if (level % index_step != 0 || n < 2) continue;
-        float total = 0;
-        for (size_t k = 1; k < n; ++k) total += std::hypot(pts[k * 2] - pts[k * 2 - 2], pts[k * 2 + 1] - pts[k * 2 - 1]);
-        if (total < kMinLength) continue;
-        // Walk to the middle of the line and take its direction there.
-        float run = 0, half = total * 0.5f;
-        for (size_t k = 1; k < n; ++k) {
-            float ax = pts[k * 2 - 2], ay = pts[k * 2 - 1], bx = pts[k * 2], by = pts[k * 2 + 1];
-            float seg = std::hypot(bx - ax, by - ay);
-            if (run + seg >= half && seg > 0) {
-                float t = (half - run) / seg;
-                size_t f = k >= 2 ? k - 2 : 0, g = k + 1 < n ? k + 1 : n - 1;
-                float ang = std::atan2(pts[g * 2 + 1] - pts[f * 2 + 1], pts[g * 2] - pts[f * 2]);
-                if (ang > 1.5708f) ang -= 3.14159265f;
-                if (ang < -1.5708f) ang += 3.14159265f;
-                out.push_back({ax + (bx - ax) * t, ay + (by - ay) * t, ang, level});
-                break;
-            }
-            run += seg;
-        }
+    if (!entry(cx, cy, e) || step <= 0) return;
+    const uint8_t *p = index_.data() + e.offset;
+    for (uint32_t i = 0; i < e.labels; ++i, p += 8) {
+        const int level = rd<int16_t>(p + 4);
+        if (level % step != 0) continue;
+        out.push_back({rd<int16_t>(p) * kUnit, rd<int16_t>(p + 2) * kUnit, rd<int16_t>(p + 6) / 100.0f, level});
     }
 }
 
 void ContourSet::spots(int cx, int cy, std::vector<SpotHeight> &out) const {
     out.clear();
     Entry e;
-    if (!entry(cx, cy, e) || e.spots == 0) return;
-    size_t at = e.offset;
-    std::vector<float> pts;
-    for (uint32_t i = 0; i < e.lines; ++i) { // spot heights follow the chunk's lines
-        if (at + 4 > raw_.size()) return;
-        size_t n = rd<uint16_t>(raw_, at + 2);
-        at += 4;
-        if (!read_points(raw_, at, n, pts)) return;
-    }
-    for (uint32_t i = 0; i < e.spots; ++i) {
-        if (at + 6 > raw_.size()) return;
-        out.push_back({rd<int16_t>(raw_, at) * kUnit, rd<int16_t>(raw_, at + 2) * kUnit, rd<int16_t>(raw_, at + 4)});
-        at += 6;
-    }
+    if (!entry(cx, cy, e)) return;
+    const uint8_t *p = index_.data() + e.offset + (size_t)e.labels * 8;
+    for (uint32_t i = 0; i < e.spots; ++i, p += 6)
+        out.push_back({rd<int16_t>(p) * kUnit, rd<int16_t>(p + 2) * kUnit, rd<int16_t>(p + 4)});
 }
 
 } // namespace murks

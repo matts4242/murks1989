@@ -2,14 +2,6 @@
 //
 //   build/render_shot game/data/poland_1989.murkz shot.ppm <col> <row> <px per hex> [width height]
 //   build/render_shot game/data/poland_1989.murkz bench
-// With MURKS_CONTOURS=game/data/poland_1989.murkc the picture is the topographic mode:
-// slope tint and downhill wedges, then contour lines on top (every 20 m from 20 px per
-// hex, every 100 m further out).
-//
-// The picture is what the Godot layer shows: the chunk mesh (terrain, rivers, roads, rail),
-// and from 16 px per hex the close-zoom detail layer on top. Used to check map styling
-// (work board MRK-24) and that chunk build times stay inside the frame budget.
-#include "murks/contours.hpp"
 #include "murks/render_data.hpp"
 
 #include <zlib.h>
@@ -71,19 +63,6 @@ struct Canvas {
             }
         }
     }
-    // A one-pixel line with alpha, as the game draws contour lines.
-    void line(double ax, double ay, double bx, double by, uint32_t c) {
-        ax = (ax - ox) * scale; ay = (ay - oy) * scale; bx = (bx - ox) * scale; by = (by - oy) * scale;
-        int n = (int)std::ceil(std::max(std::fabs(bx - ax), std::fabs(by - ay))) + 1;
-        float r = (float)(c & 255), gg = (float)((c >> 8) & 255), b = (float)((c >> 16) & 255), a = (float)((c >> 24) & 255) / 255.0f;
-        for (int i = 0; i < n; ++i) {
-            double t = n > 1 ? (double)i / (n - 1) : 0.0;
-            int x = (int)std::floor(ax + (bx - ax) * t), y = (int)std::floor(ay + (by - ay) * t);
-            if (x < 0 || y < 0 || x >= w || y >= h) continue;
-            float *p = &px[((size_t)y * w + x) * 3];
-            p[0] += (r - p[0]) * a; p[1] += (gg - p[1]) * a; p[2] += (b - p[2]) * a;
-        }
-    }
     void draw(const ChunkGeometry &g) {
         for (size_t i = 0; i + 2 < g.indices.size(); i += 3) tri(g, g.indices[i], g.indices[i + 1], g.indices[i + 2]);
     }
@@ -122,28 +101,6 @@ int main(int argc, char **argv) {
                 det_v_worst = std::max(det_v_worst, g.xy.size() / 2);
             }
         }
-        if (const char *cpath = std::getenv("MURKS_CONTOURS")) {
-            std::vector<uint8_t> craw;
-            ContourSet cs;
-            if (load_murkz(cpath, craw) && cs.load(craw.data(), craw.size())) {
-                std::vector<float> xy;
-                std::vector<uint32_t> col;
-                double ms = 0, worst = 0;
-                size_t seg = 0, seg_worst = 0;
-                int m = 0;
-                for (int cy = 0; cy < cs.chunks_y(); ++cy)
-                    for (int cx = 0; cx < cs.chunks_x(); ++cx, ++m) {
-                        auto t0 = clk::now();
-                        cs.build_lines(cx, cy, 20, 100, 0, xy, col);
-                        double d = std::chrono::duration<double, std::milli>(clk::now() - t0).count();
-                        ms += d;
-                        worst = std::max(worst, d);
-                        seg += xy.size() / 4;
-                        seg_worst = std::max(seg_worst, xy.size() / 4);
-                    }
-                std::printf("%d chunks: contour lines %.2f ms avg, %.2f ms worst (%zu segments avg, %zu worst)\n", m, ms / m, worst, seg / m, seg_worst);
-            }
-        }
         std::printf("%d chunks: chunk mesh %.2f ms avg (%zu vertices avg); detail %.2f ms avg, %.2f ms worst (%zu vertices avg, %zu worst)\n",
                     n, base_ms / n, base_v / n, det_ms / n, det_worst, det_v / n, det_v_worst);
         return 0;
@@ -163,50 +120,14 @@ int main(int argc, char **argv) {
     int cx0 = std::max(0, (int)std::floor(cv.ox / cw) - 1), cx1 = std::min(map.chunks_x() - 1, (int)std::floor((cv.ox + cv.w / cv.scale) / cw) + 1);
     int cy0 = std::max(0, (int)std::floor(cv.oy / ch) - 1), cy1 = std::min(map.chunks_y() - 1, (int)std::floor((cv.oy + cv.h / cv.scale) / ch) + 1);
     ChunkGeometry g;
-    const bool topo = std::getenv("MURKS_CONTOURS") != nullptr;
     for (int pass = 0; pass < 2; ++pass) {
         if (pass == 1 && pxhex < 16.0) break;
         for (int cy = cy0; cy <= cy1; ++cy)
             for (int cx = cx0; cx <= cx1; ++cx) {
                 if (pass == 0) build_chunk_geometry(map, cx, cy, false, g);
                 else build_chunk_detail(map, cx, cy, g);
-                if (pass == 1 && topo) // patterns step back under the contours, as in the game
-                    for (uint32_t &c : g.rgba) c = (c & 0x00FFFFFFu) | ((uint32_t)(((c >> 24) & 255) * 0.6) << 24);
                 cv.draw(g);
-                if (topo && pass == (pxhex < 16.0 ? 0 : 1)) { // slope tint and downhill wedges lie over the patterns
-                    build_chunk_slope(map, cx, cy, g);
-                    cv.draw(g);
-                }
             }
-    }
-    if (const char *cpath = std::getenv("MURKS_CONTOURS")) {
-        std::vector<uint8_t> craw;
-        ContourSet cs;
-        if (load_murkz(cpath, craw) && cs.load(craw.data(), craw.size())) {
-            const bool close = pxhex >= 20.0;
-            std::vector<float> xy;
-            std::vector<uint32_t> col;
-            size_t segs = 0, labels = 0;
-            std::vector<ContourLabel> lab;
-            for (int cy = cy0; cy <= cy1; ++cy)
-                for (int cx = cx0; cx <= cx1; ++cx) {
-                    double ox, oy;
-                    chunk_origin(cx, cy, ox, oy);
-                    for (int part = 1; part <= 2; ++part) {
-                        cs.build_lines(cx, cy, close ? 20 : 100, close ? 100 : 500, part, xy, col);
-                        const double px1 = 0.7 / cv.scale; // index lines twice, most of a pixel apart
-                        for (int twin = 0; twin < part; ++twin)
-                            for (size_t i = 0; i + 3 < xy.size(); i += 4)
-                                cv.line(ox + xy[i] + twin * px1, oy + xy[i + 1] + twin * px1, ox + xy[i + 2] + twin * px1, oy + xy[i + 3] + twin * px1, col[i / 2]);
-                        segs += xy.size() / 4;
-                    }
-                    cs.labels(cx, cy, close ? 100 : 500, lab);
-                    labels += lab.size();
-                }
-            std::printf("contours: %zu segments, %zu labels in view\n", segs, labels);
-        } else {
-            std::fprintf(stderr, "cannot read contours %s\n", cpath);
-        }
     }
     std::ofstream out(argv[2], std::ios::binary);
     out << "P6\n" << cv.w << " " << cv.h << "\n255\n";

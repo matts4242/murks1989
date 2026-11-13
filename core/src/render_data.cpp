@@ -624,47 +624,6 @@ int slope_class(double percent) {
     return percent < 3.0 ? 0 : percent < 7.0 ? 1 : percent < 15.0 ? 2 : percent < 30.0 ? 3 : 4;
 }
 
-void build_chunk_slope(const Map &map, int cx, int cy, ChunkGeometry &g) {
-    g.xy.clear();
-    g.rgba.clear();
-    g.indices.clear();
-    g.grid_xy.clear();
-    chunk_origin(cx, cy, g.origin_x, g.origin_y);
-    const int c0 = cx * CHUNK, r0 = cy * CHUNK;
-    // Warm tints that sit on the terrain colour: the steeper, the redder and the stronger.
-    static const uint32_t tint[5] = {0, rgba8(236, 212, 96, 46), rgba8(232, 150, 52, 78), rgba8(206, 84, 40, 108),
-                                     rgba8(140, 32, 46, 140)};
-    static const uint32_t wedge[5] = {0, rgba8(96, 70, 20, 120), rgba8(104, 52, 14, 165), rgba8(98, 28, 12, 200),
-                                      rgba8(70, 8, 20, 230)};
-    for (int r = r0; r < r0 + CHUNK; ++r) {
-        for (int c = c0; c < c0 + CHUNK; ++c) {
-            int dir;
-            const int k = slope_class(hex_slope(map, c, r, dir));
-            if (k == 0) continue;
-            Vec2 ctr = hex_center({c, r});
-            const double x0 = ctr.x - g.origin_x, y0 = ctr.y - g.origin_y;
-            push_blob(g, x0, y0, HEX_SIZE, 6, -3.14159265358979323846 / 6.0, tint[k]);
-            if (dir < 0) continue;
-            // A wedge with its point downhill: longer and wider on steeper ground.
-            Vec2 nb = hex_center(neighbor({c, r}, dir));
-            double dx = nb.x - ctr.x, dy = nb.y - ctr.y, len = std::hypot(dx, dy);
-            dx /= len;
-            dy /= len;
-            const double L = 70.0 + 28.0 * k, W = 18.0 + 9.0 * k;
-            int32_t base = (int32_t)(g.xy.size() / 2);
-            const double pts[3][2] = {{x0 + dx * L, y0 + dy * L},
-                                      {x0 - dx * L * 0.6 - dy * W, y0 - dy * L * 0.6 + dx * W},
-                                      {x0 - dx * L * 0.6 + dy * W, y0 - dy * L * 0.6 - dx * W}};
-            for (auto &p : pts) {
-                g.xy.push_back((float)p[0]);
-                g.xy.push_back((float)p[1]);
-                g.rgba.push_back(wedge[k]);
-            }
-            for (int i = 0; i < 3; ++i) g.indices.push_back(base + i);
-        }
-    }
-}
-
 void build_overview_rgba(const Map &map, std::vector<uint8_t> &rgba) {
     const int W = map.cols(), H = map.rows();
     rgba.resize((size_t)W * H * 4);

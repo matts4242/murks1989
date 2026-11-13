@@ -5,8 +5,8 @@ extends Node2D
 ## creating chunks that come into view and freeing ones far away. Closer still a
 ## detail layer adds a pattern inside every hex (tree crowns, building blocks,
 ## furrows, marsh marks), rail sleepers and bridges. The topographic mode keeps
-## all of that and lays over it a slope tint with downhill wedges and contour
-## lines baked from the elevation data, drawn as darker ground, not as a separate sheet.
+## all of that and makes the ground itself step at every height band (a shader over
+## the baked height raster): the border between two bands is the contour.
 
 const CHUNK_HEXES := 64
 const BUILD_BUDGET_MS := 6.0     # per frame
@@ -15,8 +15,9 @@ const CHUNK_MODE_PX := 7.0       # hex size on screen at which chunks replace th
 const GRID_MODE_PX := 22.0       # hex size on screen at which hex outlines appear
 const DETAIL_MODE_PX := 16.0     # hex size on screen at which terrain patterns appear
 const DETAIL_FULL_PX := 26.0     # ... and at which they reach full strength
-const TOPO_CLOSE_PX := 20.0      # hex size on screen from which every 20 m line is drawn
-const TOPO_DETAIL_ALPHA := 0.6    # terrain patterns step back a little under the contours
+const TOPO_CLOSE_PX := 20.0      # hex size on screen from which the height bands are 20 m
+const TOPO_FAR_PX := 3.0         # ... and below which they are 500 m (100 m in between)
+const RELIEF_SHADER := preload("res://shaders/relief.gdshader")
 
 var world: MurksWorld
 var overview: Sprite2D
@@ -26,12 +27,10 @@ var grid_root: Node2D
 var chunks := {}                 # Vector2i -> MeshInstance2D
 var details := {}                # Vector2i -> MeshInstance2D
 var grids := {}                  # Vector2i -> MeshInstance2D
-var slope_root: Node2D           # slope tint and downhill wedges in topographic mode
-var slopes := {}                 # Vector2i -> MeshInstance2D
-var contour_root: Node2D
-var contours := {}               # Vector2i -> {"lod", "nodes", "twin", "labels", "spots"}
+var relief: Sprite2D             # height bands in topographic mode: a shader over the height raster
+var relief_labels := {}          # Vector2i -> {"lod", "labels", "spots"}: height figures per chunk
 var show_topo := false
-var topo_lod := 0                # 0: lines every 20 m, index 100 m; 1: every 100 m, index 500 m
+var topo_lod := 0                # 0: 20 m bands, every 100 m heavier; 1: 100 m / 500 m; 2: 500 m / 2,500 m
 var chunk_count := Vector2i.ZERO
 var chunk_size_m := Vector2.ZERO
 var show_grid := true
@@ -62,15 +61,16 @@ func setup(w: MurksWorld) -> void:
 	add_child(chunk_root)
 	detail_root = Node2D.new()
 	add_child(detail_root)
-	slope_root = Node2D.new()   # over the patterns, so its tint and wedges read through woods and towns
-	slope_root.visible = false
-	add_child(slope_root)
-	contour_root = Node2D.new()
-	add_child(contour_root)
+	relief = Sprite2D.new()   # over the patterns too, so woods and towns step with the ground
+	relief.centered = false
+	relief.texture_filter = CanvasItem.TEXTURE_FILTER_LINEAR
+	relief.visible = false
+	add_child(relief)
 	grid_root = Node2D.new()
 	grid_root.z_index = 1
 	grid_root.modulate = Color(0.05, 0.05, 0.05, 0.22)
 	add_child(grid_root)
+	setup_relief()
 
 
 func update_view(center: Vector2, zoom: float, viewport_size: Vector2) -> void:
@@ -81,25 +81,23 @@ func update_view(center: Vector2, zoom: float, viewport_size: Vector2) -> void:
 	chunk_root.visible = use_chunks
 	grid_root.visible = use_chunks and show_grid and px_per_hex >= GRID_MODE_PX
 	# Patterns fade in over a short zoom range instead of popping.
-	var want_topo := use_chunks and show_topo and world.has_contours()
+	var want_topo := show_topo and relief.texture != null
 	var want_detail := use_chunks and show_detail and px_per_hex >= DETAIL_MODE_PX
-	contour_root.visible = want_topo
-	slope_root.visible = want_topo
-	topo_lod = 0 if px_per_hex >= TOPO_CLOSE_PX else 1
+	relief.visible = want_topo
+	if want_topo:
+		# Band height by zoom; the shader needs the ground distance per pixel for the grade.
+		topo_lod = 0 if px_per_hex >= TOPO_CLOSE_PX else (1 if px_per_hex >= TOPO_FAR_PX else 2)
+		var mat: ShaderMaterial = relief.material
+		mat.set_shader_parameter("interval", [20.0, 100.0, 500.0][topo_lod])
+		mat.set_shader_parameter("metres_per_pixel", 1.0 / zoom)
 	detail_root.visible = want_detail
 	if want_detail:
-		detail_root.modulate.a = (clampf((px_per_hex - DETAIL_MODE_PX) / (DETAIL_FULL_PX - DETAIL_MODE_PX), 0.0, 1.0) * 0.75 + 0.25) \
-			* (TOPO_DETAIL_ALPHA if want_topo else 1.0)
+		detail_root.modulate.a = clampf((px_per_hex - DETAIL_MODE_PX) / (DETAIL_FULL_PX - DETAIL_MODE_PX), 0.0, 1.0) * 0.75 + 0.25
 	if not use_chunks:
+		relief_labels.clear()
 		return
 
 	var half := viewport_size * 0.5 / zoom
-	if want_topo:
-		# Index contours are drawn twice, most of a pixel apart, so they read heavier.
-		var nudge := Vector2(0.7, 0.7) / zoom
-		for entry in contours.values():
-			if entry["twin"] != null:
-				(entry["twin"] as MeshInstance2D).position = (entry["nodes"][0] as MeshInstance2D).position + nudge
 	var c0 := Vector2i(floori((center.x - half.x) / chunk_size_m.x) - 1, floori((center.y - half.y) / chunk_size_m.y) - 1)
 	var c1 := Vector2i(floori((center.x + half.x) / chunk_size_m.x) + 1, floori((center.y + half.y) / chunk_size_m.y) + 1)
 	c0 = c0.clamp(Vector2i.ZERO, chunk_count - Vector2i.ONE)
@@ -110,9 +108,20 @@ func update_view(center: Vector2, zoom: float, viewport_size: Vector2) -> void:
 	for cy in range(c0.y, c1.y + 1):
 		for cx in range(c0.x, c1.x + 1):
 			var key := Vector2i(cx, cy)
-			if not chunks.has(key) or (want_grid and not grids.has(key)) or (want_detail and not details.has(key)) \
-					or (want_topo and (not slopes.has(key) or not contours.has(key) or int(contours[key]["lod"]) != topo_lod)):
+			if not chunks.has(key) or (want_grid and not grids.has(key)) or (want_detail and not details.has(key)):
 				needed.append(key)
+			# Height figures for the chunks in view (cheap: a few dozen numbers per chunk).
+			if want_topo and (not relief_labels.has(key) or int(relief_labels[key]["lod"]) != topo_lod):
+				relief_labels[key] = {"lod": topo_lod,
+					"labels": world.get_chunk_contour_labels(key, 100 if topo_lod == 0 else 500),
+					"spots": world.get_chunk_spot_heights(key)}
+	if not want_topo:
+		relief_labels.clear()
+	elif relief_labels.size() > 64:
+		for key in relief_labels.keys():
+			var k: Vector2i = key
+			if k.x < c0.x or k.y < c0.y or k.x > c1.x or k.y > c1.y:
+				relief_labels.erase(k)
 
 	if not needed.is_empty():
 		var mid := Vector2(center.x / chunk_size_m.x, center.y / chunk_size_m.y)
@@ -126,10 +135,6 @@ func update_view(center: Vector2, zoom: float, viewport_size: Vector2) -> void:
 				_build_grid(key)
 			if want_detail and not details.has(key):
 				_build_detail(key)
-			if want_topo and not slopes.has(key):
-				_build_slope(key)
-			if want_topo and (not contours.has(key) or int(contours[key]["lod"]) != topo_lod):
-				_build_contours(key, topo_lod)
 			builds_last_frame += 1
 			build_ms_last_frame = (Time.get_ticks_usec() - t0) / 1000.0
 			if build_ms_last_frame > BUILD_BUDGET_MS:
@@ -156,48 +161,23 @@ func _build_detail(key: Vector2i) -> void:
 	details[key] = mi
 
 
-func _build_slope(key: Vector2i) -> void:
-	var mi := MeshInstance2D.new()
-	mi.mesh = world.build_chunk_slope_mesh(key)
-	mi.position = world.get_chunk_origin(key)
-	slope_root.add_child(mi)
-	slopes[key] = mi
-
-
-func _build_contours(key: Vector2i, lod: int) -> void:
-	_free_contours(key)
-	var step := 20 if lod == 0 else 100
-	var index_step := 100 if lod == 0 else 500
-	var origin: Vector2 = world.get_chunk_origin(key)
-	var nodes: Array = []
-	var twin: MeshInstance2D = null
-	for part in [1, 2]:
-		var mesh: ArrayMesh = world.build_chunk_contour_mesh(key, step, index_step, part)
-		if mesh.get_surface_count() == 0:
-			continue
-		var mi := MeshInstance2D.new()
-		mi.mesh = mesh
-		mi.position = origin
-		contour_root.add_child(mi)
-		nodes.append(mi)
-		if part == 2:
-			twin = MeshInstance2D.new()
-			twin.mesh = mesh
-			twin.position = origin
-			contour_root.add_child(twin)
-	contours[key] = {"lod": lod, "nodes": nodes, "twin": twin,
-		"labels": world.get_chunk_contour_labels(key, index_step), "spots": world.get_chunk_spot_heights(key)}
-
-
-func _free_contours(key: Vector2i) -> void:
-	if not contours.has(key):
+## Loads the height raster of the map's relief file into the band shader. Without a
+## relief file the topographic mode is simply not available.
+func setup_relief() -> void:
+	relief.texture = null
+	relief.material = null
+	relief_labels.clear()
+	if not world.has_contours():
 		return
-	var entry: Dictionary = contours[key]
-	for mi in entry["nodes"]:
-		(mi as Node).queue_free()
-	if entry["twin"] != null:
-		(entry["twin"] as Node).queue_free()
-	contours.erase(key)
+	var img: Image = world.get_height_image()
+	if img == null or img.is_empty():
+		return
+	relief.texture = ImageTexture.create_from_image(img)
+	var px := world.get_height_pixel_size()
+	relief.scale = Vector2(px, px)   # texel (i, j) covers the square whose centre is ((j + 0.5) px, (i + 0.5) px)
+	var mat := ShaderMaterial.new()
+	mat.shader = RELIEF_SHADER
+	relief.material = mat
 
 
 func _build_grid(key: Vector2i) -> void:
@@ -209,13 +189,9 @@ func _build_grid(key: Vector2i) -> void:
 
 
 func _unload_outside(lo: Vector2i, hi: Vector2i) -> void:
-	for dict in [chunks, grids, details, slopes]:
+	for dict in [chunks, grids, details]:
 		for key in dict.keys():
 			var k: Vector2i = key
 			if k.x < lo.x or k.y < lo.y or k.x > hi.x or k.y > hi.y:
 				(dict[k] as Node).queue_free()
 				dict.erase(k)
-	for key in contours.keys():
-		var k: Vector2i = key
-		if k.x < lo.x or k.y < lo.y or k.x > hi.x or k.y > hi.y:
-			_free_contours(k)

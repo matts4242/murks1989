@@ -99,12 +99,12 @@ public:
     Ref<ArrayMesh> build_chunk_mesh(Vector2i chunk) const;
     Ref<ArrayMesh> build_chunk_detail_mesh(Vector2i chunk) const;
     Ref<ArrayMesh> build_chunk_grid_mesh(Vector2i chunk) const;
-    // Contour lines and spot heights (drawing data baked beside the map; optional).
-    Ref<ArrayMesh> build_chunk_slope_mesh(Vector2i chunk) const;
+    // Relief for the topographic mode (drawing data baked beside the map; optional).
     bool load_contour_bytes(const PackedByteArray &bytes);
     bool has_contours() const;
-    Ref<ArrayMesh> build_chunk_contour_mesh(Vector2i chunk, int step, int index_step, int part) const;
-    PackedFloat32Array get_chunk_contour_labels(Vector2i chunk, int index_step) const;
+    Ref<Image> get_height_image() const;
+    float get_height_pixel_size() const;
+    PackedFloat32Array get_chunk_contour_labels(Vector2i chunk, int step) const;
     PackedFloat32Array get_chunk_spot_heights(Vector2i chunk) const;
     Ref<Image> build_overview_image() const;
     Dictionary get_hex_info(Vector2i hex) const;

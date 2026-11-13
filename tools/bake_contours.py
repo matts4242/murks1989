@@ -1,25 +1,34 @@
 #!/usr/bin/env python3
-"""Bakes contour lines and spot heights for a Murks 1989 map (work board MRK-23).
+"""Bakes the relief data for a Murks 1989 map's topographic mode (work board MRK-23).
 
 Reads the same Copernicus DEM GLO-90 tiles as bake_region.py, warps them onto a 90 m
 raster in the map's own frame (EPSG:3035, x east and y south of the map's north-west
-corner, in metres), smooths out single-pixel noise, and traces a contour line every
-20 m. The lines are simplified, cut to the 64 x 64-hex chunks the game streams, and
-written next to the map as <map>.murkc. The game shows every line close in and only
-every 100 m further out.
+corner, in metres) and smooths out single-pixel noise. From that it writes, next to the
+map as <map>.murkc:
+
+  - a height raster at 180 m, which the game draws as stepped height bands: the terrain
+    itself changes tone at every 20 m (or 100 m) step, so the border between two bands
+    is the contour line;
+  - a height figure for every 100 m contour long enough to carry one, cut to the
+    64 x 64-hex chunks the game streams;
+  - spot heights on summits.
 
 Usage (same bounding box and cache as the map bake):
   python3 tools/bake_contours.py --bbox 10 49 24.2 55 --out game/data/poland_1989.murkc --cache ~/murks_cache
 Needs: numpy rasterio pyproj shapely contourpy scipy.
 
 File format (little endian), stored like the map inside a "MURKSZ01" zlib container:
-  magic "MURKSCT1", u32 chunks_x, u32 chunks_y, u32 interval_m, u32 reserved
-  chunks_x * chunks_y entries (row by row): u32 offset, u32 line_count, u32 spot_count
+  magic "MURKSCT2", u32 chunks_x, u32 chunks_y, u32 raster_w, u32 raster_h,
+  f32 raster_pixel_m, f32 height_unit_m, f32 height_offset_m, u32 raster_offset
+  chunks_x * chunks_y entries (row by row): u32 offset, u32 label_count, u32 spot_count
   per chunk at its offset:
-    lines: i16 level_m, u16 point_count, then per point two varints (dx, dy): the step
-           from the point before (the first from the chunk origin), zigzag-coded
-    spots: i16 x, i16 y, i16 elevation_m
-  coordinates: metres from the chunk origin / 4, so four-metre steps
+    labels: i16 x, i16 y, i16 level_m, i16 angle (1/100 rad, direction of the contour there)
+    spots:  i16 x, i16 y, i16 elevation_m
+    coordinates: metres from the chunk origin / 4
+  at raster_offset: raster_w * raster_h u16, row by row. Each value is the difference
+    from the plane through its left, upper and upper-left neighbours (missing ones 0),
+    modulo 65536; height = value * height_unit_m - height_offset_m. Pixel (i, j) has its
+    centre at ((j + 0.5) * pixel, (i + 0.5) * pixel) metres.
 """
 import argparse
 import math
@@ -39,27 +48,16 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import bake_region as br
 
 CONTOUR_PIXEL = 90.0   # raster step in metres: the source data's own resolution
-INTERVAL = 20          # metres between contour lines
+LABEL_INTERVAL = 100   # a height figure on every contour of this spacing
+RASTER_STEP = 2        # the height raster keeps every 2nd pixel: 180 m
+HEIGHT_UNIT_M = 1.0    # height step in the file
+HEIGHT_OFFSET_M = 100.0
+LABEL_MIN_LENGTH_M = 3000.0
 SMOOTH_SIGMA = 1.2     # pixels; GLO-90 is a surface model, so woods and towns add noise
-SIMPLIFY_M = 40.0      # Douglas-Peucker tolerance
-MIN_LENGTH_M = 900.0   # shorter lines are noise at this scale
 SPOT_WINDOW_M = 5000.0 # a spot height is the highest point within this distance ...
 SPOT_PROMINENCE_M = 40.0  # ... standing at least this far above the lowest ground in it
 SPOTS_PER_CHUNK = 6
 UNIT_M = 4.0           # coordinate step in the file
-
-
-def varints(values):
-    """Zigzag varint coding of a 1-D int array: small steps take one byte."""
-    v = values.astype(np.int64)
-    z = ((v << 1) ^ (v >> 63)).astype(np.uint64)
-    out = bytearray()
-    for n in z.tolist():
-        while n >= 0x80:
-            out.append((n & 0x7F) | 0x80)
-            n >>= 7
-        out.append(n)
-    return bytes(out)
 
 
 def main():
@@ -99,7 +97,7 @@ def main():
     chunk_w = br.CHUNK * br.HEX_WIDTH
     chunk_h = br.CHUNK * br.ROW_SPACING
     blocks, table = [], []
-    n_lines = n_pts = n_spots = 0
+    n_labels = n_spots = 0
     for cy in range(grid.chunks_y):
         for cx in range(grid.chunks_x):
             ox, oy = cx * chunk_w, cy * chunk_h
@@ -114,36 +112,30 @@ def main():
                 xs = (np.arange(j0, j1) + 0.5) * CONTOUR_PIXEL
                 ys = (np.arange(i0, i1) + 0.5) * CONTOUR_PIXEL
                 zmin, zmax = float(z.min()), float(z.max())
-                first = int(math.floor(zmin / INTERVAL) + 1) * INTERVAL
+                first = max(LABEL_INTERVAL, int(math.floor(zmin / LABEL_INTERVAL) + 1) * LABEL_INTERVAL)
                 if first <= zmax:
                     gen = contour_generator(xs, ys, z, line_type=LineType.Separate)
-                    for level in range(max(first, INTERVAL), int(zmax) + 1, INTERVAL):
-                        lines = [l for l in gen.lines(float(level)) if len(l) >= 2]
-                        if not lines:
-                            continue
-                        geoms = np.array([shapely.LineString(l) for l in lines], dtype=object)
-                        geoms = geoms[shapely.length(geoms) >= MIN_LENGTH_M]
-                        if len(geoms) == 0:
-                            continue
-                        geoms = shapely.simplify(geoms, SIMPLIFY_M, preserve_topology=False)
-                        geoms = shapely.clip_by_rect(geoms, ox, oy, x1, y1)
-                        parts = shapely.get_parts(geoms)
-                        for g in parts:
-                            if shapely.get_type_id(g) != 1 or shapely.length(g) < 200.0:  # 1 = LineString
+                    for level in range(first, int(zmax) + 1, LABEL_INTERVAL):
+                        for line in gen.lines(float(level)):
+                            if len(line) < 2:
                                 continue
-                            c = shapely.get_coordinates(g)
-                            q = np.rint((c - (ox, oy)) / UNIT_M).astype(np.int64)
-                            keep = np.ones(len(q), dtype=bool)
-                            keep[1:] = np.any(q[1:] != q[:-1], axis=1)
-                            q = q[keep]
-                            for k0 in range(0, len(q), 60000):  # u16 point count
-                                seg = q[max(0, k0 - 1):k0 + 60000]
-                                if len(seg) < 2:
-                                    continue
-                                d = np.diff(seg, axis=0, prepend=np.zeros((1, 2), dtype=np.int64))
-                                out += struct.pack("<hH", level, len(seg)) + varints(d.reshape(-1))
+                            g = shapely.clip_by_rect(shapely.LineString(line), ox, oy, x1, y1)
+                            for part in shapely.get_parts(g):
+                                if shapely.get_type_id(part) != 1 or shapely.length(part) < LABEL_MIN_LENGTH_M:
+                                    continue  # 1 = LineString
+                                # The figure sits at the middle of the line, along its direction there.
+                                half = shapely.length(part) * 0.5
+                                a = shapely.get_coordinates(shapely.line_interpolate_point(part, half - 200.0))[0]
+                                m = shapely.get_coordinates(shapely.line_interpolate_point(part, half))[0]
+                                b = shapely.get_coordinates(shapely.line_interpolate_point(part, half + 200.0))[0]
+                                ang = math.atan2(b[1] - a[1], b[0] - a[0])
+                                if ang > math.pi / 2:
+                                    ang -= math.pi
+                                if ang < -math.pi / 2:
+                                    ang += math.pi
+                                out += struct.pack("<4h", int(round((m[0] - ox) / UNIT_M)), int(round((m[1] - oy) / UNIT_M)),
+                                                   level, int(round(ang * 100)))
                                 count += 1
-                                n_pts += len(seg)
             sel = np.nonzero((spot_x >= ox) & (spot_x < ox + chunk_w) & (spot_y >= oy) & (spot_y < oy + chunk_h))[0]
             sel = sel[np.argsort(-spot_p[sel])][:SPOTS_PER_CHUNK]
             for k in sel:
@@ -151,23 +143,37 @@ def main():
                                    int(round((spot_y[k] - oy) / UNIT_M)), int(round(spot_e[k])))
             table.append((count, len(sel)))
             blocks.append(bytes(out))
-            n_lines += count
+            n_labels += count
             n_spots += len(sel)
-        br.log(f"  chunk row {cy + 1}/{grid.chunks_y}: {n_lines} lines, {n_pts} points")
+        br.log(f"  chunk row {cy + 1}/{grid.chunks_y}: {n_labels} height figures")
 
-    header = b"MURKSCT1" + struct.pack("<4I", grid.chunks_x, grid.chunks_y, INTERVAL, 0)
-    offset = len(header) + 12 * len(blocks)
+    # Height raster: 2 x 2 block means of the smoothed 90 m raster, plane-predicted so that
+    # zlib sees small numbers.
+    s = RASTER_STEP
+    hh, ww = (elev.shape[0] // s) * s, (elev.shape[1] // s) * s
+    coarse = elev[:hh, :ww].reshape(hh // s, s, ww // s, s).mean(axis=(1, 3))
+    q = np.clip(np.rint((coarse + HEIGHT_OFFSET_M) / HEIGHT_UNIT_M), 0, 65535).astype(np.int64)
+    pad = np.zeros((q.shape[0] + 1, q.shape[1] + 1), dtype=np.int64)
+    pad[1:, 1:] = q
+    resid = (pad[1:, 1:] - pad[1:, :-1] - pad[:-1, 1:] + pad[:-1, :-1]) & 0xFFFF
+    raster = resid.astype("<u2").tobytes()
+
+    header_size = 8 + 4 * 4 + 3 * 4 + 4
+    offset = header_size + 12 * len(blocks)
     index = bytearray()
-    for (lines, spots), block in zip(table, blocks):
-        index += struct.pack("<3I", offset, lines, spots)
+    for (labels, spots), block in zip(table, blocks):
+        index += struct.pack("<3I", offset, labels, spots)
         offset += len(block)
-    raw = header + bytes(index) + b"".join(blocks)
+    header = b"MURKSCT2" + struct.pack("<4I3fI", grid.chunks_x, grid.chunks_y, q.shape[1], q.shape[0],
+                                       CONTOUR_PIXEL * s, HEIGHT_UNIT_M, HEIGHT_OFFSET_M, offset)
+    assert len(header) == header_size
+    raw = header + bytes(index) + b"".join(blocks) + raster
     packed = b"MURKSZ01" + struct.pack("<Q", len(raw)) + zlib.compress(raw, 9)
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
     with open(args.out, "wb") as f:
         f.write(packed)
-    br.log(f"wrote {args.out}: {n_lines} lines, {n_pts} points, {n_spots} spot heights, "
-           f"{len(raw) / 1e6:.1f} MB raw, {len(packed) / 1e6:.1f} MB packed, {time.time() - t0:.0f} s")
+    br.log(f"wrote {args.out}: height raster {q.shape[1]} x {q.shape[0]} @ {CONTOUR_PIXEL * s:.0f} m, {n_labels} height figures, "
+           f"{n_spots} spot heights, {len(raw) / 1e6:.1f} MB raw, {len(packed) / 1e6:.1f} MB packed, {time.time() - t0:.0f} s")
 
 
 if __name__ == "__main__":

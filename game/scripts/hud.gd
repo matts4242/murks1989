@@ -50,7 +50,7 @@ const VIEW_TOGGLES := [["Group", "Company grouping on the theater map", KEY_O],
 	["Supply", "Supply routes and convoys", KEY_F3],
 	["Grid", "Hex grid", KEY_G], ["Detail", "Terrain detail when zoomed in", KEY_F6],
 	["Vehicles", "Vehicles on counters (off: NATO symbols)", KEY_F7],
-	["Topo", "Topographic map: contours, slope and heights", KEY_F8], ["Sight", "Line of sight of the selected unit", KEY_V],
+	["Topo", "Topographic map: height bands and heights", KEY_F8], ["Sight", "Line of sight of the selected unit", KEY_V],
 	["Zones", "Simulation fidelity zones", KEY_Z]]
 const LEVY_TIPS := ["0.1 kg a head from the town's larders (a farm collective gives 0.5). Loyalty -10.",
 	"0.5 L a head from garages and stations. Loyalty -10.",
@@ -1303,7 +1303,7 @@ func _controls_body() -> Control:
 		["Game", [["F5 / F9", "Quick save / quick load"], ["F1 / F2", "Controls / map data credits"],
 			["F4 / F6", "Map legend / terrain detail on or off"],
 			["F7", "Counters show vehicles or NATO symbols"],
-			["F8", "Topographic map: contours, slope and heights"],
+			["F8", "Topographic map: height bands and heights"],
 			["Esc", "Pause menu"]]]]
 	var cols := HBoxContainer.new()
 	cols.add_theme_constant_override("separation", 28)
@@ -1393,13 +1393,10 @@ const LEGEND_LINES := [
 	["river_major", "Major river", "Crossed at bridges."],
 	["river", "River or stream", ""],
 	["bridge", "Bridge", "Pale deck with dark parapets."],
-	["contour", "Contour line (F8)", "Every 20 m close in, every 100 m further out."],
-	["contour_index", "Index contour", "Every 100 m (500 m further out), with its height."],
-	["spot", "Spot height", "A summit and its height in metres."],
-	["slope1", "Gentle slope, 3-7%", "The wedge points downhill."],
-	["slope2", "Moderate slope, 7-15%", ""],
-	["slope3", "Steep slope, 15-30%", ""],
-	["slope4", "Very steep, over 30%", "Lines close together mean the same."]]
+	["band", "Height step (F8)", "The ground steps every 20 m: dark below, lit above."],
+	["band_heavy", "Every fifth step", "Heavier, with its height (every 100 m)."],
+	["band_steep", "Steep ground", "Steps close together, and darker."],
+	["spot", "Spot height", "A summit and its height in metres."]]
 
 
 func _legend_body() -> Control:
@@ -1522,25 +1519,21 @@ func _draw_legend_swatch(sw: Control, kind: String) -> void:
 				"river":
 					sw.draw_line(a, b, Color8(58, 100, 150), 54.0 * 2 * k)
 					sw.draw_line(a, b, Color8(98, 148, 196), 40.0 * 2 * k)
-				"slope1", "slope2", "slope3", "slope4":
-					var si := int(kind.substr(5))
-					var tints := [Color8(236, 212, 96, 46), Color8(232, 150, 52, 78), Color8(206, 84, 40, 108), Color8(140, 32, 46, 140)]
-					var wedges := [Color8(96, 70, 20, 120), Color8(104, 52, 14, 165), Color8(98, 28, 12, 200), Color8(70, 8, 20, 230)]
-					sw.draw_colored_polygon(_legend_hex(c, 21.0), ground)
-					sw.draw_colored_polygon(_legend_hex(c, 21.0), tints[si - 1])
-					var wl := (70.0 + 28.0 * si) * k
-					var ww := (18.0 + 9.0 * si) * k
-					var dn := Vector2(0.5, 0.866)
-					var sd := Vector2(-dn.y, dn.x)
-					sw.draw_colored_polygon(PackedVector2Array([c + dn * wl, c - dn * wl * 0.6 + sd * ww, c - dn * wl * 0.6 - sd * ww]), wedges[si - 1])
-				"contour", "contour_index":
-					var pts := PackedVector2Array()
-					for i in 13:
-						var t := i / 12.0
-						pts.append(Vector2(lerpf(a.x, b.x, t), c.y + sin(t * 5.0) * 7.0))
-					sw.draw_polyline(pts, Color8(44, 26, 12, 185) if kind == "contour_index" else Color8(52, 34, 18, 105), 2.0 if kind == "contour_index" else 1.0, true)
-					if kind == "contour_index":
-						sw.draw_string(get_theme_default_font(), Vector2(c.x - 9, c.y + 13), "300", HORIZONTAL_ALIGNMENT_LEFT, -1, 10, Color8(42, 26, 12))
+				"band", "band_heavy", "band_steep":
+					# A strip of ground rising to the right: each step shadowed below, lit above.
+					var steps: Array = [0.5] if kind != "band_steep" else [0.2, 0.36, 0.52, 0.68, 0.84]
+					if kind == "band_steep":
+						sw.draw_rect(Rect2(Vector2(a.x + (b.x - a.x) * 0.12, c.y - 15), Vector2((b.x - a.x) * 0.8, 30)), Color(0.13, 0.08, 0.04, 0.22))
+					for st in steps:
+						var x := lerpf(a.x, b.x, float(st))
+						var wd := 7.0 if kind == "band_heavy" else 4.0
+						for i in int(wd):
+							var t := 1.0 - i / wd
+							sw.draw_line(Vector2(x - i - 0.5, c.y - 15), Vector2(x - i - 0.5, c.y + 15), Color(0.13, 0.08, 0.04, (0.62 if kind == "band_heavy" else 0.42) * t), 1.0)
+						for i in 2:
+							sw.draw_line(Vector2(x + i + 0.5, c.y - 15), Vector2(x + i + 0.5, c.y + 15), Color(1.0, 0.98, 0.88, (0.34 if kind == "band_heavy" else 0.24) * (1.0 - i * 0.5)), 1.0)
+					if kind == "band_heavy":
+						sw.draw_string(get_theme_default_font(), Vector2(c.x + 6, c.y + 4), "300", HORIZONTAL_ALIGNMENT_LEFT, -1, 10, Color8(42, 26, 12))
 				"spot":
 					sw.draw_colored_polygon(PackedVector2Array([c + Vector2(-12, -5), c + Vector2(-7.5, 3), c + Vector2(-16.5, 3)]), Color8(42, 26, 12))
 					sw.draw_string(get_theme_default_font(), c + Vector2(-4, 4), "412", HORIZONTAL_ALIGNMENT_LEFT, -1, 11, Color8(42, 26, 12))

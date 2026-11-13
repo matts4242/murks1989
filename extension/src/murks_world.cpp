@@ -59,11 +59,11 @@ void MurksWorld::_bind_methods() {
     ClassDB::bind_method(D_METHOD("build_chunk_mesh", "chunk"), &MurksWorld::build_chunk_mesh);
     ClassDB::bind_method(D_METHOD("build_chunk_detail_mesh", "chunk"), &MurksWorld::build_chunk_detail_mesh);
     ClassDB::bind_method(D_METHOD("build_chunk_grid_mesh", "chunk"), &MurksWorld::build_chunk_grid_mesh);
-    ClassDB::bind_method(D_METHOD("build_chunk_slope_mesh", "chunk"), &MurksWorld::build_chunk_slope_mesh);
     ClassDB::bind_method(D_METHOD("load_contour_bytes", "bytes"), &MurksWorld::load_contour_bytes);
     ClassDB::bind_method(D_METHOD("has_contours"), &MurksWorld::has_contours);
-    ClassDB::bind_method(D_METHOD("build_chunk_contour_mesh", "chunk", "step", "index_step", "part"), &MurksWorld::build_chunk_contour_mesh);
-    ClassDB::bind_method(D_METHOD("get_chunk_contour_labels", "chunk", "index_step"), &MurksWorld::get_chunk_contour_labels);
+    ClassDB::bind_method(D_METHOD("get_height_image"), &MurksWorld::get_height_image);
+    ClassDB::bind_method(D_METHOD("get_height_pixel_size"), &MurksWorld::get_height_pixel_size);
+    ClassDB::bind_method(D_METHOD("get_chunk_contour_labels", "chunk", "step"), &MurksWorld::get_chunk_contour_labels);
     ClassDB::bind_method(D_METHOD("get_chunk_spot_heights", "chunk"), &MurksWorld::get_chunk_spot_heights);
     ClassDB::bind_method(D_METHOD("build_overview_image"), &MurksWorld::build_overview_image);
     ClassDB::bind_method(D_METHOD("get_hex_info", "hex"), &MurksWorld::get_hex_info);
@@ -246,20 +246,7 @@ Ref<ArrayMesh> MurksWorld::build_chunk_detail_mesh(Vector2i chunk) const {
     return mesh;
 }
 
-// Slope tint and downhill wedges for the topographic mode; drawn over the chunk mesh.
-Ref<ArrayMesh> MurksWorld::build_chunk_slope_mesh(Vector2i chunk) const {
-    Ref<ArrayMesh> mesh;
-    mesh.instantiate();
-    if (!generated_ || chunk.x < 0 || chunk.y < 0 || chunk.x >= world_.map.chunks_x() ||
-        chunk.y >= world_.map.chunks_y())
-        return mesh;
-    murks::ChunkGeometry g;
-    murks::build_chunk_slope(world_.map, chunk.x, chunk.y, g);
-    fill_triangle_mesh(g, mesh);
-    return mesh;
-}
-
-// The contour file must have been baked for this map: same number of chunks.
+// The relief file must have been baked for this map: same number of chunks.
 bool MurksWorld::load_contour_bytes(const PackedByteArray &bytes) {
     if (!generated_ || !contours_.load(bytes.ptr(), (size_t)bytes.size())) {
         contours_.clear();
@@ -276,39 +263,28 @@ bool MurksWorld::has_contours() const {
     return contours_.loaded();
 }
 
-// Contour lines of a chunk as a line mesh. part: 1 intermediate lines, 2 index lines, 0 both.
-Ref<ArrayMesh> MurksWorld::build_chunk_contour_mesh(Vector2i chunk, int step, int index_step, int part) const {
-    Ref<ArrayMesh> mesh;
-    mesh.instantiate();
-    std::vector<float> xy;
-    std::vector<uint32_t> rgba;
-    contours_.build_lines(chunk.x, chunk.y, step, index_step, part, xy, rgba);
-    const int64_t nv = (int64_t)xy.size() / 2;
-    if (nv == 0) return mesh;
-    PackedVector2Array verts;
-    verts.resize(nv);
-    Vector2 *vp = verts.ptrw();
-    PackedColorArray cols;
-    cols.resize(nv);
-    Color *cp = cols.ptrw();
-    for (int64_t i = 0; i < nv; ++i) {
-        vp[i] = Vector2(xy[i * 2], xy[i * 2 + 1]);
-        uint32_t c = rgba[i];
-        cp[i] = Color((c & 255) / 255.0f, ((c >> 8) & 255) / 255.0f, ((c >> 16) & 255) / 255.0f, ((c >> 24) & 255) / 255.0f);
-    }
-    Array arrays;
-    arrays.resize(Mesh::ARRAY_MAX);
-    arrays[Mesh::ARRAY_VERTEX] = verts;
-    arrays[Mesh::ARRAY_COLOR] = cols;
-    mesh->add_surface_from_arrays(Mesh::PRIMITIVE_LINES, arrays);
-    return mesh;
+// The height raster as a 16-bit float image (metres), for the shader that draws the
+// height bands. Empty if no relief file is loaded.
+Ref<Image> MurksWorld::get_height_image() const {
+    Ref<Image> img;
+    if (!contours_.loaded()) return img;
+    std::vector<uint16_t> half;
+    contours_.heights_half(half);
+    PackedByteArray bytes;
+    bytes.resize((int64_t)half.size() * 2);
+    std::memcpy(bytes.ptrw(), half.data(), half.size() * 2);
+    return Image::create_from_data(contours_.raster_w(), contours_.raster_h(), false, Image::FORMAT_RH, bytes);
 }
 
-// [x, y, angle, height] per label, in world metres: one per index contour long enough to carry it.
-PackedFloat32Array MurksWorld::get_chunk_contour_labels(Vector2i chunk, int index_step) const {
+float MurksWorld::get_height_pixel_size() const {
+    return contours_.raster_pixel();
+}
+
+// [x, y, angle, height] per height figure, in world metres, for contours that are multiples of `step`.
+PackedFloat32Array MurksWorld::get_chunk_contour_labels(Vector2i chunk, int step) const {
     PackedFloat32Array out;
     std::vector<murks::ContourLabel> labels;
-    contours_.labels(chunk.x, chunk.y, index_step, labels);
+    contours_.labels(chunk.x, chunk.y, step, labels);
     double ox, oy;
     murks::chunk_origin(chunk.x, chunk.y, ox, oy);
     out.resize((int64_t)labels.size() * 4);

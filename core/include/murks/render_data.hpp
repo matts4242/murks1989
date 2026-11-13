@@ -40,9 +40,6 @@ double hex_slope(const Map &map, int c, int r, int &down_dir);
 // Slope class of a grade in percent: 0 level (< 3), 1 gentle (< 7), 2 moderate (< 15),
 // 3 steep (< 30), 4 very steep.
 int slope_class(double percent);
-// Slope layer for the topographic mode: every hex tinted by its slope class (level ground
-// stays clear) with a wedge pointing downhill, as coloured triangles with alpha.
-void build_chunk_slope(const Map &map, int cx, int cy, ChunkGeometry &out);
 // One pixel per hex, rows top to bottom, RGBA8.
 void build_overview_rgba(const Map &map, std::vector<uint8_t> &rgba);
 

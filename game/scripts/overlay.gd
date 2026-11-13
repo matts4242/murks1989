@@ -44,7 +44,7 @@ func _draw() -> void:
 	var view := Rect2(Vector2(-60, -60), size + Vector2(120, 120))
 	if main.show_zones:
 		_draw_zones(xf, zoom)
-	if main.map_view.contour_root.visible:
+	if main.map_view.relief.visible and not main.map_view.relief_labels.is_empty():
 		_draw_topo(xf, zoom, view)
 	_draw_towns(xf, zoom, view)
 	if main.show_los:
@@ -66,8 +66,8 @@ func _draw() -> void:
 
 
 # --- Topographic mode: heights -----------------------------------------------------------
-# Height figures along the index contours and spot heights on summits, for the chunks whose
-# contour lines the map view is showing. Figures that would crowd each other are left out.
+# Height figures along the 100 m steps (500 m further out) and spot heights on summits,
+# for the chunks in view. Figures that would crowd each other are left out.
 
 const TOPO_INK := Color("#2a1a0c")
 const TOPO_HALO := Color(0.95, 0.94, 0.86, 0.8)
@@ -78,7 +78,7 @@ func _draw_topo(xf: Transform2D, zoom: float, view: Rect2) -> void:
 	var cell := 86.0
 	var fs := 11 if px < 30.0 else 12
 	# Summits first: they are the fewer and the more useful.
-	for entry in main.map_view.contours.values():
+	for entry in main.map_view.relief_labels.values():
 		var spots: PackedFloat32Array = entry["spots"]
 		for i in range(0, spots.size(), 3):
 			var p: Vector2 = xf * Vector2(spots[i], spots[i + 1])
@@ -94,7 +94,7 @@ func _draw_topo(xf: Transform2D, zoom: float, view: Rect2) -> void:
 			draw_string(font, p + Vector2(7, 4), text, HORIZONTAL_ALIGNMENT_LEFT, -1, fs + 1, TOPO_INK)
 	if px < 9.0:
 		return
-	for entry in main.map_view.contours.values():
+	for entry in main.map_view.relief_labels.values():
 		var labels: PackedFloat32Array = entry["labels"]
 		for i in range(0, labels.size(), 4):
 			var p: Vector2 = xf * Vector2(labels[i], labels[i + 1])
