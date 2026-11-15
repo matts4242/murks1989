@@ -2,11 +2,14 @@
 // own. Going per hex equals the mean of move_cost - the pathfinder's step cost - for real
 // units of each mobility stepping in from each land neighbour; line of sight from a unit's
 // hex equals the spotting model's own visible_hexes; the tints and keys exist for every
-// mode. Exit code 0 = all passed.
+// mode. The planning tools (MRK-26): the ruler's route estimate is the route and time a unit
+// ordered there takes; the profile's sight line is line_of_sight; grid references and bearings;
+// markings survive save/load and the simulation ignores them. Exit code 0 = all passed.
 // Usage: planning_test
 #include "murks/planning.hpp"
 #include "murks/render_data.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <set>
@@ -139,6 +142,145 @@ int main() {
     std::vector<PlanKey> key;
     plan_key(PLAN_SIGHT, key);
     check(key.size() >= 3, "the line-of-sight mode has a key");
+
+    // --- Planning tools (MRK-26) ---
+
+    // 5. sight_block is the line-of-sight rule: clear exactly when line_of_sight is true, and a
+    //    blocking hex really stands above the sight line.
+    {
+        int pairs = 0, bad5 = 0, blocked = 0;
+        for (int i = 0; i < 4000; ++i) {
+            HexCoord a = m.coord_of((int)(((uint64_t)i * 2654435761u) % (uint64_t)m.hex_count()));
+            HexCoord b{a.col + (i * 7) % 49 - 24, a.row + (i * 13) % 49 - 24};
+            if (!m.in_bounds(b)) continue;
+            ++pairs;
+            const int blk = w.sight_block(a, b, 3.0f, 2.5f);
+            if ((blk == -1) != w.line_of_sight(a, b, 3.0f, 2.5f)) ++bad5;
+            if (blk > 0) {
+                ++blocked;
+                Profile pf;
+                profile_line(w, a, b, 3.0f, 2.5f, pf);
+                const ProfilePoint &s0 = pf.pts.front(), &s1 = pf.pts.back(), &h = pf.pts[blk];
+                const float n = (float)(pf.pts.size() - 1);
+                const float ray = s0.ground + 3.0f + (s1.ground + 2.5f - s0.ground - 3.0f) * (blk / n);
+                if (pf.block != blk || h.ground + h.cover <= ray) ++bad5;
+            }
+        }
+        char msg[160];
+        std::snprintf(msg, sizeof msg, "the profile's sight line is line_of_sight (%d lines, %d blocked)", pairs, blocked);
+        check(pairs > 1000 && blocked > 0 && bad5 == 0, msg);
+    }
+
+    // 6. Route estimate = what an order does: a tank ordered from A to B takes the estimated
+    //    path, and drives it at full readiness in the estimated time.
+    {
+        World v;
+        v.generate(1989, 24, 22);
+        v.setup_scenario(0);
+        int tank = -1;
+        for (const Unit &u : v.units)
+            if (u.type == U_TANK && u.side == SIDE_PLAYER && u.group < 0) {
+                tank = u.id;
+                break;
+            }
+        check(tank >= 0, "a tank platoon outside any team");
+        const HexCoord a = v.units[tank].pos;
+        HexCoord b{-1, -1};
+        for (int d = 30; d < 60 && b.col < 0; ++d) {
+            HexCoord c{a.col + d, a.row + d / 3};
+            if (v.map.in_bounds(c) && v.map.at(c).terrain != T_WATER && v.reachable(a, c)) b = c;
+        }
+        RouteEstimate est = v.route_estimate(a, b, M_TRACKED, MV_HASTY);
+        int sum_ok = est.found ? 1 : 0;
+        {
+            double sum = 0;
+            int from = v.map.index(a);
+            for (int idx : est.path) {
+                sum += v.move_cost(v.units[tank], from, idx);
+                from = idx;
+            }
+            if (std::fabs(sum - est.minutes) > 1e-3) sum_ok = 0;
+        }
+        check(sum_ok == 1, "estimated minutes are the sum of the unit's move_cost along the route");
+        const int delay = v.order_move(tank, b, MV_HASTY);
+        int64_t started = -1, arrived = -1;
+        bool same_path = false;
+        for (int t = 0; t < 2000 && arrived < 0; ++t) {
+            v.units[tank].readiness = 100.0f; // full readiness, as the estimate
+            v.units[tank].fuel = std::max(v.units[tank].fuel, 100.0f);
+            v.tick();
+            if (started < 0 && v.units[tank].moving()) {
+                started = v.time_min;
+                same_path = v.units[tank].path == est.path;
+            }
+            if (started >= 0 && !v.units[tank].moving()) arrived = v.time_min;
+        }
+        const double took = (double)(arrived - started) + 1.0; // the first step is driven in the tick it starts
+        char msg[200];
+        std::snprintf(msg, sizeof msg, "a tank ordered there takes the estimated route and time (%.1f km, est. %.1f min, drove %.0f min, delay %d)",
+                      est.km, est.minutes, took, delay);
+        check(same_path && arrived > 0 && std::fabs(took - est.minutes) <= 2.0 + 0.02 * est.minutes, msg);
+        RouteEstimate foot = v.route_estimate(a, b, M_FOOT, MV_HASTY);
+        check(foot.found && foot.minutes > est.minutes, "on foot is slower than tracked over the same ground");
+        int water = -1;
+        for (int idx = 0; idx < v.map.hex_count() && water < 0; ++idx)
+            if (v.map.at_index(idx).terrain == T_WATER) water = idx;
+        check(!v.route_estimate(a, v.map.coord_of(water), M_TRACKED, MV_HASTY).found, "no route estimate into water");
+    }
+
+    // 7. Grid references and bearings.
+    {
+        Map g; // only the georeference matters here
+        g.epsg = 3035;
+        g.geo_origin_e = 4721000.0;
+        g.geo_origin_n = 3268900.0;
+        check(grid_ref(g, 437.0, 590.0) == "47/32 214 683", "grid reference 47/32 214 683 (100 km square, then 100 m)");
+        check(std::fabs(grid_bearing(0, 0, 0, -1) - 0) < 1e-9 && std::fabs(grid_bearing(0, 0, 1, 0) - 90) < 1e-9 &&
+                  std::fabs(grid_bearing(0, 0, 0, 1) - 180) < 1e-9 && std::fabs(grid_bearing(0, 0, -1, 0) - 270) < 1e-9,
+              "grid bearings: north 0, east 90, south 180, west 270");
+    }
+
+    // 8. Markings: kept through save/load, refused when malformed, ignored by the simulation.
+    {
+        World v;
+        v.generate(1989, 24, 22);
+        v.setup_scenario(0);
+        World plain;
+        plain.generate(1989, 24, 22);
+        plain.setup_scenario(0);
+        Marking obj{MK_OBJECTIVE, "OBJ WOLF", {20000, 30000}};
+        Marking pl{MK_PHASE_LINE, "PL RED", {10000, 10000, 15000, 12000, 21000, 11000}};
+        Marking bad{MK_PHASE_LINE, "PL ONE POINT", {10000, 10000}};
+        check(v.add_marking(obj) == 0 && v.add_marking(pl) == 1 && v.add_marking(bad) == -1 &&
+                  v.add_marking(Marking{MK_NOTE, "off the map", {-5, 10}}) == -1,
+              "markings are added; a one-point phase line and a point off the map are refused");
+        check(v.rename_marking(0, "OBJ BEAR") && v.markings[0].name == "OBJ BEAR", "a marking can be renamed");
+        std::vector<uint8_t> blob = v.save_state();
+        World r;
+        r.generate(1989, 24, 22);
+        r.setup_scenario(0);
+        std::string err;
+        const bool loaded = r.load_state(blob.data(), blob.size(), &err);
+        check(loaded && r.markings.size() == 2 && r.markings[1].name == "PL RED" && r.markings[1].xy == pl.xy &&
+                  r.markings[0].kind == MK_OBJECTIVE,
+              "markings survive save and load");
+        std::vector<uint8_t> old = blob;
+        old[7] = '7';
+        check(!r.load_state(old.data(), old.size(), &err) && err.find("older") != std::string::npos,
+              "a save from before the markings is refused as older");
+        for (int t = 0; t < 600; ++t) {
+            v.tick();
+            plain.tick();
+        }
+        std::vector<uint8_t> a = v.save_state(), b = plain.save_state();
+        // The same run with and without markings: everything up to the markings is identical.
+        size_t marks_bytes = 4;
+        for (const Marking &mk : v.markings) marks_bytes += 1 + 4 + mk.name.size() + 4 + 4 * mk.xy.size();
+        check(a.size() == b.size() - 4 + marks_bytes &&
+                  std::equal(b.begin(), b.end() - 4, a.begin()),
+              "the simulation runs the same with markings as without (600 min)");
+        check(v.remove_marking(0) && v.markings.size() == 1 && !v.remove_marking(5), "a marking can be deleted");
+    }
 
     std::printf(failures ? "planning_test: %d FAILED\n" : "planning_test: all passed\n", failures);
     return failures ? 1 : 0;

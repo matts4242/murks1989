@@ -1457,19 +1457,86 @@ float World::step_minutes(int mob, int move_mode, int from_idx, int to_idx, bool
 
 bool World::line_of_sight(HexCoord a, HexCoord b, float eye, float target) const {
     ++los_checks_;
+    return sight_block(a, b, eye, target) == -1;
+}
+
+int World::sight_block(HexCoord a, HexCoord b, float eye, float target) const {
     thread_local std::vector<HexCoord> line;
     hex_line(a, b, line);
     const int n = (int)line.size() - 1;
-    if (n <= 1) return true;
+    if (n <= 1) return -1;
     auto ground = [&](HexCoord h) { return (float)std::max<int>(0, map.at(h).elev); };
     float ea = ground(a) + eye, eb = ground(b) + target;
     for (int i = 1; i < n; ++i) {
-        if (!map.in_bounds(line[i])) return false;
+        if (!map.in_bounds(line[i])) return -2;
         const Hex &h = map.at(line[i]);
         float obstacle = std::max<int>(0, h.elev) + h.cover;
         float ray = ea + (eb - ea) * ((float)i / n);
-        if (obstacle > ray) return false;
+        if (obstacle > ray) return i;
     }
+    return -1;
+}
+
+RouteEstimate World::route_estimate(HexCoord a, HexCoord b, int mobility, int move_mode) {
+    RouteEstimate r;
+    if (!map.in_bounds(a) || !map.in_bounds(b) || mobility < 0 || mobility > M_FOOT) return r;
+    if (a == b) {
+        r.found = true;
+        return r;
+    }
+    if (map.at(b).terrain == T_WATER || !reachable(a, b)) return r;
+    // As start_path: the same minimum step for the heuristic, the same weight and limit.
+    float min_step = kRoadCost[mobility] * 0.8f * (move_mode == MV_ROAD ? 0.85f : 1.0f);
+    PathResult pr = pathfinder().find(
+        a, b, [&](int f, int t) { return step_minutes(mobility, move_mode, f, t, road_step(f, t), true); }, min_step,
+        r.path, 400000, 1.3f);
+    if (!pr.found || r.path.empty()) {
+        r.path.clear();
+        return r;
+    }
+    r.found = true;
+    int from = map.index(a);
+    for (int idx : r.path) {
+        const bool road = road_step(from, idx);
+        r.minutes += step_minutes(mobility, move_mode, from, idx, road); // driven, not planned, cost
+        Vec2 p = hex_center(map.coord_of(from)), q = hex_center(map.coord_of(idx));
+        const float km = (float)(std::hypot(q.x - p.x, q.y - p.y) / 1000.0);
+        r.km += km;
+        if (road) r.road_km += km;
+        from = idx;
+    }
+    return r;
+}
+
+const char *mark_kind_name(int kind) {
+    static const char *n[MK_COUNT] = {"Objective", "Phase line", "Target reference point", "Note"};
+    return kind >= 0 && kind < MK_COUNT ? n[kind] : "?";
+}
+
+static bool marking_ok(const Map &map, const Marking &m) {
+    if (m.kind >= MK_COUNT || m.name.size() > (size_t)MAX_MARK_NAME || m.xy.size() % 2 != 0) return false;
+    const int pts = (int)m.xy.size() / 2;
+    if (pts < 1 || pts > MAX_MARK_POINTS || (m.kind == MK_PHASE_LINE ? pts < 2 : pts != 1)) return false;
+    for (size_t i = 0; i < m.xy.size(); i += 2)
+        if (m.xy[i] < 0 || m.xy[i + 1] < 0 || m.xy[i] > map.width_m() || m.xy[i + 1] > map.height_m()) return false;
+    return true;
+}
+
+int World::add_marking(const Marking &m) {
+    if ((int)markings.size() >= MAX_MARKINGS || !marking_ok(map, m)) return -1;
+    markings.push_back(m);
+    return (int)markings.size() - 1;
+}
+
+bool World::rename_marking(int i, const std::string &name) {
+    if (i < 0 || i >= (int)markings.size() || name.size() > (size_t)MAX_MARK_NAME) return false;
+    markings[i].name = name;
+    return true;
+}
+
+bool World::remove_marking(int i) {
+    if (i < 0 || i >= (int)markings.size()) return false;
+    markings.erase(markings.begin() + i);
     return true;
 }
 
@@ -1957,7 +2024,7 @@ void World::start_path(Unit &u, HexCoord target, OrderKind kind, bool announce) 
             if (idx != tgt_idx) closed.push_back(idx);
         }
     }
-    PathResult pr = pf_.find(
+    PathResult pr = pathfinder().find(
         u.pos, target,
         [&](int a, int b) {
             for (int c : closed)
@@ -3164,7 +3231,7 @@ bool World::player_in_contact() const {
 // ------------------------------------------------------------------------------------
 
 namespace {
-constexpr char kSaveMagic[8] = {'M', 'U', 'R', 'K', 'S', 'S', 'V', '7'};
+constexpr char kSaveMagic[8] = {'M', 'U', 'R', 'K', 'S', 'S', 'V', '8'};
 
 struct SaveWriter {
     std::vector<uint8_t> b;
@@ -3309,6 +3376,12 @@ std::vector<uint8_t> World::save_state() const {
     for (const auto &h : holdings) io_holding(w, const_cast<Holding &>(h));
     w.pod((uint32_t)routes.size());
     for (const auto &r : routes) io_route(w, const_cast<SupplyRoute &>(r));
+    w.pod((uint32_t)markings.size());
+    for (const auto &m : markings) {
+        w.pod(m.kind);
+        w.str(m.name);
+        w.ints(m.xy);
+    }
     return w.b;
 }
 
@@ -3355,7 +3428,15 @@ bool World::load_state(const uint8_t *data, size_t size, std::string *error) {
     for (auto &h : hs) io_holding(r, h);
     std::vector<SupplyRoute> rts(r.count(4096));
     for (auto &x : rts) io_route(r, x);
+    std::vector<Marking> mks(r.count(MAX_MARKINGS));
+    for (auto &m : mks) {
+        r.pod(m.kind);
+        r.str(m.name);
+        r.ints(m.xy);
+    }
     if (!r.ok) return fail("save is truncated or corrupt");
+    for (const auto &m : mks)
+        if (!marking_ok(map, m)) return fail("save is corrupt");
     for (const auto &h : hs)
         if (h.settlement < 0 || h.settlement >= (int)map.settlements.size() || !map.in_bounds(h.pos) ||
             h.kind >= HK_COUNT || h.militia_unit >= (int)us.size())
@@ -3408,6 +3489,7 @@ bool World::load_state(const uint8_t *data, size_t size, std::string *error) {
     groups = std::move(gs);
     holdings = std::move(hs);
     routes = std::move(rts);
+    markings = std::move(mks);
     events_.clear();
     rebuild_buckets();
     // As of the last hourly logistics pass, so a load doesn't announce the acting commander again.

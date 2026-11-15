@@ -232,6 +232,30 @@ struct SupplyRoute {
     int64_t suspended_at = -1;   // the column was lost then (-1 never)
 };
 
+// Player map markings (work board MRK-26): objectives, phase lines, target reference points and
+// notes, drawn on the map and saved with the game. The simulation never reads them.
+enum MarkKind : uint8_t { MK_OBJECTIVE = 0, MK_PHASE_LINE, MK_TRP, MK_NOTE, MK_COUNT };
+const char *mark_kind_name(int kind);
+struct Marking {
+    uint8_t kind = MK_NOTE;
+    std::string name;       // "OBJ WOLF", "PL RED", "TRP 01", or the note's text
+    std::vector<int> xy;    // world metres, x,y pairs: one point, or 2+ for a phase line
+};
+constexpr int MAX_MARKINGS = 500;
+constexpr int MAX_MARK_POINTS = 64;
+constexpr int MAX_MARK_NAME = 80; // bytes
+
+// A route estimate for planning (the ruler): the best route from a to b for a mobility class
+// and move mode, found the way orders find routes (same step costs, same search; hexes held
+// by the enemy are ignored), and its travel time at full readiness.
+struct RouteEstimate {
+    bool found = false;
+    float minutes = 0;     // at full readiness (a tired unit is up to 40% slower)
+    float km = 0;          // along the route, hex centre to hex centre
+    float road_km = 0;     // of which on roads
+    std::vector<int> path; // hex indices after the start, up to the end
+};
+
 constexpr int CAPTURE_MIN = 120;          // minutes one side alone in a place before it changes hands (estimate)
 constexpr int MILITIA_TRAIN_MIN = 2 * 1440; // per squad of 10 (estimate)
 constexpr int MILITIA_SQUAD_MEN = 10;
@@ -454,6 +478,16 @@ public:
     float step_minutes(int mobility, int move_mode, int from_idx, int to_idx, bool road, bool planning = false) const;
     bool road_step(int from_idx, int to_idx) const; // both hexes joined by a road edge
     bool line_of_sight(HexCoord a, HexCoord b, float eye, float target) const;
+    // The hex that blocks that sight line: its index along hex_line(a, b) (1 .. n-1), -1 if the
+    // line is clear, -2 if it leaves the map. line_of_sight is sight_block(...) == -1.
+    int sight_block(HexCoord a, HexCoord b, float eye, float target) const;
+    // Planning (MRK-26): see RouteEstimate. Uses the order pathfinder's scratch space, so it is
+    // not const, but it changes no simulation state.
+    RouteEstimate route_estimate(HexCoord a, HexCoord b, int mobility, int move_mode);
+    // Markings (MRK-26). add_marking: the index, or -1 if the kind, points or count are bad.
+    int add_marking(const Marking &m);
+    bool rename_marking(int i, const std::string &name);
+    bool remove_marking(int i);
     int hq_of(int side) const;
     // Losing an HQ: the trains keep running, but someone has to take them over. After a
     // handover of HANDOVER_MIN minutes the senior surviving platoon (first in the order of
@@ -542,6 +576,7 @@ public:
     std::vector<Formation> formations;
     std::vector<Holding> holdings;
     std::vector<SupplyRoute> routes;
+    std::vector<Marking> markings; // the player's own; never read by the simulation
     CompanyStock stock;
     int64_t time_min = 0; // minutes since 1989-04-14 00:00
     uint32_t seed = 1989;
@@ -592,6 +627,13 @@ private:
     template <typename F> void for_units_near(HexCoord h, int radius, F &&fn) const;
 
     Pathfinder pf_;
+    // The pathfinder, attached to this world's map. A copied World's pathfinder still points at
+    // the map it was copied from, so it is re-attached on first use (searches do not depend on
+    // the scratch state, so results are unchanged).
+    Pathfinder &pathfinder() {
+        if (pf_.attached() != &map) pf_.attach(&map);
+        return pf_;
+    }
     std::vector<int32_t> region_; // land region per hex, -1 for water
     Rng rng_;
     std::vector<Event> events_;

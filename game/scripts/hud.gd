@@ -51,7 +51,8 @@ const VIEW_TOGGLES := [["Group", "Company grouping on the theater map", KEY_O],
 	["Direct command", "Direct command: who takes orders from whom", KEY_T],
 	["Fire support", "Fire support net and gun ranges", KEY_I],
 	["Supply", "Supply routes and convoys", KEY_F3],
-	["Grid", "Hex grid", KEY_G], ["Detail", "Painted terrain textures (off: flat colours)", KEY_F6],
+	["Grid", "Hex grid", KEY_G], ["KmGrid", "1 km map grid and grid references", KEY_G | KEY_MASK_SHIFT],
+	["Detail", "Painted terrain textures (off: flat colours)", KEY_F6],
 	["Edges", "Natural terrain edges (off: crisp hex borders)", 0],
 	["Vehicles", "Vehicles on counters (off: NATO symbols)", KEY_F7],
 	["Topo", "Topographic map: contour lines and heights", KEY_F8], ["Sight", "Line of sight of the selected unit", KEY_V],
@@ -90,6 +91,27 @@ var oob_sig := ""                   # shape of the tree last built; rebuilt when
 var oob_folded := {}                # row key -> folded by the player
 var oob_sel_seen: Array = []        # selection last scrolled to
 const PLAN_EYES := [[2.0, "2 m: on foot"], [3.0, "3 m: vehicle (as the rules)"], [10.0, "10 m: rooftop"], [30.0, "30 m: mast or tower"]]
+# Ruler and elevation profile panel (MRK-26)
+var ruler_panel: PanelContainer
+var ruler_title: Label
+var ruler_line: Label
+var ruler_refs: Label
+var ruler_travel: VBoxContainer
+var ruler_mode_pick: OptionButton
+var ruler_rows: Array[Button] = []
+var ruler_prof_row: HBoxContainer
+var ruler_src_line: Button
+var ruler_src_route: Button
+var ruler_eye_pick: OptionButton
+var ruler_chart: ProfileChart
+var ruler_summary: Label
+# Name / confirm dialog
+var ask_panel: PanelContainer
+var ask_title: Label
+var ask_prompt: Label
+var ask_edit: LineEdit
+var ask_cb: Callable
+var ask_has_text := false
 var speed_index := 0
 
 # Unit panel
@@ -162,6 +184,7 @@ func _ready() -> void:
 	_build_log()
 	_build_plan_panel()
 	_build_oob_panel()
+	_build_ruler_panel()
 	_build_status()
 	_build_banners()
 	_build_end_screen()
@@ -172,6 +195,7 @@ func _ready() -> void:
 	legend_panel = _build_dialog("Map legend", _legend_body())
 	order_popup = _new_popup()
 	add_child(order_popup)
+	_build_ask()
 	_build_loading()
 
 
@@ -416,6 +440,28 @@ func _fill_time(pm: PopupMenu) -> void:
 	_add(pm, "Auto-pause on contacts and losses", "toggle", "Auto-pause", KEY_U, true, 1 if toggle_state.get("Auto-pause", false) else 0)
 
 
+## Planning tools (MRK-26): ruler and profile, the 1 km grid, markings.
+func _fill_tools(pm: PopupMenu) -> void:
+	_reset(pm)
+	var t: Node = main.tools
+	pm.add_separator("Measure")
+	_add(pm, "Ruler", "menu", "tool_ruler", KEY_R | KEY_MASK_SHIFT, true, -1,
+		"Click the start and the end, or Ctrl+drag: distance, grid bearing, travel time, elevation profile.")
+	_add(pm, "Elevation profile of the selected unit's route", "menu", "tool_route_profile", 0, bool(ord["has_own"]), -1,
+		"The ground along the route a unit of yours is moving on.")
+	_add(pm, "Clear the ruler", "menu", "tool_clear_ruler", 0, t.ruler_on or t.profile_src == "unit")
+	pm.add_separator("Map")
+	_add(pm, "1 km grid and grid references", "toggle", "KmGrid", KEY_G | KEY_MASK_SHIFT, true, 1 if toggle_state.get("KmGrid", false) else 0)
+	pm.add_separator("Markings")
+	var keys := [KEY_O, KEY_P, KEY_T, KEY_N]
+	var tips := ["A named objective at a point.", "A named line: click its points, right-click or Enter to finish.",
+		"A numbered target reference point (TRP 01, 02, ...).", "A short note on the map."]
+	for k in MapTools.MARK_NAMES.size():
+		_add(pm, String(MapTools.MARK_NAMES[k]), "menu", "mark_%d" % k, keys[k] | KEY_MASK_SHIFT, true, -1, tips[k])
+	_add(pm, "Clear all markings", "menu", "marks_clear", 0, not (t.marks as Array).is_empty(), -1,
+		"Right-click a single marking to rename or delete it.")
+
+
 func _fill_help(pm: PopupMenu) -> void:
 	_reset(pm)
 	_add(pm, "Controls", "menu", "help", KEY_F1)
@@ -439,12 +485,16 @@ func fill_orders(pm: PopupMenu, at_hex: bool, ctx: Dictionary) -> void:
 			if ctx.has("info"):
 				_note(pm, String(ctx["info"]))
 			_fill_place(pm, ctx)
+			_fill_marking(pm, ctx)
 			_add(pm, "Centre the map here", "cmd", "centre_here")
 			_add(pm, "Look from here (line of sight)", "cmd", "look_here")
+			_fill_map_tools(pm)
 			_add(pm, "Whole map", "menu", "whole_map", KEY_M)
 			pm.add_separator()
 		_note(pm, "Select one of your units to give orders")
 		return
+	if at_hex:
+		_fill_marking(pm, ctx)
 	if at_hex and ctx.has("holding"):
 		_fill_place(pm, ctx)
 	if at_hex:
@@ -497,9 +547,32 @@ func fill_orders(pm: PopupMenu, at_hex: bool, ctx: Dictionary) -> void:
 		pm.add_separator()
 		_add(pm, "Centre the map here", "cmd", "centre_here")
 		_add(pm, "Look from here (line of sight)", "cmd", "look_here")
+		_fill_map_tools(pm)
 	if String(ord["delay"]) != "":
 		pm.add_separator()
 		_note(pm, "Orders arrive in %s (command delay)" % ord["delay"])
+
+
+## The marking under the cursor (MRK-26): rename or delete it.
+func _fill_marking(pm: PopupMenu, ctx: Dictionary) -> void:
+	if not ctx.has("marking"):
+		return
+	var mk: Dictionary = ctx["marking"]
+	var i := int(mk["i"])
+	pm.add_separator("%s: %s" % [MapTools.MARK_NAMES[int(mk["kind"])], String(mk["name"])])
+	_add(pm, "Rename", "menu", "mark_rename_%d" % i)
+	_add(pm, "Delete", "menu", "mark_delete_%d" % i)
+
+
+## Ruler and markings at the hex under the cursor (MRK-26).
+func _fill_map_tools(pm: PopupMenu) -> void:
+	_add(pm, "Measure from here", "menu", "measure_here", 0, true, -1, "The ruler starts here: click the end.")
+	var mark := _submenu(pm, "Mark here")
+	for k in MapTools.MARK_NAMES.size():
+		var label := String(MapTools.MARK_NAMES[k])
+		if k == MapTools.MK_PHASE:
+			label = "Phase line from here"
+		_add(mark, label, "menu", "mark_here_%d" % k)
 
 
 ## The place under the cursor: select it, and for the company's own places raise militia,
@@ -619,7 +692,8 @@ func _build_top_bar() -> void:
 	row.add_theme_constant_override("separation", 6)
 	bar.add_child(row)
 
-	var menus := [["Game", _fill_game], ["View", _fill_view], ["Time", _fill_time], ["Orders", _fill_orders_bar], ["Help", _fill_help]]
+	var menus := [["Game", _fill_game], ["View", _fill_view], ["Time", _fill_time], ["Orders", _fill_orders_bar],
+		["Tools", _fill_tools], ["Help", _fill_help]]
 	for m in menus:
 		var mb := MenuButton.new()
 		mb.text = m[0]
@@ -1567,6 +1641,191 @@ func show_plan(mode: int, names: Array, key: Array, info := "", eye_index := 1) 
 	plan_info.visible = info != ""
 
 
+# --- Ruler and elevation profile (MRK-26) ----------------------------------------------
+
+func _build_ruler_panel() -> void:
+	ruler_panel = PanelContainer.new()
+	ruler_panel.add_theme_stylebox_override("panel", _panel_style(0.9))
+	ruler_panel.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
+	_offsets(ruler_panel, 1044, -8, 1490, -8)
+	ruler_panel.grow_vertical = Control.GROW_DIRECTION_BEGIN
+	ruler_panel.visible = false
+	add_child(ruler_panel)
+	var col := VBoxContainer.new()
+	col.add_theme_constant_override("separation", 4)
+	ruler_panel.add_child(col)
+	var head := HBoxContainer.new()
+	col.add_child(head)
+	ruler_title = _label("Ruler", 14, AMBER)
+	ruler_title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	head.add_child(ruler_title)
+	var close := Button.new()
+	close.text = "Clear"
+	close.tooltip_text = "Take the ruler off the map (Esc)"
+	close.pressed.connect(func() -> void: menu_action.emit("tool_clear_ruler"))
+	head.add_child(close)
+	ruler_line = _label("", 14)
+	col.add_child(ruler_line)
+	ruler_refs = _label("", 12, MUTED)
+	col.add_child(ruler_refs)
+	ruler_travel = VBoxContainer.new()
+	ruler_travel.add_theme_constant_override("separation", 2)
+	col.add_child(ruler_travel)
+	var mode_row := HBoxContainer.new()
+	ruler_travel.add_child(mode_row)
+	var ml := _label("Travel time, full readiness:", 13, MUTED)
+	ml.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	mode_row.add_child(ml)
+	ruler_mode_pick = OptionButton.new()
+	for m in MapTools.MOVE_MODES:
+		ruler_mode_pick.add_item(String(m[0]))
+	ruler_mode_pick.tooltip_text = "Move mode for the route search and times (as orders use it)."
+	ruler_mode_pick.item_selected.connect(func(i: int) -> void: menu_action.emit("ruler_mode_%d" % i))
+	mode_row.add_child(ruler_mode_pick)
+	var group := ButtonGroup.new()
+	for i in MapTools.MOBILITY.size():
+		var b := Button.new()
+		b.toggle_mode = true
+		b.button_group = group
+		b.alignment = HORIZONTAL_ALIGNMENT_LEFT
+		b.add_theme_font_size_override("font_size", 13)
+		b.tooltip_text = "Show this route on the map (dotted). The route a unit of this kind would take, found as orders find it; a tired unit is up to 40% slower."
+		b.pressed.connect(func() -> void: menu_action.emit("ruler_mob_%d" % i))
+		ruler_travel.add_child(b)
+		ruler_rows.append(b)
+	ruler_prof_row = HBoxContainer.new()
+	col.add_child(ruler_prof_row)
+	ruler_prof_row.add_child(_label("Profile", 13, MUTED))
+	var sg := ButtonGroup.new()
+	ruler_src_line = _small_button("Straight line", true, "Along the ruler, with the line of sight from its start to its end.")
+	ruler_src_line.button_group = sg
+	ruler_src_line.pressed.connect(func() -> void: menu_action.emit("profile_line"))
+	ruler_prof_row.add_child(ruler_src_line)
+	ruler_src_route = _small_button("Along the route", true, "Along the route shown on the map.")
+	ruler_src_route.button_group = sg
+	ruler_src_route.pressed.connect(func() -> void: menu_action.emit("profile_route"))
+	ruler_prof_row.add_child(ruler_src_route)
+	ruler_eye_pick = OptionButton.new()
+	for e in PLAN_EYES:
+		ruler_eye_pick.add_item("eye " + String(e[1]).split(":")[0])
+	ruler_eye_pick.tooltip_text = "Eye height at the start of the sight line (the planning map's line of sight uses the same)."
+	ruler_eye_pick.item_selected.connect(func(i: int) -> void: menu_action.emit("sight_eye_%d" % i))
+	ruler_prof_row.add_child(ruler_eye_pick)
+	ruler_chart = ProfileChart.new()
+	col.add_child(ruler_chart)
+	ruler_summary = _label("", 12)
+	ruler_summary.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	ruler_summary.custom_minimum_size = Vector2(420, 0)
+	col.add_child(ruler_summary)
+
+
+## The ruler panel. `d` empty hides it. Keys: title, line, refs, live (while the end follows the
+## cursor), rows (travel lines per mobility), shown, mode, src ("line", "route"; absent for a
+## unit's route), profile (MurksWorld.get_profile), eye_index, summary.
+func show_ruler(d: Dictionary) -> void:
+	ruler_panel.visible = not d.is_empty()
+	if d.is_empty():
+		return
+	ruler_title.text = String(d.get("title", "Ruler"))
+	ruler_line.text = String(d.get("line", ""))
+	ruler_refs.text = String(d.get("refs", ""))
+	ruler_refs.visible = ruler_refs.text != ""
+	var live: bool = d.get("live", false)
+	var rows: Array = d.get("rows", [])
+	ruler_travel.visible = not live and not rows.is_empty()
+	for i in ruler_rows.size():
+		ruler_rows[i].text = String(rows[i]) if i < rows.size() else ""
+		ruler_rows[i].set_pressed_no_signal(i == int(d.get("shown", 0)))
+	ruler_mode_pick.select(int(d.get("mode", 0)))
+	var prof: Dictionary = d.get("profile", {})
+	ruler_prof_row.visible = not live and d.has("src")
+	ruler_src_line.set_pressed_no_signal(String(d.get("src", "")) == "line")
+	ruler_src_route.set_pressed_no_signal(String(d.get("src", "")) == "route")
+	ruler_eye_pick.select(int(d.get("eye_index", 1)))
+	ruler_eye_pick.visible = String(d.get("src", "")) == "line"
+	ruler_chart.visible = not live and not prof.is_empty()
+	ruler_chart.set_profile(prof)
+	ruler_summary.text = String(d.get("summary", ""))
+	ruler_summary.visible = not live and ruler_summary.text != ""
+	_fit_ruler.call_deferred()
+
+
+## Bottom-anchored: fit the panel to its content upwards from the bottom edge.
+func _fit_ruler() -> void:
+	ruler_panel.offset_top = ruler_panel.offset_bottom - ruler_panel.get_combined_minimum_size().y
+
+
+# --- Name and confirm dialog (markings) -------------------------------------------------
+
+func _build_ask() -> void:
+	ask_panel = PanelContainer.new()
+	ask_panel.add_theme_stylebox_override("panel", _box(Color(0.07, 0.08, 0.07, 1.0), Color(0.6, 0.62, 0.45, 0.8), 6, Vector4(18, 12, 18, 14)))
+	ask_panel.set_anchors_preset(Control.PRESET_CENTER)
+	ask_panel.grow_horizontal = Control.GROW_DIRECTION_BOTH
+	ask_panel.grow_vertical = Control.GROW_DIRECTION_BOTH
+	ask_panel.visible = false
+	add_child(ask_panel)
+	var col := VBoxContainer.new()
+	col.add_theme_constant_override("separation", 8)
+	col.custom_minimum_size = Vector2(380, 0)
+	ask_panel.add_child(col)
+	ask_title = _label("", 18, AMBER)
+	col.add_child(ask_title)
+	ask_prompt = _label("", 13, MUTED)
+	ask_prompt.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	col.add_child(ask_prompt)
+	ask_edit = LineEdit.new()
+	ask_edit.max_length = 40
+	ask_edit.text_submitted.connect(func(_t: String) -> void: _ask_done(true))
+	col.add_child(ask_edit)
+	var buttons := HBoxContainer.new()
+	buttons.alignment = BoxContainer.ALIGNMENT_END
+	col.add_child(buttons)
+	var cancel := _button("Cancel")
+	cancel.pressed.connect(func() -> void: _ask_done(false))
+	buttons.add_child(cancel)
+	var ok := _button("OK")
+	ok.pressed.connect(func() -> void: _ask_done(true))
+	buttons.add_child(ok)
+
+
+## Asks for a line of text; `on_done` gets it on OK (Enter). Esc or Cancel drops it.
+func ask_text(title: String, prompt: String, default_text: String, on_done: Callable) -> void:
+	ask_title.text = title
+	ask_prompt.text = prompt
+	ask_edit.visible = true
+	ask_edit.text = default_text
+	ask_has_text = true
+	ask_cb = on_done
+	ask_panel.visible = true
+	ask_edit.grab_focus()
+	ask_edit.select_all()
+
+
+## Asks to confirm; `on_yes` is called on OK.
+func ask_confirm(title: String, text: String, on_yes: Callable) -> void:
+	ask_title.text = title
+	ask_prompt.text = text
+	ask_edit.visible = false
+	ask_has_text = false
+	ask_cb = on_yes
+	ask_panel.visible = true
+
+
+func _ask_done(ok: bool) -> void:
+	if not ask_panel.visible:
+		return
+	ask_panel.visible = false
+	ask_edit.release_focus()
+	var cb := ask_cb
+	ask_cb = Callable()
+	if ok and cb.is_valid():
+		if ask_has_text:
+			cb.call(ask_edit.text.strip_edges())
+		else:
+			cb.call()
+
+
 # --- Log, status line, banners ---------------------------------------------------------
 
 func _build_log() -> void:
@@ -1779,7 +2038,7 @@ func hide_pause() -> void:
 
 ## Title screen or pause menu up: the map takes no input.
 func is_modal() -> bool:
-	return title_screen.visible or pause_screen.visible
+	return title_screen.visible or pause_screen.visible or ask_panel.visible
 
 
 ## A centred dialog with a title, a body and a Close button. Not modal: it sits over everything.
@@ -1826,6 +2085,10 @@ func _controls_body() -> Control:
 			["G  V  Z", "Hex grid, line of sight, fidelity zones"], ["M", "Whole map"]]],
 		["Holdings", [["Click a pennant", "Open the place's panel"],
 			["Right-click a town", "Raise militia, requisition, supply route"]]],
+		["Planning tools", [["Ctrl+drag, Shift+R", "Ruler: distance, bearing, travel time, profile"],
+			["Shift+G", "1 km grid and grid references"],
+			["Shift+O  P  T  N", "Mark an objective, phase line, TRP, note"],
+			["Right-click a marking", "Rename or delete it"]]],
 		["Game", [["F5 / F9", "Quick save / quick load"], ["F1 / F2", "Controls / map data credits"],
 			["F4 / F6", "Map legend / painted terrain textures on or off"],
 			["F7", "Counters show vehicles or NATO symbols"],
@@ -1835,7 +2098,7 @@ func _controls_body() -> Control:
 			["Esc", "Pause menu"]]]]
 	var cols := HBoxContainer.new()
 	cols.add_theme_constant_override("separation", 28)
-	var halves := [[0, 1], [2, 3, 5, 4]]
+	var halves := [[0, 1, 5], [2, 3, 6, 4]]
 	for h in halves:
 		var col := VBoxContainer.new()
 		col.add_theme_constant_override("separation", 4)
@@ -1891,8 +2154,12 @@ func toggle_legend() -> void:
 	_toggle_dialog(legend_panel)
 
 
-## Closes a controls, credits or legend dialog if one is open; true if it did.
+## Closes the name dialog (cancelled), or a controls, credits or legend dialog if one is
+## open; true if it did.
 func close_dialog() -> bool:
+	if ask_panel.visible:
+		_ask_done(false)
+		return true
 	if help_panel.visible or credits_panel.visible or legend_panel.visible:
 		help_panel.visible = false
 		credits_panel.visible = false

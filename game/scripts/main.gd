@@ -18,6 +18,8 @@ const SLOT_OFFSETS := [Vector2i(0, 0), Vector2i(2, 0), Vector2i(-2, 0), Vector2i
 var world: MurksWorld
 var camera: Camera2D
 var map_view: MapView
+var tools: MapTools                # ruler, profile, km grid, markings (MRK-26)
+var map_info: Dictionary = {}      # world.get_map_info()
 var overlay: Overlay
 var hud: Hud
 var night_tint: CanvasModulate
@@ -117,6 +119,9 @@ func _ready() -> void:
 	var overlay_layer := CanvasLayer.new()
 	overlay_layer.layer = 1
 	add_child(overlay_layer)
+	tools = MapTools.new()           # under the counters
+	tools.main = self
+	overlay_layer.add_child(tools)
 	overlay = Overlay.new()
 	overlay.main = self
 	overlay_layer.add_child(overlay)
@@ -159,6 +164,8 @@ func _start_world() -> void:
 	map_view.setup(world)
 	overlay.set_towns(world.get_settlements(0))
 	var info: Dictionary = world.get_map_info()
+	map_info = info
+	tools.refresh_marks()
 	print("Murks: map '%s' %d x %d hexes (%.1f MB), %d towns; startup %d ms" % [info["name"], int(info["cols"]),
 		int(info["rows"]), float(gen_info["memory_mb"]), int(info["settlements"]), Time.get_ticks_msec() - t0])
 
@@ -172,6 +179,7 @@ func _start_world() -> void:
 	hud.set_toggle("Edges", map_view.natural_edges)
 	hud.set_toggle("Vehicles", overlay.show_vehicles)
 	hud.set_toggle("Topo", map_view.show_topo)
+	hud.set_toggle("KmGrid", tools.show_km_grid)
 	_show_plan_panel()   # fills the View > Planning map list
 	hud.set_toggle("Auto-pause", auto_pause)
 	hud.set_toggle("Group", group_companies)
@@ -290,6 +298,7 @@ func _process(delta: float) -> void:
 	night_tint.color = Color(0.62, 0.66, 0.82) if world.is_night() else Color.WHITE
 	map_view.update_view(camera.get_screen_center_position(), camera.zoom.x, get_viewport_rect().size)
 	overlay.queue_redraw()
+	tools.queue_redraw()
 
 	hud_timer -= delta
 	if hud_timer <= 0.0:
@@ -541,6 +550,8 @@ func _unhandled_input(event: InputEvent) -> void:
 			if k in [KEY_ESCAPE, KEY_F1, KEY_F2, KEY_F4]:
 				_on_key(k)
 		return
+	if tools.handle_input(event):
+		return
 	if event is InputEventMouseButton:
 		var mb := event as InputEventMouseButton
 		if mb.button_index == MOUSE_BUTTON_WHEEL_UP and mb.pressed:
@@ -577,7 +588,10 @@ func _unhandled_input(event: InputEvent) -> void:
 				camera.position -= mm.relative / camera.zoom.x
 		_update_status()
 	elif event is InputEventKey and event.pressed and not event.echo:
-		_on_key((event as InputEventKey).keycode)
+		var ke := event as InputEventKey
+		if ke.shift_pressed and tools.shift_key(ke.keycode):
+			return
+		_on_key(ke.keycode)
 
 
 func _on_key(key: Key) -> void:
@@ -634,6 +648,11 @@ func _on_toggle(name: String) -> void:
 		"Grid":
 			map_view.show_grid = not map_view.show_grid
 			hud.set_toggle(name, map_view.show_grid)
+		"KmGrid":
+			tools.show_km_grid = not tools.show_km_grid
+			hud.set_toggle(name, tools.show_km_grid)
+			if tools.show_km_grid:
+				hud.show_toast("1 km grid on the map's own metres; the status bar gives the grid reference (100 km square, then 100 m).", 5.0)
 		"Detail":
 			map_view.show_detail = not map_view.show_detail
 			hud.set_toggle(name, map_view.show_detail)
@@ -697,12 +716,15 @@ func _on_toggle(name: String) -> void:
 
 ## Game-level actions from the menu bar, the title screen and the pause menu.
 func _on_menu_action(name: String) -> void:
+	if tools.on_action(name):
+		return
 	if name.begins_with("plan_") and name.substr(5).is_valid_int():
 		set_plan_mode(name.substr(5).to_int())
 		return
 	if name.begins_with("sight_eye_"):
 		sight_eye_index = clampi(name.substr(10).to_int(), 0, hud.PLAN_EYES.size() - 1)
 		_update_sight()
+		tools.on_action("sight_eye_changed")
 		return
 	match name:
 		"start": _begin_campaign()
@@ -747,6 +769,8 @@ func _on_escape() -> void:
 		return
 	if hud.pause_screen.visible:
 		_close_pause()
+	elif tools.cancel():
+		return
 	elif move_mode >= 0:
 		move_mode = -1
 		hud.show_toast("Armed order cancelled: right-click opens the order menu again.", 2.5)
@@ -799,6 +823,10 @@ func _open_order_menu(screen_pos: Vector2) -> void:
 	if hid >= 0:
 		ctx["holding"] = world.get_holding(hid)
 		ctx["own_holdings"] = _own_holdings()
+	var mi := tools.marking_at(screen_pos)
+	if mi >= 0:
+		var mk: Dictionary = tools.marks[mi]
+		ctx["marking"] = {"i": mi, "kind": int(mk["kind"]), "name": String(mk["name"])}
 	if own.is_empty():
 		ctx["title"] = "Map"
 		ctx["info"] = where
@@ -1462,6 +1490,8 @@ func _update_status() -> void:
 	var where := "Hex %d,%d" % [hex.x, hex.y]
 	if not is_nan(ll.x):
 		where += "  %.3f°%s %.3f°%s" % [absf(ll.y), "N" if ll.y >= 0 else "S", absf(ll.x), "E" if ll.x >= 0 else "W"]
+	if tools.show_km_grid:
+		where += "  GR " + world.get_grid_ref(get_global_mouse_position())
 	hud.set_status("%s   %s" % [where, "  ·  ".join(bits)])
 
 
@@ -1704,6 +1734,8 @@ func quick_load() -> void:
 	if err != "":
 		hud.show_toast("Could not load the save: " + err, 5.0)
 		return
+	tools.refresh_marks()
+	tools.clear_ruler()
 	speed_index = 0
 	hud.set_speed(0, false)
 	event_log.clear()
@@ -1993,7 +2025,8 @@ func _run_uitest() -> void:
 	await _frames(3)
 	var has_move := false
 	for i in hud.order_popup.item_count:
-		has_move = has_move or hud.order_popup.get_item_text(i).ends_with(" here") and hud.order_popup.get_item_text(i) != "Centre the map here"
+		has_move = has_move or hud.order_popup.get_item_text(i).ends_with(" here") and \
+			not (hud.order_popup.get_item_text(i) in ["Centre the map here", "Measure from here", "Mark here"])
 	check.call(hud.order_popup.visible and not has_move, "nothing selected: map menu without move orders")
 	hud.order_popup.hide()
 
@@ -2174,6 +2207,141 @@ func _run_uitest() -> void:
 	check.call(hud.oob_panel.visible, "F11 shows it again")
 	selected = [0]
 	_refresh_oob()
+	# Planning tools (MRK-26): the km grid, the ruler by Ctrl+drag with its travel times and
+	# profile, markings placed with the keys and the right-click menu, renamed, saved, deleted.
+	var cam_tools := camera.position
+	camera.position = world.hex_to_world(Vector2i(900, 1330))
+	camera.zoom = Vector2.ONE * 0.05
+	selected = []
+	await _frames(3)
+	var tools_mb: MenuButton = hud.menu_buttons.get("Tools")
+	check.call(tools_mb != null, "the top bar has a Tools menu")
+	if tools_mb != null:
+		hud._fill_tools(tools_mb.get_popup())
+		var tool_items: Array[String] = []
+		for i in tools_mb.get_popup().item_count:
+			tool_items.append(tools_mb.get_popup().get_item_text(i))
+		check.call("Ruler" in tool_items and "Phase line" in tool_items and "1 km grid and grid references" in tool_items,
+			"Tools lists the ruler, the grid and the markings")
+	_push_shift_key(KEY_G)
+	await _frames(2)
+	check.call(tools.show_km_grid and bool(hud.toggle_state.get("KmGrid", false)), "Shift+G turns the 1 km grid on")
+	var gr: String = world.get_grid_ref(camera.position)
+	var gre := RegEx.create_from_string("^\\d\\d/\\d\\d \\d\\d\\d \\d\\d\\d$")
+	check.call(gre.search(gr) != null, "grid reference at the centre: GR %s" % gr)
+	# Ruler: Ctrl+drag 300 px due east.
+	var vc := get_viewport_rect().size * 0.5
+	var p1 := vc + Vector2(-150, 40)
+	var p2 := p1 + Vector2(300, 0)
+	_push_ctrl_drag(p1, p2)
+	await _frames(3)
+	var want_m := 300.0 / camera.zoom.x
+	var got_m := tools.ruler_a.distance_to(tools.ruler_b)
+	check.call(tools.ruler_on and not tools.ruler_live and absf(got_m - want_m) < 2.0 and hud.ruler_panel.visible,
+		"Ctrl+drag measures %.2f km (screen says %.2f km)" % [got_m / 1000.0, want_m / 1000.0])
+	check.call(hud.ruler_line.text.begins_with("%.2f km" % (got_m / 1000.0)) and hud.ruler_line.text.contains("090° grid (1600 mils)"),
+		"panel: \"%s\"" % hud.ruler_line.text)
+	var e0: Dictionary = tools.est[0] if tools.est.size() == 3 else {}
+	check.call(e0.get("found", false) and float(e0["minutes"]) > 0.0 and hud.ruler_rows[0].text.begins_with("Tracked"),
+		"travel time by the rules' route search: \"%s\"" % (hud.ruler_rows[0].text if hud.ruler_rows.size() > 0 else ""))
+	var e2: Dictionary = tools.est[2] if tools.est.size() == 3 else {}
+	check.call(e2.get("found", false) and float(e2["minutes"]) > float(e0.get("minutes", 1.0e9)), "on foot takes longer than tracked")
+	var prof_km: PackedFloat32Array = tools.profile.get("km", PackedFloat32Array())
+	check.call(prof_km.size() > 10 and int(tools.profile.get("block", -3)) >= -2 and hud.ruler_chart.visible,
+		"straight-line profile: %d hexes, sight %s" % [prof_km.size(), "clear" if int(tools.profile.get("block", -3)) == -1 else "blocked"])
+	var a_hex := world.world_to_hex(tools.ruler_a)
+	var b_hex := world.world_to_hex(tools.ruler_b)
+	var vsh: Dictionary = world.get_viewshed(a_hex, tools.eye_m())
+	if not vsh.is_empty() and a_hex.distance_to(b_hex) < 20:
+		var vo: Vector2i = vsh["origin"]
+		var vsz: Vector2i = vsh["size"]
+		var vl := b_hex - vo
+		var seen_b: bool = (vsh["mask"] as PackedByteArray)[vl.y * vsz.x + vl.x] == 2
+		check.call(seen_b == (int(tools.profile["block"]) == -1), "the profile's sight line agrees with the line-of-sight mode")
+	hud.ruler_src_route.pressed.emit()
+	await _frames(2)
+	var rkm: PackedFloat32Array = tools.profile.get("km", PackedFloat32Array())
+	check.call(tools.profile_src == "route" and int(tools.profile.get("block", 0)) == -3 and rkm.size() >= 2 and
+		absf(rkm[rkm.size() - 1] - float(e0.get("km", -1.0))) < 0.05, "profile along the tracked route (%.1f km)" % (rkm[rkm.size() - 1] if rkm.size() > 0 else -1.0))
+	hud.ruler_mode_pick.select(1)
+	hud.ruler_mode_pick.item_selected.emit(1)
+	await _frames(2)
+	check.call(tools.est_mode == 1 and tools.est.size() == 3, "the panel's mode picks road march for the estimate")
+	_push_key(KEY_ESCAPE)
+	await _frames(2)
+	check.call(not tools.ruler_on and not hud.ruler_panel.visible and not hud.pause_screen.visible, "Esc takes the ruler off the map")
+	# Markings.
+	var marks_before := tools.marks.size()
+	_push_shift_key(KEY_O)
+	await _frames(1)
+	_push_click(MOUSE_BUTTON_LEFT, vc + Vector2(-60, -40))
+	await _frames(2)
+	check.call(hud.ask_panel.visible and hud.ask_edit.text == "OBJ 1", "Shift+O and a click ask for the objective's name (\"%s\")" % hud.ask_edit.text)
+	hud.ask_edit.text = "OBJ WOLF"
+	hud.ask_edit.text_submitted.emit(hud.ask_edit.text)
+	await _frames(2)
+	_push_shift_key(KEY_T)
+	await _frames(1)
+	_push_click(MOUSE_BUTTON_LEFT, vc + Vector2(120, -80))
+	await _frames(2)
+	_push_shift_key(KEY_P)
+	await _frames(1)
+	for q in [Vector2(-200, 60), Vector2(-40, 90), Vector2(160, 70)]:
+		_push_click(MOUSE_BUTTON_LEFT, vc + q)
+		await _frames(1)
+	_push_key(KEY_ENTER)
+	await _frames(2)
+	check.call(hud.ask_panel.visible and hud.ask_edit.text == "PL 1", "Enter finishes the phase line and asks its name")
+	hud.ask_edit.text = "PL RED"
+	hud._ask_done(true)
+	await _frames(2)
+	menu_world_pos = _screen_to_world(vc + Vector2(40, 140))
+	_open_order_menu(vc + Vector2(40, 140))
+	await _frames(2)
+	var mark_sub := _submenu_of(hud.order_popup, "Mark here")
+	check.call(mark_sub != null and _menu_pick(mark_sub, "Note"), "right-click > Mark here > Note")
+	hud.order_popup.hide()
+	await _frames(2)
+	hud.ask_edit.text = "Bridge out"
+	hud._ask_done(true)
+	await _frames(3)
+	var kinds: Array = []
+	for mk in tools.marks:
+		kinds.append(int(mk["kind"]))
+	check.call(tools.marks.size() == marks_before + 4 and kinds.slice(marks_before) == [0, 2, 1, 3] and
+		String(tools.marks[marks_before]["name"]) == "OBJ WOLF" and String(tools.marks[marks_before + 1]["name"]) == "TRP 01" and
+		(tools.marks[marks_before + 2]["points"] as PackedVector2Array).size() == 3,
+		"objective, TRP 01, a 3-point phase line and a note are on the map")
+	# Right-click the objective: rename it.
+	var obj_screen: Vector2 = get_viewport().get_canvas_transform() * (tools.marks[marks_before]["points"] as PackedVector2Array)[0]
+	_open_order_menu(obj_screen)
+	await _frames(2)
+	check.call(_menu_pick(hud.order_popup, "Rename"), "right-click on the objective offers Rename")
+	hud.order_popup.hide()
+	await _frames(2)
+	hud.ask_edit.text = "OBJ BEAR"
+	hud._ask_done(true)
+	await _frames(2)
+	check.call(String(tools.marks[marks_before]["name"]) == "OBJ BEAR", "renamed to OBJ BEAR")
+	# Saved with the game: save, clear, load.
+	var blob: PackedByteArray = world.save_state()
+	world.clear_markings()
+	tools.refresh_marks()
+	var lerr: String = world.load_state(blob)
+	tools.refresh_marks()
+	check.call(lerr == "" and tools.marks.size() == marks_before + 4, "markings come back with a load (%d)" % tools.marks.size())
+	_open_order_menu(obj_screen)
+	await _frames(2)
+	check.call(_menu_pick(hud.order_popup, "Delete"), "right-click on the objective offers Delete")
+	hud.order_popup.hide()
+	await _frames(2)
+	check.call(tools.marks.size() == marks_before + 3, "the objective is deleted")
+	_push_shift_key(KEY_G)
+	await _frames(1)
+	check.call(not tools.show_km_grid, "Shift+G turns the grid off again")
+	camera.position = cam_tools
+	camera.zoom = zoom_was
+	await _frames(2)
 
 	# Last in the test because it moves the clock: 1st Mech dismounts; the squads take the
 	# NATO symbol, the carriers keep their BMP.
@@ -2205,6 +2373,40 @@ func _push_key(k: Key) -> void:
 		ev.physical_keycode = k
 		ev.pressed = down
 		get_viewport().push_input(ev)
+
+
+func _push_shift_key(k: Key) -> void:
+	for down in [true, false]:
+		var ev := InputEventKey.new()
+		ev.keycode = k
+		ev.physical_keycode = k
+		ev.shift_pressed = true
+		ev.pressed = down
+		get_viewport().push_input(ev)
+
+
+## Ctrl + left-button drag from a to b (the ruler).
+func _push_ctrl_drag(a: Vector2, b: Vector2) -> void:
+	var press := InputEventMouseButton.new()
+	press.button_index = MOUSE_BUTTON_LEFT
+	press.pressed = true
+	press.ctrl_pressed = true
+	press.position = a
+	press.global_position = a
+	get_viewport().push_input(press)
+	for t in [0.33, 0.66, 1.0]:
+		var mv := InputEventMouseMotion.new()
+		mv.position = a.lerp(b, t)
+		mv.global_position = mv.position
+		mv.ctrl_pressed = true
+		get_viewport().push_input(mv)
+	var rel := InputEventMouseButton.new()
+	rel.button_index = MOUSE_BUTTON_LEFT
+	rel.pressed = false
+	rel.ctrl_pressed = true
+	rel.position = b
+	rel.global_position = b
+	get_viewport().push_input(rel)
 
 
 func _push_click(button: MouseButton, pos: Vector2) -> void:
@@ -2253,6 +2455,22 @@ func _lookout_near(c: Vector2i, r: int) -> Vector2i:
 
 ## The hex of open ground or fields within `r` hexes that sees the most at 3 m: where a
 ## commander would put an observation post (screenshots and checks).
+## Screenshots of the planning tools: the km grid, a ruler east-north-east from home with its
+## routes and profile, and a few markings around it.
+func _tools_demo(hq: Vector2) -> void:
+	tools.show_km_grid = true
+	world.clear_markings()
+	world.add_marking(MapTools.MK_OBJECTIVE, "OBJ WOLF", PackedVector2Array([hq + Vector2(8600, -1300)]))
+	world.add_marking(MapTools.MK_PHASE, "PL RED", PackedVector2Array([hq + Vector2(3200, -6000), hq + Vector2(3900, -2500),
+		hq + Vector2(3400, 1000), hq + Vector2(4200, 4200)]))
+	world.add_marking(MapTools.MK_TRP, "TRP 01", PackedVector2Array([hq + Vector2(6100, 400)]))
+	world.add_marking(MapTools.MK_NOTE, "Bridge too weak for tanks?", PackedVector2Array([hq + Vector2(1500, -3200)]))
+	tools.refresh_marks()
+	tools.start_ruler(hq)
+	tools.ruler_b = hq + Vector2(8200, -2900)
+	tools.finish_ruler()
+
+
 func _best_lookout(c: Vector2i, r: int) -> Vector2i:
 	var best := c
 	var best_seen := -1
@@ -2286,6 +2504,9 @@ func _run_views() -> void:
 			plan_mode = a.substr(7).to_int()
 		elif a.begins_with("--eye="):
 			sight_eye_index = a.substr(6).to_int()
+		elif a == "--tools":
+			_tools_demo(world.hex_to_world(world.get_unit_info(0)["hex"]))
+			hud.visible = true
 	DirAccess.make_dir_recursive_absolute(views_dir)
 	var hq: Vector2 = world.hex_to_world(world.get_unit_info(0)["hex"])
 	var hills: Vector2 = world.hex_to_world(Vector2i(900, 1330))
@@ -2407,6 +2628,14 @@ func _run_autotest() -> void:
 	set_plan_mode(MapView.PLAN_SIGHT)
 	await _shot("41_plan_sight", world.hex_to_world(sight_from), 0.025)
 	set_plan_mode(0)
+	# Planning tools (MRK-26): the 1 km grid, a ruler with its route and profile, and markings.
+	_tools_demo(hq)
+	await _shot("42_ruler_profile", hq + Vector2(4500, -1000), 0.06)
+	tools.clear_ruler()
+	await _shot("43_markings_grid", hq + Vector2(2500, -500), 0.1)
+	tools.show_km_grid = false
+	world.clear_markings()
+	tools.refresh_marks()
 	selected = [0]
 	selected = [0]
 	# Holdings: the home town's panel, then a supply route from its stores to the trains.
