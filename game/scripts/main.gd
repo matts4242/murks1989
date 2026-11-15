@@ -70,6 +70,10 @@ var routes: Array = []             # world.get_supply_routes(), refreshed with t
 var selected_holding := -1         # holding shown in the panel (clears the unit selection)
 var show_cmd := false              # direct command overlay: every unit linked to its commander, zones, outlines
 var show_fs := false               # fire support overlay: the fire net, range rings, fire missions, outlines
+var show_oob := true               # order of battle panel (F11)
+var oob_rows: Array = []           # world.get_oob(), refreshed with the HUD
+var oob_children := {}             # unit id -> ids that answer to it (chain of command; squads under their vehicles)
+var oob_under := {}                # unit id -> true: under a selected commander (blue on the map and in the panel)
 const SF_GROUP := 20
 const SF_ROLE := 21
 var event_log: Array = []
@@ -131,6 +135,7 @@ func _ready() -> void:
 	hud.end_choice.connect(_on_end_choice)
 	hud.save_path = SAVE_FILE
 	hud.event_clicked.connect(func(p: Vector2) -> void: camera.position = p)
+	hud.oob_pick.connect(_on_oob_pick)
 
 	# Let the loading text draw before the heavy work starts.
 	await get_tree().process_frame
@@ -170,6 +175,8 @@ func _start_world() -> void:
 	_show_plan_panel()   # fills the View > Planning map list
 	hud.set_toggle("Auto-pause", auto_pause)
 	hud.set_toggle("Group", group_companies)
+	hud.set_oob_visible(show_oob)
+	_refresh_oob()
 	set_speed(0)
 	var obj: Dictionary = world.get_objectives()
 	briefing_text = "Company Murks is billeted at %s. The %s is coming for you from the east.\nBreak it before it breaks you, and guard the HQ: without it orders crawl and supplies slow to half." % [
@@ -278,6 +285,7 @@ func _process(delta: float) -> void:
 	groups_cache = world.get_groups()
 	_detect_fire_effects()
 	_prune_selection()
+	_update_oob_under()
 	_update_los()
 	night_tint.color = Color(0.62, 0.66, 0.82) if world.is_night() else Color.WHITE
 	map_view.update_view(camera.get_screen_center_position(), camera.zoom.x, get_viewport_rect().size)
@@ -293,6 +301,7 @@ func _process(delta: float) -> void:
 			"script %.1f ms · chunks %d" % [script_ms, map_view.chunks.size()])
 		hud.set_speed(speed_index, eff != speed_index)
 		_refresh_selection_panel()
+		_refresh_oob()
 		_check_outcome()
 	script_ms = script_ms * 0.9 + 0.1 * ((Time.get_ticks_usec() - _t_start) / 1000.0 + overlay.draw_ms)
 
@@ -615,6 +624,7 @@ func _on_key(key: Key) -> void:
 		KEY_F7: _on_toggle("Vehicles")
 		KEY_F8: _on_toggle("Topo")
 		KEY_F10: set_plan_mode((plan_mode + 1) % MapView.PLAN_COUNT)
+		KEY_F11: _on_toggle("OOB")
 		KEY_F5: quick_save()
 		KEY_F9: quick_load()
 
@@ -660,6 +670,12 @@ func _on_toggle(name: String) -> void:
 			group_companies = not group_companies
 			hud.set_toggle(name, group_companies)
 			hud.show_toast("Theater map groups each company's nearby units into one counter." if group_companies else "Company grouping off: every platoon is shown.")
+		"OOB":
+			show_oob = not show_oob
+			hud.set_oob_visible(show_oob)
+			if show_oob:
+				hud.oob_sig = "" # rebuild with what has changed while it was hidden
+				_refresh_oob()
 		"Auto-pause":
 			auto_pause = not auto_pause
 			hud.set_toggle(name, auto_pause)
@@ -1571,6 +1587,83 @@ func short_name(id: int) -> String:
 	return s
 
 
+# --- Order of battle ---------------------------------------------------------------------
+
+## Reads the order of battle and works out who answers to whom. The links come from the rules'
+## own chain of command (MurksWorld.get_oob: team members to their leader, the rest to the
+## company HQ), so the panel and the blue highlight show the chain the command delay runs on.
+func _refresh_oob() -> void:
+	oob_rows = world.get_oob()
+	oob_children = {}
+	var alive := {}
+	for r in oob_rows:
+		if r["alive"]:
+			alive[int(r["id"])] = true
+	for r in oob_rows:
+		var par := int(r["parent"])
+		if r["alive"] and not r["militia"] and par >= 0 and alive.has(par):
+			if not oob_children.has(par):
+				oob_children[par] = []
+			oob_children[par].append(int(r["id"]))
+	_update_oob_under()
+	hud.show_oob(oob_rows, selected, oob_under, oob_children)
+
+
+## Everything under a selected HQ or team leader, all the way down.
+func _update_oob_under() -> void:
+	oob_under = {}
+	for id in selected:
+		if oob_children.has(id):
+			_collect_under(id, oob_under)
+
+
+func _collect_under(id: int, out: Dictionary) -> void:
+	for c in oob_children.get(id, []):
+		if not out.has(c):
+			out[c] = true
+			_collect_under(int(c), out)
+
+
+## A row picked in the order of battle panel.
+func _on_oob_pick(id: int, how: String) -> void:
+	var row := {}
+	for r in oob_rows:
+		if int(r["id"]) == id:
+			row = r
+	if how == "company":
+		_select_company_of(id)
+		hud.oob_sel_seen = selected.duplicate() # picked in the panel: don't scroll it
+		return
+	if row.is_empty() or not row["alive"]:
+		return
+	# Squads aboard their vehicles are not on the map: pick the vehicles.
+	if row["embarked"] and int(row["parent"]) >= 0:
+		id = int(row["parent"])
+	selected_holding = -1
+	match how:
+		"add":
+			if selected.has(id):
+				selected.erase(id)
+			else:
+				selected.append(id)
+		"command":
+			var under := {}
+			_collect_under(id, under)
+			var ids: Array[int] = [id]
+			for u in under:
+				if disp_row.has(int(u)):
+					ids.append(int(u))
+			selected = ids
+			camera.position = unit_position(id)
+			if ids.size() > 1:
+				hud.show_toast("%s and the %d unit%s under it selected." % [row["name"], ids.size() - 1, "" if ids.size() == 2 else "s"])
+		_:
+			selected = [id]
+	hud.oob_sel_seen = selected.duplicate() # picked in the panel: it is already in view
+	_update_oob_under()
+	_refresh_selection_panel()
+
+
 # --- Objectives, end of the game, quick save -------------------------------------------
 
 func _check_outcome() -> void:
@@ -2024,6 +2117,64 @@ func _run_uitest() -> void:
 	camera.zoom = zoom_was
 	await _frames(2)
 
+	# Order of battle panel: the HQ selected marks everything under it; rows select units.
+	_refresh_oob()
+	check.call(hud.oob_panel.visible and show_oob, "the order of battle panel is up by default")
+	selected = [0]
+	_refresh_oob()
+	var company_ids: Array[int] = []
+	for r in oob_rows:
+		if r["alive"] and not r["militia"] and not r["embarked"] and int(r["id"]) != 0 and int(r["formation_id"]) == int(world.get_unit_info(0)["formation_id"]):
+			company_ids.append(int(r["id"]))
+	var all_under := company_ids.size() >= 5
+	for id in company_ids:
+		all_under = all_under and oob_under.has(id)
+	check.call(all_under and not oob_under.has(0), "HQ selected: all %d units of the company under it are marked" % company_ids.size())
+	check.call(hud.oob_items.has(0) and hud.oob_items.has(1) and (hud.oob_items[1] as TreeItem).get_custom_bg_color(0) == hud.OOB_SUB_BG
+		and (hud.oob_items[0] as TreeItem).get_custom_bg_color(0) == hud.OOB_SEL_BG, "panel rows: the HQ amber, the units under it blue")
+	check.call((hud.oob_items[1] as TreeItem).get_parent() == hud.oob_items[0], "a platoon sits under the HQ in the tree")
+	var under_drawn := false
+	for i in snapshot.size() / stride:
+		if int(snapshot[i * stride]) == 1:
+			under_drawn = overlay._row_item(i * stride, i).get("under", false)
+	check.call(under_drawn, "the counters under the HQ carry the blue mark")
+	# A real click on a row selects that unit (and a platoon commands nobody: no marks).
+	var row2: TreeItem = hud.oob_items.get(2, null)
+	var row_hit := false
+	if row2 != null:
+		hud.oob_tree.scroll_to_item(row2)
+		await _frames(2)
+		var rr := hud.oob_tree.get_item_area_rect(row2)
+		_push_click(MOUSE_BUTTON_LEFT, hud.oob_tree.get_global_transform() * (rr.position + Vector2(40, rr.size.y * 0.5)))
+		await _frames(2)
+		row_hit = selected == [2]
+	check.call(row_hit and oob_under.is_empty(), "clicking a row selects that unit")
+	hud.oob_pick.emit(0, "command")
+	await _frames(1)
+	check.call(selected.size() == company_ids.size() + 1 and selected[0] == 0, "double-click on the HQ selects it and all %d under it" % company_ids.size())
+	# A team: its leader marks its members only.
+	var tm_ids := PackedInt32Array([1, 2, 4])
+	var tg := world.create_group(tm_ids, 1)
+	_refresh_oob()
+	selected = [1]
+	_update_oob_under()
+	_refresh_oob()
+	var on_map_under := 0 # 2nd Mech's squads ride aboard (under it, but not on the map)
+	for u in oob_under:
+		if disp_row.has(int(u)):
+			on_map_under += 1
+	check.call(tg >= 0 and on_map_under == 2 and oob_under.has(2) and oob_under.has(4)
+		and (hud.oob_items[2] as TreeItem).get_parent() == hud.oob_items[1], "team leader selected: its members (under it in the tree) are marked")
+	world.disband_group(tg)
+	_push_key(KEY_F11)
+	await _frames(1)
+	check.call(not hud.oob_panel.visible, "F11 hides the order of battle")
+	_push_key(KEY_F11)
+	await _frames(1)
+	check.call(hud.oob_panel.visible, "F11 shows it again")
+	selected = [0]
+	_refresh_oob()
+
 	# Last in the test because it moves the clock: 1st Mech dismounts; the squads take the
 	# NATO symbol, the carriers keep their BMP.
 	var units_before := snapshot.size() / stride
@@ -2198,6 +2349,8 @@ func _run_autotest() -> void:
 	_refresh_snapshot()
 	var hq: Vector2 = world.hex_to_world(world.get_unit_info(0)["hex"])
 	show_zones = false
+	show_oob = false # the older shots stay as they were; the panel has shots of its own (42-43)
+	hud.set_oob_visible(false)
 
 	await _shot("01_company_close", hq, 0.07)
 	# Menus: the title screen, the right-click order menu, the menu bar, a dropdown, the pause menu, controls.
@@ -2314,6 +2467,16 @@ func _run_autotest() -> void:
 			selected = [3]
 			await _shot("19_dismounted", unit_position(3), 0.06)
 			selected.clear()
+		# Order of battle panel: the HQ selected, then the team leader.
+		show_oob = true
+		hud.set_oob_visible(true)
+		selected = [0]
+		await _shot("42_oob_hq", unit_position(0) + Vector2(-3000, 0), 0.04)
+		selected = [pick[0]]
+		await _shot("43_oob_team_leader", unit_position(pick[0]) + Vector2(-2000, 0), 0.05)
+		show_oob = false
+		hud.set_oob_visible(false)
+		selected.clear()
 	await _shot("02_region_chunks", hq, 0.016)
 	await _shot("03_whole_map_overview", world.get_world_size() * 0.5, get_viewport_rect().size.x / world.get_world_size().x * 0.95)
 
@@ -2454,6 +2617,7 @@ func _shot(name: String, pos: Vector2, zoom: float, before_capture := Callable()
 		overlay.queue_redraw()
 		hud.refresh(world.get_time_string(), world.is_night(), world.get_stats(), Engine.get_frames_per_second(), "chunks %d" % map_view.chunks.size())
 		_refresh_selection_panel()
+		_refresh_oob()
 		await get_tree().process_frame
 	if before_capture.is_valid():
 		before_capture.call()

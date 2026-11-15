@@ -4,6 +4,8 @@ extends Control
 ## - menu bar (Game, View, Time, Orders, Help) with the clock, speeds and stocks;
 ## - unit panel: status text, order buttons and dropdowns for fire, break contact,
 ##   stand-off, formation and spread, and a Team menu;
+## - order-of-battle panel (F11): the chain of command as a tree, the selection and every
+##   unit under a selected commander marked in it;
 ## - right-click order menu at the cursor (the same orders, aimed at that hex);
 ## - title screen, Esc pause menu, controls and map-credits dialogs, end screen;
 ## - event log, hover status line, banners and toasts.
@@ -16,6 +18,7 @@ signal command(name: String)        # orders: panel, Orders menu, right-click me
 signal menu_action(name: String)    # game level: start, continue, new_game, title, quit, save, load, resume, ...
 signal event_clicked(pos: Vector2)
 signal end_choice(choice: String)    # end screen: continue / load / restart / quit
+signal oob_pick(id: int, how: String) # order of battle row: "select", "add", "command" (double-click), "company"
 
 const TEXT := Color(0.92, 0.92, 0.86)
 const MUTED := Color(0.72, 0.77, 0.68)
@@ -78,6 +81,14 @@ var plan_keys: VBoxContainer
 var plan_eye_row: HBoxContainer
 var plan_eye_pick: OptionButton
 var plan_info: Label
+# Order of battle panel
+var oob_panel: PanelContainer
+var oob_tree: Tree
+var oob_foot: Label
+var oob_items := {}                 # unit id -> TreeItem
+var oob_sig := ""                   # shape of the tree last built; rebuilt when it changes
+var oob_folded := {}                # row key -> folded by the player
+var oob_sel_seen: Array = []        # selection last scrolled to
 const PLAN_EYES := [[2.0, "2 m: on foot"], [3.0, "3 m: vehicle (as the rules)"], [10.0, "10 m: rooftop"], [30.0, "30 m: mast or tower"]]
 var speed_index := 0
 
@@ -150,6 +161,7 @@ func _ready() -> void:
 	_build_holding_panel()
 	_build_log()
 	_build_plan_panel()
+	_build_oob_panel()
 	_build_status()
 	_build_banners()
 	_build_end_screen()
@@ -377,6 +389,8 @@ func _fill_view(pm: PopupMenu) -> void:
 	pm.add_separator("Overlays")
 	for t in VIEW_TOGGLES:
 		_add(pm, String(t[1]), "toggle", t[0], int(t[2]), true, 1 if toggle_state.get(t[0], false) else 0)
+	pm.add_separator("Panels")
+	_add(pm, "Order of battle", "toggle", "OOB", KEY_F11, true, 1 if toggle_state.get("OOB", false) else 0)
 	var plan := _submenu(pm, "Planning map")
 	_add(plan, "Next planning mode", "menu", "plan_next", KEY_F10)
 	plan.add_separator()
@@ -1120,6 +1134,391 @@ func _build_plan_panel() -> void:
 	col.add_child(plan_info)
 
 
+# --- Order of battle panel ---------------------------------------------------------------
+
+const OOB_SEL_BG := Color(0.55, 0.42, 0.08, 0.55)   # the selection (amber, as on the map)
+const OOB_SUB_BG := Color(0.18, 0.4, 0.62, 0.45)    # under a selected commander (blue, as on the map)
+const OOB_SUB := Color("#7fd0ff")
+const OOB_TYPE_ABBR := {"HQ": "HQ", "Tank Plt": "Tank", "Mech Plt": "Mech", "Rifle Plt": "Rifle", "Recon Sect": "Recon",
+	"Arty Bty": "Arty", "Supply Col": "Trucks"}
+
+
+func _build_oob_panel() -> void:
+	oob_panel = PanelContainer.new()
+	oob_panel.add_theme_stylebox_override("panel", _panel_style(0.88))
+	# Left edge, between the contract line at the top and the reports at the bottom.
+	oob_panel.anchor_left = 0.0
+	oob_panel.anchor_right = 0.0
+	oob_panel.anchor_top = 0.0
+	oob_panel.anchor_bottom = 1.0
+	_offsets(oob_panel, 8, 134, 348, -272)
+	oob_panel.visible = false
+	add_child(oob_panel)
+	var col := VBoxContainer.new()
+	col.add_theme_constant_override("separation", 4)
+	oob_panel.add_child(col)
+	var head := HBoxContainer.new()
+	col.add_child(head)
+	var title := _label("Order of battle", 15, AMBER)
+	title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	title.tooltip_text = "Who answers to whom, by the chain of command the orders travel down:\nteam members under their leader, everyone else under the company HQ,\nsquads under their APC/IFV platoon."
+	title.mouse_filter = Control.MOUSE_FILTER_PASS
+	head.add_child(title)
+	var fold := _small_button("Unfold", false, "Unfold every branch")
+	fold.pressed.connect(func() -> void: _oob_fold_all(false))
+	head.add_child(fold)
+	var fold2 := _small_button("Fold", false, "Fold every team and platoon")
+	fold2.pressed.connect(func() -> void: _oob_fold_all(true))
+	head.add_child(fold2)
+	var close := _small_button("×", false, "Hide the panel (F11)")
+	close.pressed.connect(func() -> void: toggle_pressed.emit("OOB"))
+	head.add_child(close)
+	for b in [fold, fold2, close]:
+		(b as Button).size_flags_horizontal = Control.SIZE_SHRINK_END
+	oob_tree = Tree.new()
+	oob_tree.columns = 3
+	oob_tree.hide_root = true
+	oob_tree.select_mode = Tree.SELECT_ROW
+	oob_tree.focus_mode = Control.FOCUS_NONE
+	oob_tree.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	oob_tree.scroll_horizontal_enabled = false
+	oob_tree.set_column_expand(0, true)
+	oob_tree.set_column_expand(1, false)
+	oob_tree.set_column_custom_minimum_width(1, 40)
+	oob_tree.set_column_expand(2, false)
+	oob_tree.set_column_custom_minimum_width(2, 88)
+	oob_tree.set_column_clip_content(0, true)
+	oob_tree.add_theme_stylebox_override("panel", StyleBoxEmpty.new())
+	oob_tree.add_theme_stylebox_override("focus", StyleBoxEmpty.new())
+	# The tree's own selection is not shown: rows are tinted from the map's selection instead.
+	for sb in ["selected", "selected_focus", "cursor", "cursor_unfocused"]:
+		oob_tree.add_theme_stylebox_override(sb, StyleBoxEmpty.new())
+	oob_tree.add_theme_stylebox_override("hovered", _box(Color(1, 1, 1, 0.06), Color(0, 0, 0, 0), 2, Vector4(0, 0, 0, 0)))
+	oob_tree.add_theme_color_override("font_color", TEXT)
+	oob_tree.add_theme_color_override("font_selected_color", TEXT)
+	oob_tree.add_theme_color_override("guide_color", Color(0.45, 0.5, 0.4, 0.35))
+	oob_tree.add_theme_color_override("relationship_line_color", Color(0.45, 0.5, 0.4, 0.55))
+	oob_tree.add_theme_color_override("parent_hl_line_color", Color(0.6, 0.66, 0.5, 0.8))
+	oob_tree.add_theme_constant_override("draw_relationship_lines", 1)
+	oob_tree.add_theme_constant_override("relationship_line_width", 1)
+	oob_tree.add_theme_constant_override("parent_hl_line_width", 1)
+	oob_tree.add_theme_constant_override("item_margin", 14)
+	oob_tree.add_theme_constant_override("v_separation", 2)
+	oob_tree.add_theme_constant_override("h_separation", 4)
+	oob_tree.add_theme_constant_override("inner_item_margin_left", 2)
+	oob_tree.add_theme_font_size_override("font_size", 13)
+	oob_tree.item_mouse_selected.connect(_on_oob_click)
+	oob_tree.item_activated.connect(_on_oob_activated)
+	oob_tree.item_collapsed.connect(func(it: TreeItem) -> void:
+		var key = it.get_metadata(0).get("key", "")
+		if key != "":
+			oob_folded[key] = it.collapsed)
+	col.add_child(oob_tree)
+	oob_foot = _label("", 12, MUTED)
+	oob_foot.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	oob_foot.custom_minimum_size = Vector2(300, 0)
+	col.add_child(oob_foot)
+
+
+func set_oob_visible(on: bool) -> void:
+	oob_panel.visible = on
+	set_toggle("OOB", on)
+
+
+func _on_oob_click(_pos: Vector2, button: int) -> void:
+	var it := oob_tree.get_selected()
+	oob_tree.deselect_all()
+	if it == null or button != MOUSE_BUTTON_LEFT:
+		return
+	var md: Dictionary = it.get_metadata(0)
+	match String(md.get("kind", "")):
+		"unit":
+			oob_pick.emit(int(md["id"]), "add" if Input.is_key_pressed(KEY_SHIFT) or Input.is_key_pressed(KEY_CTRL) else "select")
+		"company":
+			oob_pick.emit(int(md["id"]), "company")
+
+
+func _on_oob_activated() -> void:
+	var it := oob_tree.get_selected()
+	oob_tree.deselect_all()
+	if it == null:
+		return
+	var md: Dictionary = it.get_metadata(0)
+	if String(md.get("kind", "")) == "unit":
+		oob_pick.emit(int(md["id"]), "command")
+
+
+func _oob_fold_all(fold: bool) -> void:
+	var root := oob_tree.get_root()
+	if root == null:
+		return
+	var stack: Array[TreeItem] = [root]
+	while not stack.is_empty():
+		var it: TreeItem = stack.pop_back()
+		for c in it.get_children():
+			stack.append(c)
+		if it == root or it.get_child_count() == 0:
+			continue
+		var md: Dictionary = it.get_metadata(0)
+		if String(md.get("kind", "")) == "company" or String(md.get("kind", "")) == "section":
+			it.collapsed = false if String(md.get("kind", "")) == "company" else fold
+		else:
+			it.collapsed = fold
+		oob_folded[String(md.get("key", ""))] = it.collapsed
+
+
+## Fills the panel. `rows`: MurksWorld.get_oob(); `selected`: unit ids selected on the map;
+## `under`: unit id -> true for everything under a selected commander; `children`: unit id ->
+## its subordinates (by the chain of command, as main works it out).
+func show_oob(rows: Array, selected: Array, under: Dictionary, children: Dictionary) -> void:
+	if not oob_panel.visible:
+		return
+	var by_id := {}
+	for r in rows:
+		by_id[int(r["id"])] = r
+	# Rebuild only when the shape of the tree changes (a team formed, a unit lost, squads out).
+	var sig := ""
+	for r in rows:
+		sig += "%d:%d:%d:%s:%s:%d;" % [int(r["id"]), int(r["parent"]), 1 if r["alive"] else 0, r["role"], r.get("group_name", ""),
+			1 if r["embarked"] else 0]
+	if sig != oob_sig:
+		oob_sig = sig
+		_rebuild_oob(rows, by_id, children)
+	# Update the rows in place.
+	var placed := {}
+	for id in oob_items:
+		var it: TreeItem = oob_items[id]
+		var r: Dictionary = by_id.get(id, {})
+		if r.is_empty():
+			continue
+		_fill_oob_row(it, r, children, by_id)
+		var bg := Color(0, 0, 0, 0)
+		if selected.has(id):
+			bg = OOB_SEL_BG
+		elif under.has(id):
+			bg = OOB_SUB_BG
+		for c in 3:
+			it.set_custom_bg_color(c, bg)
+		placed[id] = true
+	# A new selection made on the map: unfold down to it and scroll it into view.
+	if selected != oob_sel_seen:
+		oob_sel_seen = selected.duplicate()
+		if selected.size() >= 1 and oob_items.has(int(selected[0])):
+			var it: TreeItem = oob_items[int(selected[0])]
+			var p := it.get_parent()
+			while p != null:
+				p.collapsed = false
+				p = p.get_parent()
+			oob_tree.scroll_to_item(it)
+	# Footer: what a selected commander has under it.
+	var foot := ""
+	for id in selected:
+		var r: Dictionary = by_id.get(int(id), {})
+		if r.is_empty() or not children.has(int(id)):
+			continue
+		var n := _count_under(int(id), children, by_id)
+		foot = "%s commands %d unit%s, marked blue here and on the map." % [r["name"], n, "" if n == 1 else "s"]
+		break
+	if foot == "":
+		foot = "Click: select · Shift-click: add · Double-click: the unit and everything under it, centred."
+	oob_foot.text = foot
+
+
+func _count_under(id: int, children: Dictionary, by_id: Dictionary) -> int:
+	var n := 0
+	for c in children.get(id, []):
+		var r: Dictionary = by_id.get(int(c), {})
+		if not r.is_empty() and r["alive"] and not r["embarked"]:
+			n += 1
+		n += _count_under(int(c), children, by_id)
+	return n
+
+
+func _rebuild_oob(rows: Array, by_id: Dictionary, children: Dictionary) -> void:
+	var first_shown := oob_tree.get_item_at_position(Vector2(10, 10))
+	var keep_key := ""
+	if first_shown != null:
+		keep_key = String(first_shown.get_metadata(0).get("key", ""))
+	oob_tree.clear()
+	oob_items.clear()
+	var root := oob_tree.create_item()
+	# One branch per own company, in the order the companies come.
+	var companies: Array[int] = []
+	var militia: Array = []
+	for r in rows:
+		if r["militia"]:
+			militia.append(r)
+		elif not companies.has(int(r["formation_id"])):
+			companies.append(int(r["formation_id"]))
+	var restore: TreeItem = null
+	for fid in companies:
+		var sample := -1
+		var alive := 0
+		var total := 0
+		for r in rows:
+			if int(r["formation_id"]) == fid and not r["militia"]:
+				total += 1
+				if r["alive"]:
+					alive += 1
+					if sample < 0:
+						sample = int(r["id"])
+		var cname := ""
+		for r in rows:
+			if int(r["formation_id"]) == fid:
+				cname = String(r["formation"])
+				break
+		var ci := oob_tree.create_item(root)
+		ci.set_text(0, cname)
+		ci.set_custom_color(0, AMBER)
+		ci.set_text(1, "%d" % alive)
+		ci.set_tooltip_text(1, "%d of %d units still in being" % [alive, total])
+		ci.set_custom_color(1, MUTED)
+		ci.set_tooltip_text(0, "%s: click to select the whole company." % cname)
+		ci.set_metadata(0, {"kind": "company", "id": sample, "key": "co%d" % fid})
+		ci.set_selectable(0, sample >= 0)
+		# Tops of the chain: the HQ (or, with the HQ lost, everyone it commanded), then the rest
+		# whose commander is not in the list.
+		var dead: Array = []
+		for r in rows:
+			if int(r["formation_id"]) != fid or r["militia"]:
+				continue
+			if not r["alive"]:
+				dead.append(r)
+				continue
+			var par := int(r["parent"])
+			var pr: Dictionary = by_id.get(par, {})
+			if par < 0 or pr.is_empty() or not pr["alive"]:
+				_add_oob_branch(ci, r, by_id, children)
+		if not dead.is_empty():
+			var di := oob_tree.create_item(ci)
+			di.set_text(0, "Knocked out (%d)" % dead.size())
+			di.set_custom_color(0, Color(0.6, 0.6, 0.56))
+			di.set_metadata(0, {"kind": "section", "key": "ko%d" % fid})
+			di.set_selectable(0, false)
+			di.set_selectable(1, false)
+			di.set_selectable(2, false)
+			di.collapsed = oob_folded.get("ko%d" % fid, true)
+			for r in dead:
+				var it := oob_tree.create_item(di)
+				it.set_metadata(0, {"kind": "dead", "id": int(r["id"]), "key": "u%d" % int(r["id"])})
+				for c in 3:
+					it.set_selectable(c, false)
+				oob_items[int(r["id"])] = it
+		ci.collapsed = oob_folded.get("co%d" % fid, false)
+	if not militia.is_empty():
+		var mi := oob_tree.create_item(root)
+		mi.set_text(0, "Militia garrisons")
+		mi.set_custom_color(0, Color(0.85, 0.78, 0.55))
+		mi.set_tooltip_text(0, "Town garrisons raised from the company's holdings. They hold their town and take no orders.")
+		mi.set_metadata(0, {"kind": "section", "key": "militia"})
+		for c in 3:
+			mi.set_selectable(c, false)
+		for r in militia:
+			if r["alive"]:
+				var it := oob_tree.create_item(mi)
+				it.set_metadata(0, {"kind": "unit", "id": int(r["id"]), "key": "u%d" % int(r["id"])})
+				oob_items[int(r["id"])] = it
+		mi.collapsed = oob_folded.get("militia", false)
+	# Back to where the list was scrolled.
+	if keep_key != "":
+		var stack: Array[TreeItem] = [root]
+		while not stack.is_empty() and restore == null:
+			var it: TreeItem = stack.pop_back()
+			for c in it.get_children():
+				stack.append(c)
+			if it != root and String(it.get_metadata(0).get("key", "")) == keep_key:
+				restore = it
+		if restore != null:
+			oob_tree.scroll_to_item(restore, false)
+
+
+func _add_oob_branch(parent: TreeItem, r: Dictionary, by_id: Dictionary, children: Dictionary) -> void:
+	var id := int(r["id"])
+	var it := oob_tree.create_item(parent)
+	it.set_metadata(0, {"kind": "unit", "id": id, "key": "u%d" % id})
+	oob_items[id] = it
+	var kids: Array = children.get(id, [])
+	for c in kids:
+		var cr: Dictionary = by_id.get(int(c), {})
+		if not cr.is_empty() and cr["alive"]:
+			_add_oob_branch(it, cr, by_id, children)
+	if it.get_child_count() > 0:
+		it.collapsed = oob_folded.get("u%d" % id, false)
+
+
+func _fill_oob_row(it: TreeItem, r: Dictionary, children: Dictionary, by_id: Dictionary) -> void:
+	var tn := String(r["type_name"])
+	var abbr: String = OOB_TYPE_ABBR.get(tn, tn)
+	var nm := String(r["name"])
+	# "1st Tank" + "Tank" reads twice: add the type only where the name doesn't say it.
+	var label := nm if nm.containsn(abbr) or nm.containsn(tn) else "%s %s" % [nm, abbr]
+	var role := String(r["role"])
+	if r["militia"]:
+		label = "%s (%s)" % [nm, r.get("holding_name", "town")]
+	elif by_id.has(int(r["parent"])) and int(by_id[int(r["parent"])]["id"]) >= 0 and String(r["type_name"]) != String(by_id[int(r["parent"])]["type_name"]) and nm.containsn("dismount"):
+		label = "Squads" # an APC/IFV platoon's own squads, listed under their vehicles
+	elif role == "leader":
+		label += "  ▸ " + String(r.get("group_name", "Team"))
+	elif role == "acting":
+		label += "  (acting HQ)"
+	if r["embarked"]:
+		label += " · aboard"
+	it.set_text(0, label)
+	var name_col := TEXT
+	if not r["alive"]:
+		name_col = Color(0.55, 0.55, 0.52)
+	elif role == "hq":
+		name_col = Color(1, 0.95, 0.8)
+	elif int(r.get("group_color", -1)) >= 0:
+		name_col = TEAM_COLORS[int(r["group_color"]) % TEAM_COLORS.size()]
+	elif r["embarked"]:
+		name_col = MUTED
+	it.set_custom_color(0, name_col)
+	# Elements in the fight, coloured as on the counters.
+	var em := int(r["elements_max"])
+	var ea := int(r["elements"])
+	it.set_text(1, "%d/%d" % [ea, em])
+	it.set_text_alignment(1, HORIZONTAL_ALIGNMENT_RIGHT)
+	it.set_custom_color(1, Color(0.55, 0.55, 0.52) if not r["alive"] else (Color.WHITE if ea >= em else (Color("#ffcc4d") if ea * 2 >= em else Color("#ff6b4a"))))
+	var st := String(r["status"])
+	if r["pending"]:
+		st = "Order sent"
+	it.set_text(2, st)
+	var sc := MUTED
+	match st:
+		"Engaged": sc = Color(1.0, 0.7, 0.45)
+		"Pinned", "Knocked out": sc = Color("#ff6b4a") if st == "Pinned" else Color(0.55, 0.55, 0.52)
+		"Falling back": sc = Color(1.0, 0.85, 0.4)
+		"Order sent": sc = HINT
+		"Holding", "Aboard": sc = MUTED
+		_: sc = Color(0.7, 0.85, 1.0)
+	it.set_custom_color(2, sc)
+	# Tooltip: what it is and how it stands to its commander.
+	var tip := "%s — %s" % [nm, tn]
+	if String(r.get("equipment", "")) != "":
+		tip += ", " + String(r["equipment"])
+	var par := int(r["parent"])
+	var pr: Dictionary = by_id.get(par, {})
+	if not pr.is_empty() and r["alive"]:
+		var link := int(r.get("link", -1))
+		var how := ""
+		match link:
+			1: how = ", inside its zone"
+			2: how = ", outside its zone: orders ×1.5"
+			3: how = ", beyond radio range: orders by courier"
+		tip += "\nAnswers to %s%s" % [pr["name"], how]
+	elif r["alive"] and not r["militia"] and role != "hq":
+		tip += "\nNo HQ to answer to: orders improvised (+25 min)"
+	if children.has(int(r["id"])):
+		var n := _count_under(int(r["id"]), children, by_id)
+		if n > 0:
+			tip += "\nCommands %d unit%s" % [n, "" if n == 1 else "s"]
+	if r["alive"] and not r["embarked"]:
+		tip += "\nClick: select · Double-click: it and everything under it"
+	for c in 3:
+		it.set_tooltip_text(c, tip)
+
+
 ## Shows the panel for `mode` (0 hides it). `key`: rows from MurksWorld.get_plan_key.
 ## `info`: a line under the key (line of sight: the point and what is seen).
 func show_plan(mode: int, names: Array, key: Array, info := "", eye_index := 1) -> void:
@@ -1431,6 +1830,7 @@ func _controls_body() -> Control:
 			["F4 / F6", "Map legend / painted terrain textures on or off"],
 			["F7", "Counters show vehicles or NATO symbols"],
 			["F10", "Planning map: going, cover, slope, line of sight (steps through)"],
+			["F11", "Order of battle panel: click a row to select, double-click for the whole command"],
 			["F8", "Topographic map: contour lines and heights"],
 			["Esc", "Pause menu"]]]]
 	var cols := HBoxContainer.new()

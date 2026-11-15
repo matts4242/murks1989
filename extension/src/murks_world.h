@@ -142,6 +142,7 @@ public:
     int order_group_move(int gid, Vector2i hex, int mode = 0);
     int order_group_hold(int gid);
     Array get_groups() const;
+    Array get_oob() const; // the player's order of battle by chain of command
     int set_standoff(int id, int standoff);
     void set_default_standoff(int standoff);
     int get_default_standoff() const;

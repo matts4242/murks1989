@@ -19,6 +19,18 @@ namespace {
 
 String to_gd(const std::string &s) { return String::utf8(s.c_str()); }
 
+// What a unit is doing, in the words of the unit panel.
+const char *order_text(const murks::Unit &u) {
+    static const char *kModes[4] = {"Hasty", "Road march", "Deliberate", "Assault"};
+    switch (u.order) {
+        case murks::O_MOVE: return u.mode == murks::MV_HASTY ? "Moving" : kModes[u.mode < 4 ? u.mode : 0];
+        case murks::O_RETREAT: return "Falling back";
+        case murks::O_REGROUP: return "Regrouping on HQ";
+        case murks::O_REST: return u.moving() ? "Moving to rest" : "Resting";
+        default: return "Holding";
+    }
+}
+
 const char *zone_name(int z) {
     switch (z) {
         case murks::Z_HOT: return "Hot";
@@ -98,6 +110,7 @@ void MurksWorld::_bind_methods() {
     ClassDB::bind_method(D_METHOD("order_group_move", "gid", "hex", "mode"), &MurksWorld::order_group_move, DEFVAL(0));
     ClassDB::bind_method(D_METHOD("order_group_hold", "gid"), &MurksWorld::order_group_hold);
     ClassDB::bind_method(D_METHOD("get_groups"), &MurksWorld::get_groups);
+    ClassDB::bind_method(D_METHOD("get_oob"), &MurksWorld::get_oob);
     ClassDB::bind_method(D_METHOD("set_standoff", "id", "standoff"), &MurksWorld::set_standoff);
     ClassDB::bind_method(D_METHOD("set_default_standoff", "standoff"), &MurksWorld::set_default_standoff);
     ClassDB::bind_method(D_METHOD("get_default_standoff"), &MurksWorld::get_default_standoff);
@@ -684,15 +697,7 @@ Dictionary MurksWorld::get_unit_info(int id) const {
     static const char *kModes[4] = {"Hasty", "Road march", "Deliberate", "Assault"};
     static const char *kRoe[3] = {"Fire at will", "Return fire", "Hold fire"};
     static const char *kBrk[3] = {"Heavy losses", "Light losses", "Never"};
-    const char *order = "Holding";
-    switch (u.order) {
-        case murks::O_MOVE: order = u.mode == murks::MV_HASTY ? "Moving" : kModes[u.mode]; break;
-        case murks::O_RETREAT: order = "Falling back"; break;
-        case murks::O_REGROUP: order = "Regrouping on HQ"; break;
-        case murks::O_REST: order = u.moving() ? "Moving to rest" : "Resting"; break;
-        default: break;
-    }
-    d["order"] = order;
+    d["order"] = order_text(u);
     d["mode"] = (int)u.mode;
     d["mode_name"] = kModes[u.mode];
     d["roe"] = (int)u.roe;
@@ -920,6 +925,72 @@ Array MurksWorld::get_groups() const {
         d["spacing"] = g.spacing;
         d["zone_hexes"] = world_.command_zone(world_.units[g.leader]);
         out.push_back(d);
+    }
+    return out;
+}
+
+// The player's order of battle: one row per own unit, knocked out and embarked ones included,
+// in order-of-battle order. "parent" is the unit it answers to, by the rules' own chain of
+// command (World::hq_above: its team leader, else its company HQ), so the tree is the chain
+// the command delay is worked out on. Squads belong to their APC/IFV platoon (aboard or on
+// foot); militia answer to no one in the company (parent -1, "militia"). Hostiles: none (fog of war).
+Array MurksWorld::get_oob() const {
+    Array out;
+    const auto &units = world_.units;
+    const int64_t now = world_.time_min;
+    for (int fi = 0; fi < (int)world_.formations.size(); ++fi) {
+        const murks::Formation &f = world_.formations[fi];
+        if (f.side != murks::SIDE_PLAYER) continue;
+        const int acting = world_.acting_hq(fi);
+        for (int id : f.members) {
+            const murks::Unit &u = units[id];
+            if (u.side != murks::SIDE_PLAYER) continue;
+            const murks::UnitTypeInfo &ti = murks::unit_type_info(u.type);
+            const bool dead = !u.alive && !u.embarked;
+            const bool grouped = u.group >= 0 && u.group < (int)world_.groups.size() && world_.groups[u.group].alive;
+            Dictionary d;
+            d["id"] = u.id;
+            d["name"] = to_gd(u.name);
+            d["type"] = (int)u.type;
+            d["type_name"] = ti.name;
+            d["equipment"] = to_gd(u.equipment);
+            d["formation_id"] = fi;
+            d["formation"] = to_gd(f.name);
+            d["alive"] = !dead;
+            d["embarked"] = u.embarked;
+            d["militia"] = u.militia;
+            if (u.militia && u.holding >= 0 && u.holding < (int)world_.holdings.size())
+                d["holding_name"] = to_gd(world_.holdings[u.holding].name);
+            int parent = -1;
+            if (u.carrier >= 0) parent = u.carrier;
+            else if (!dead && !u.militia) parent = world_.hq_above(u);
+            d["parent"] = parent;
+            const char *role = "";
+            if (!dead && u.type == murks::U_HQ) role = "hq";
+            else if (!dead && grouped && world_.groups[u.group].leader == u.id) role = "leader";
+            if (!dead && id == acting && u.type != murks::U_HQ) role = "acting";
+            d["role"] = role;
+            d["group_id"] = grouped ? u.group : -1;
+            if (grouped) {
+                d["group_name"] = to_gd(world_.groups[u.group].name);
+                d["group_color"] = (int)world_.groups[u.group].color;
+            }
+            d["elements"] = dead ? 0 : u.elements;
+            d["elements_max"] = u.elements_max;
+            d["strength"] = dead ? 0.0f : u.strength;
+            d["morale"] = u.morale;
+            const char *status = order_text(u);
+            if (dead) status = "Knocked out";
+            else if (u.embarked) status = "Aboard";
+            else if (u.mounting) status = "Mounting up";
+            else if (u.pinned) status = "Pinned";
+            else if (now - u.last_fired < 15 || now - u.last_hit < 15 || now - u.last_targeted < 15) status = "Engaged";
+            d["status"] = status;
+            d["pending"] = u.alive && u.pending.active;
+            // Where it stands to the one it answers to: 1 inside the zone, 2 outside, 3 beyond radio range.
+            d["link"] = (u.alive && u.carrier < 0 && !u.militia) ? command_link(u, parent) : -1;
+            out.push_back(d);
+        }
     }
     return out;
 }

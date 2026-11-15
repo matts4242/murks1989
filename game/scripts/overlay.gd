@@ -10,6 +10,7 @@ const GROUP_RADIUS := 44.0          # screen px: members of one company this clo
 const HEX_R := 288.675              # hex corner radius in metres (500 m flat to flat)
 const INK := Color(0.06, 0.06, 0.08)
 const ZONE_COLORS := [Color(0, 0, 0, 0), Color(1.0, 0.75, 0.2), Color(1.0, 0.25, 0.2)]
+const UNDER_COL := Color("#7fd0ff")  # units under a selected commander (as in the order of battle panel)
 
 var main: Node
 var font: Font
@@ -241,6 +242,7 @@ func _row_item(o: int, i: int) -> Dictionary:
 	var item := {"id": id, "side": side, "type": int(snap[o + 2]), "flags": flags, "ghost": (flags & 2) != 0,
 		"strength": snap[o + 5], "zone": int(snap[o + 6]), "morale": snap[o + 8], "order_in": snap[o + 9],
 		"roe": int(snap[o + 12]), "badge": "", "label": "", "fire": 0.0, "sel": main.selected.has(id),
+		"under": main.oob_under.has(id),
 		"echelon": ECHELONS[clampi(int(snap[o + 2]), 0, 6)], "row": i,
 		"engage": snap[o + 17], "elem": int(snap[o + 18]), "elem_max": int(snap[o + 19]),
 		"team": int(snap[o + 20]), "role": int(snap[o + 21]), "tcol": int(snap[o + 22]), "standoff": int(snap[o + 24]),
@@ -510,6 +512,10 @@ func _draw_counter(c: Vector2, s: float, it: Dictionary) -> void:
 				Vector2(px, py + s * 0.2)]), tc)
 	if it["sel"]:
 		_outline(_rrect(c, s + s * 0.24, rad * 1.5), SIGNAL, maxf(2.0, s * 0.09))
+	elif it.get("under", false) and not ghost:
+		# Under a selected HQ or team leader: a blue frame with a soft halo.
+		_outline(_rrect(c, s + s * 0.34, rad * 1.7), Color(UNDER_COL, 0.35), maxf(4.0, s * 0.14))
+		_outline(_rrect(c, s + s * 0.24, rad * 1.5), UNDER_COL, maxf(1.5, s * 0.06))
 
 
 ## Diagonal white hatching across the counter (broken morale).
@@ -982,14 +988,17 @@ func _draw_grouped(xf: Transform2D, view: Rect2) -> void:
 				draw_line(true_pos, center, Color(0, 0, 0, 0.75), 1.5)
 				draw_circle(true_pos, 3.0, Color(0, 0, 0, 0.85))
 			var sel := false
+			var under := false
 			for id in ids:
 				if main.selected.has(id):
 					sel = true
-					break
+				elif main.oob_under.has(id):
+					under = true
 			groups.append({"pos": center, "ids": ids, "side": side})
 			var o: int = cl["first"]
 			var item := _row_item(o, int(cl["row"]))
 			item["sel"] = sel
+			item["under"] = under and not sel
 			if ids.size() == 1:
 				_draw_counter(center, THEATER_COUNTER, item)
 				drawn.append({"rect": Rect2(center - Vector2.ONE * THEATER_COUNTER * 0.5, Vector2.ONE * THEATER_COUNTER),
