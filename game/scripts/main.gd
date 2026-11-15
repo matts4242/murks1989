@@ -2700,9 +2700,9 @@ func _run_autotest() -> void:
 		show_oob = true
 		hud.set_oob_visible(true)
 		selected = [0]
-		await _shot("42_oob_hq", unit_position(0) + Vector2(-3000, 0), 0.04)
+		await _shot("44_oob_hq", unit_position(0) + Vector2(-3000, 0), 0.04)
 		selected = [pick[0]]
-		await _shot("43_oob_team_leader", unit_position(pick[0]) + Vector2(-2000, 0), 0.05)
+		await _shot("45_oob_team_leader", unit_position(pick[0]) + Vector2(-2000, 0), 0.05)
 		show_oob = false
 		hud.set_oob_visible(false)
 		selected.clear()

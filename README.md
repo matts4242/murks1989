@@ -75,7 +75,7 @@ The map is baked from real data by `tools/bake_region.py` (see "The real map" be
 
 ![Company at Sulechów](docs/screenshots/01_company_close.png)
 
-![Order of battle panel: Murks HQ selected, everything under it marked blue on the map and in the tree](docs/screenshots/42_oob_hq.png)
+![Order of battle panel: Murks HQ selected, everything under it marked blue on the map and in the tree](docs/screenshots/44_oob_hq.png)
 
 ![Holding panel](docs/screenshots/26_holding_panel.png)
 
