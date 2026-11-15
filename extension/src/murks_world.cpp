@@ -70,6 +70,15 @@ void MurksWorld::_bind_methods() {
     ClassDB::bind_method(D_METHOD("get_plan_key", "mode"), &MurksWorld::get_plan_key);
     ClassDB::bind_method(D_METHOD("get_plan_mode_name", "mode"), &MurksWorld::get_plan_mode_name);
     ClassDB::bind_method(D_METHOD("get_viewshed", "hex", "eye_m"), &MurksWorld::get_viewshed);
+    ClassDB::bind_method(D_METHOD("get_route_estimate", "from", "to", "mobility", "mode"), &MurksWorld::get_route_estimate);
+    ClassDB::bind_method(D_METHOD("get_profile", "points", "eye_m"), &MurksWorld::get_profile);
+    ClassDB::bind_method(D_METHOD("get_grid_ref", "pos"), &MurksWorld::get_grid_ref);
+    ClassDB::bind_method(D_METHOD("get_grid_bearing", "a", "b"), &MurksWorld::get_grid_bearing);
+    ClassDB::bind_method(D_METHOD("get_markings"), &MurksWorld::get_markings);
+    ClassDB::bind_method(D_METHOD("add_marking", "kind", "name", "points"), &MurksWorld::add_marking);
+    ClassDB::bind_method(D_METHOD("rename_marking", "index", "name"), &MurksWorld::rename_marking);
+    ClassDB::bind_method(D_METHOD("remove_marking", "index"), &MurksWorld::remove_marking);
+    ClassDB::bind_method(D_METHOD("clear_markings"), &MurksWorld::clear_markings);
     ClassDB::bind_method(D_METHOD("get_hex_info", "hex"), &MurksWorld::get_hex_info);
     ClassDB::bind_method(D_METHOD("get_settlements", "min_population"), &MurksWorld::get_settlements);
     ClassDB::bind_method(D_METHOD("advance", "ticks", "budget_ms"), &MurksWorld::advance);
@@ -160,6 +169,11 @@ Dictionary MurksWorld::get_map_info() const {
     d["width_km"] = world_.map.width_m() / 1000.0;
     d["height_km"] = world_.map.height_m() / 1000.0;
     d["settlements"] = (int)world_.map.settlements.size();
+    // Grid (MRK-26): easting = grid_e0 + x, northing = grid_n0 - y, in metres.
+    double e0 = 0, n0 = 0;
+    murks::grid_origin(world_.map, e0, n0);
+    d["grid_e0"] = e0;
+    d["grid_n0"] = n0;
     return d;
 }
 
@@ -367,6 +381,128 @@ Dictionary MurksWorld::get_viewshed(Vector2i hex, float eye_m) const {
                          ((murks::sight_tint(2) >> 16) & 255) / 255.0f, ((murks::sight_tint(2) >> 24) & 255) / 255.0f);
     return d;
 }
+
+// --- Planning tools (MRK-26) ---
+
+// The ruler's travel estimate between two hexes for a mobility class and move mode.
+Dictionary MurksWorld::get_route_estimate(Vector2i from, Vector2i to, int mobility, int mode) {
+    Dictionary d;
+    if (!generated_ || mode < 0 || mode > murks::MV_ASSAULT) return d;
+    murks::HexCoord a{from.x, from.y}, b{to.x, to.y};
+    murks::RouteEstimate r = world_.route_estimate(a, b, mobility, mode);
+    d["found"] = r.found;
+    d["minutes"] = r.minutes;
+    d["km"] = r.km;
+    d["road_km"] = r.road_km;
+    PackedVector2Array path;
+    if (r.found && world_.map.in_bounds(a)) {
+        murks::Vec2 c = murks::hex_center(a);
+        path.push_back(Vector2((real_t)c.x, (real_t)c.y));
+        for (int idx : r.path) {
+            c = murks::hex_center(world_.map.coord_of(idx));
+            path.push_back(Vector2((real_t)c.x, (real_t)c.y));
+        }
+    }
+    d["path"] = path;
+    return d;
+}
+
+// Elevation profile. Two points: the straight line between their hexes, with the sight line
+// from an eye eye_m up at the start to a target (the spotting model's height) at the end. More
+// points: a route through their hexes (hex centres of a path), no sight line.
+Dictionary MurksWorld::get_profile(PackedVector2Array points, float eye_m) const {
+    Dictionary d;
+    if (!generated_ || points.size() < 2) return d;
+    murks::Profile pf;
+    if (points.size() == 2) {
+        murks::HexCoord a = murks::world_to_hex(points[0].x, points[0].y), b = murks::world_to_hex(points[1].x, points[1].y);
+        if (!world_.map.in_bounds(a) || !world_.map.in_bounds(b)) return d;
+        murks::profile_line(world_, a, b, eye_m, murks::SPOT_TARGET_M, pf);
+    } else {
+        std::vector<murks::HexCoord> hexes;
+        for (int64_t i = 0; i < points.size(); ++i) {
+            murks::HexCoord h = murks::world_to_hex(points[i].x, points[i].y);
+            if (!world_.map.in_bounds(h)) break;
+            if (hexes.empty() || hexes.back() != h) hexes.push_back(h);
+        }
+        murks::profile_route(world_, hexes, pf);
+    }
+    PackedFloat32Array km, ground, cover;
+    PackedInt32Array terrain;
+    PackedVector2Array centres;
+    for (const auto &p : pf.pts) {
+        km.push_back(p.km);
+        ground.push_back((float)p.ground);
+        cover.push_back((float)p.cover);
+        terrain.push_back(p.terrain);
+        murks::Vec2 c = murks::hex_center(p.hex);
+        centres.push_back(Vector2((real_t)c.x, (real_t)c.y));
+    }
+    d["km"] = km;
+    d["ground"] = ground;
+    d["cover"] = cover;
+    d["terrain"] = terrain;
+    d["centres"] = centres;
+    d["block"] = pf.block;
+    d["eye"] = pf.eye_m;
+    d["target"] = pf.target_m;
+    d["climb"] = pf.climb_m;
+    d["descent"] = pf.descent_m;
+    d["steepest"] = pf.steepest_pct;
+    return d;
+}
+
+String MurksWorld::get_grid_ref(Vector2 pos) const {
+    if (!generated_) return String();
+    return to_gd(murks::grid_ref(world_.map, pos.x, pos.y));
+}
+
+float MurksWorld::get_grid_bearing(Vector2 a, Vector2 b) const {
+    return (float)murks::grid_bearing(a.x, a.y, b.x, b.y);
+}
+
+Array MurksWorld::get_markings() const {
+    Array out;
+    for (const auto &m : world_.markings) {
+        Dictionary d;
+        d["kind"] = (int)m.kind;
+        d["name"] = to_gd(m.name);
+        PackedVector2Array pts;
+        for (size_t i = 0; i + 1 < m.xy.size(); i += 2) pts.push_back(Vector2((real_t)m.xy[i], (real_t)m.xy[i + 1]));
+        d["points"] = pts;
+        out.append(d);
+    }
+    return out;
+}
+
+// A marking's name as UTF-8, cut to the core's limit on a character boundary.
+static std::string mark_name(const String &name) {
+    std::string s = name.strip_edges().utf8().get_data();
+    if (s.size() > (size_t)murks::MAX_MARK_NAME) {
+        size_t n = murks::MAX_MARK_NAME;
+        while (n > 0 && ((uint8_t)s[n] & 0xC0) == 0x80) --n;
+        s.resize(n);
+    }
+    return s;
+}
+
+int MurksWorld::add_marking(int kind, String name, PackedVector2Array points) {
+    if (kind < 0 || kind >= murks::MK_COUNT) return -1;
+    murks::Marking m;
+    m.kind = (uint8_t)kind;
+    m.name = mark_name(name);
+    for (int64_t i = 0; i < points.size(); ++i) {
+        m.xy.push_back((int)std::lround(points[i].x));
+        m.xy.push_back((int)std::lround(points[i].y));
+    }
+    return world_.add_marking(m);
+}
+
+bool MurksWorld::rename_marking(int index, String name) { return world_.rename_marking(index, mark_name(name)); }
+
+bool MurksWorld::remove_marking(int index) { return world_.remove_marking(index); }
+
+void MurksWorld::clear_markings() { world_.markings.clear(); }
 
 // Per-hex terrain, density, elevation and cover for the terrain shader (one pixel per hex).
 Ref<Image> MurksWorld::build_hex_data_image() const {
@@ -631,6 +767,7 @@ Dictionary MurksWorld::get_unit_info(int id) const {
     d["alive"] = u.alive;
     d["type"] = (int)u.type;
     d["type_name"] = ti.name;
+    d["mobility"] = (int)ti.mobility; // murks::Mobility: 0 tracked, 1 wheeled, 2 foot
     if (!own) {
         // Only what an observer could tell.
         d["name"] = String("Hostile ") + ti.name;

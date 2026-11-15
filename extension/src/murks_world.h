@@ -110,6 +110,16 @@ public:
     Array get_plan_key(int mode) const;
     String get_plan_mode_name(int mode) const;
     Dictionary get_viewshed(Vector2i hex, float eye_m) const;
+    // Planning tools (MRK-26).
+    Dictionary get_route_estimate(Vector2i from, Vector2i to, int mobility, int mode);
+    Dictionary get_profile(PackedVector2Array points, float eye_m) const;
+    String get_grid_ref(Vector2 pos) const;
+    float get_grid_bearing(Vector2 a, Vector2 b) const;
+    Array get_markings() const;
+    int add_marking(int kind, String name, PackedVector2Array points);
+    bool rename_marking(int index, String name);
+    bool remove_marking(int index);
+    void clear_markings();
     Dictionary get_hex_info(Vector2i hex) const;
     Array get_settlements(int min_population) const;
 

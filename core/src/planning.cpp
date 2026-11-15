@@ -221,4 +221,78 @@ void viewshed(const World &w, HexCoord from, float eye_m, float target_m, int ra
     }
 }
 
+// --- Planning tools (MRK-26) ---
+
+static void finish_profile(const World &w, const std::vector<HexCoord> &hexes, Profile &out) {
+    out.pts.clear();
+    out.climb_m = out.descent_m = out.steepest_pct = 0;
+    double km = 0;
+    for (size_t i = 0; i < hexes.size(); ++i) {
+        const HexCoord c = hexes[i];
+        if (!w.map.in_bounds(c)) break;
+        if (i > 0) {
+            Vec2 p = hex_center(hexes[i - 1]), q = hex_center(c);
+            km += std::hypot(q.x - p.x, q.y - p.y) / 1000.0;
+        }
+        const Hex &h = w.map.at(c);
+        ProfilePoint pp;
+        pp.hex = c;
+        pp.km = (float)km;
+        pp.ground = std::max<int>(0, h.elev);
+        pp.cover = h.cover;
+        pp.terrain = h.terrain;
+        if (!out.pts.empty()) {
+            const ProfilePoint &b = out.pts.back();
+            const int dz = pp.ground - b.ground;
+            if (dz > 0) out.climb_m += dz;
+            else out.descent_m -= dz;
+            const float run = (pp.km - b.km) * 1000.0f;
+            if (run > 1.0f) out.steepest_pct = std::max(out.steepest_pct, 100.0f * std::abs(dz) / run);
+        }
+        out.pts.push_back(pp);
+    }
+}
+
+void profile_line(const World &w, HexCoord a, HexCoord b, float eye_m, float target_m, Profile &out) {
+    std::vector<HexCoord> line;
+    hex_line(a, b, line);
+    finish_profile(w, line, out);
+    out.eye_m = eye_m;
+    out.target_m = target_m;
+    out.block = out.pts.size() == line.size() ? w.sight_block(a, b, eye_m, target_m) : -2;
+}
+
+void profile_route(const World &w, const std::vector<HexCoord> &hexes, Profile &out) {
+    finish_profile(w, hexes, out);
+    out.eye_m = out.target_m = 0;
+    out.block = -3;
+}
+
+void grid_origin(const Map &m, double &e0, double &n0) {
+    if (m.epsg == 3035) {
+        e0 = m.geo_origin_e;
+        n0 = m.geo_origin_n;
+    } else {
+        e0 = 0;
+        n0 = m.height_m();
+    }
+}
+
+std::string grid_ref(const Map &m, double wx, double wy) {
+    double e0, n0;
+    grid_origin(m, e0, n0);
+    const long long e = (long long)std::floor((e0 + wx) / 100.0), n = (long long)std::floor((n0 - wy) / 100.0);
+    if (e < 0 || n < 0) return "";
+    char buf[48];
+    std::snprintf(buf, sizeof buf, "%02lld/%02lld %03lld %03lld", (e / 1000) % 100, (n / 1000) % 100, e % 1000, n % 1000);
+    return buf;
+}
+
+double grid_bearing(double ax, double ay, double bx, double by) {
+    double deg = std::atan2(bx - ax, -(by - ay)) * 180.0 / 3.14159265358979323846;
+    if (deg < 0) deg += 360.0;
+    if (deg >= 360.0) deg -= 360.0;
+    return deg;
+}
+
 } // namespace murks
