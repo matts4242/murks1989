@@ -1126,7 +1126,79 @@ func _draw_orders(xf: Transform2D) -> void:
 				_stroke_route(PackedVector2Array([start, to]), own_col, w * 0.9, 8.0)
 			else:
 				to = start
-			_signal_tag(to, "%s +%d′" % [info.get("pending_kind", "Order"), int(info.get("pending_in", 0))])
+			_signal_tag(to, "%s +%d′" % ["Adjust" if info.get("pending_adjust", false) else info.get("pending_kind", "Order"), int(info.get("pending_in", 0))])
+		# Waypoints still ahead (MRK-20): numbered markers, and the later legs as straight
+		# lines styled by their move mode (the leg under way is the path above).
+		var route: Array = info.get("route", [])
+		if route.size() > 1 or (route.size() == 1 and path.size() < 2):
+			var first := int(info.get("wp_index", 0))
+			var prev: Vector2 = xf * (route[0]["pos"] as Vector2)
+			for k in route.size():
+				var p: Vector2 = xf * (route[k]["pos"] as Vector2)
+				if k > 0:
+					_stroke_leg(prev, p, int(route[k]["mode"]), own_col, w * 0.8)
+				_waypoint_marker(p, first + k + 1, own_col, int(route[k]["halt"]))
+				prev = p
+			var why := String(info.get("route_paused", ""))
+			if why != "":
+				_signal_tag(start, "Route paused: %s" % why)
+			elif info.has("route_halt_in"):
+				_signal_tag(start, "Halt %d′" % int(info["route_halt_in"]))
+	_draw_route_draft(xf, w, own_col)
+
+
+## A leg drawn in the style of its move mode: solid move, long dashes road march, short
+## dashes deliberate, double line assault.
+func _stroke_leg(a: Vector2, b: Vector2, mode: int, col: Color, w: float) -> void:
+	match mode:
+		1: draw_dashed_line(a, b, col, w, 14.0)
+		2: draw_dashed_line(a, b, col, w, 5.0)
+		3:
+			var n := (b - a).orthogonal().normalized() * w
+			draw_line(a + n, b + n, col, w * 0.7, true)
+			draw_line(a - n, b - n, col, w * 0.7, true)
+		_: draw_line(a, b, col, w, true)
+
+
+func _waypoint_marker(p: Vector2, n: int, col: Color, halt: int) -> void:
+	draw_circle(p, 9.0, Color(0, 0, 0, 0.6))
+	draw_circle(p, 7.5, col)
+	_text_center(p, str(n), 11, Color("#10140c"))
+	if halt > 0:
+		var t := "%d′" % halt
+		draw_string_outline(font, p + Vector2(11, -6), t, HORIZONTAL_ALIGNMENT_LEFT, -1, 11, 4, Color(0, 0, 0, 0.85))
+		draw_string(font, p + Vector2(11, -6), t, HORIZONTAL_ALIGNMENT_LEFT, -1, 11, Color(0.9, 0.97, 1.0))
+
+
+## The route being plotted (Shift+right-click): markers, the legs between them, and the
+## A* path and travel time from the last waypoint to the cursor.
+func _draw_route_draft(xf: Transform2D, w: float, own_col: Color) -> void:
+	if main.route_draft.is_empty() or main.route_unit < 0:
+		return
+	var col := own_col.lightened(0.3)
+	col.a = 0.9
+	var prev: Vector2 = xf * main.display_position(main.route_unit)
+	for k in main.route_draft.size():
+		var wpd: Dictionary = main.route_draft[k]
+		var p: Vector2 = xf * (main.world.hex_to_world(wpd["hex"]) as Vector2)
+		_stroke_leg(prev, p, int(wpd["mode"]), col, w * 0.8)
+		_waypoint_marker(p, k + 1, col, int(wpd["halt"]))
+		prev = p
+	var pv: Dictionary = main.route_preview
+	var pp: PackedVector2Array = pv.get("path", PackedVector2Array())
+	if pp.size() >= 2:
+		var pts := PackedVector2Array()
+		var step := maxi(1, pp.size() / 200)
+		for i in range(0, pp.size(), step):
+			pts.append(xf * pp[i])
+		pts.append(xf * pp[pp.size() - 1])
+		for i in pts.size() - 1:
+			draw_dashed_line(pts[i], pts[i + 1], col, maxf(1.5, w * 0.6), 4.0)
+		var mins := int(pv.get("minutes", 0.0))
+		var t := "+%dh%02d" % [mins / 60, mins % 60]
+		var end := pts[pts.size() - 1]
+		draw_string_outline(font, end + Vector2(10, 18), t, HORIZONTAL_ALIGNMENT_LEFT, -1, 12, 4, Color(0, 0, 0, 0.85))
+		draw_string(font, end + Vector2(10, 18), t, HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color(0.9, 0.97, 1.0))
 
 
 ## Chain of command on the map: each team member's dashed line to its leader in the team

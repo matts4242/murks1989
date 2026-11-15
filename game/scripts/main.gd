@@ -36,6 +36,14 @@ var show_zones := false
 var group_companies := true
 var move_mode := -1                # armed right-click order: -1 none (right-click opens the order menu), 0 hasty, 1 road march, 2 deliberate, 3 assault
 const MODE_NAMES := ["Move", "Road march", "Deliberate move", "Assault"]
+const MAX_WAYPOINTS := 16
+
+# Route plotting (MRK-20): Shift+right-click adds a waypoint for the selected unit or team;
+# Enter sends the whole route as one order, Backspace removes the last waypoint, Esc drops the plan.
+var route_draft: Array = []   # [{hex: Vector2i, mode: int, halt: int, shape: int}]
+var route_unit := -1          # who the plan is for (a team's leader for a team)
+var route_team := -1          # the team, when the plan is for a team
+var route_preview := {}       # {hex, path, minutes}: from the last waypoint to the cursor
 static var skip_title := false     # New game from the menus: reload straight into play, past the title screen
 var menu_world_pos := Vector2.ZERO # where the right-click order menu was opened (world units)
 var resume_speed := 0              # speed to go back to when the pause menu closes
@@ -574,8 +582,11 @@ func _unhandled_input(event: InputEvent) -> void:
 					_click_select(mb.position, mb.shift_pressed)
 				dragging = false
 		elif mb.button_index == MOUSE_BUTTON_RIGHT and mb.pressed:
-			# An armed order (F/Q/E/R or the panel) goes at once; otherwise the order menu opens.
-			if move_mode >= 0 and not _own_selected().is_empty():
+			# Shift+right-click plots a waypoint; an armed order (F/Q/E/R or the panel) goes at
+			# once; otherwise the order menu opens.
+			if mb.shift_pressed and not _own_selected().is_empty():
+				_add_waypoint(_screen_to_world(mb.position))
+			elif move_mode >= 0 and not _own_selected().is_empty():
 				_order_move_to(_screen_to_world(mb.position))
 			else:
 				_open_order_menu(mb.position)
@@ -587,6 +598,7 @@ func _unhandled_input(event: InputEvent) -> void:
 			if drag_moved:
 				camera.position -= mm.relative / camera.zoom.x
 		_update_status()
+		_update_route_preview()
 	elif event is InputEventKey and event.pressed and not event.echo:
 		var ke := event as InputEventKey
 		if ke.shift_pressed and tools.shift_key(ke.keycode):
@@ -631,6 +643,8 @@ func _on_key(key: Key) -> void:
 		KEY_M: _on_menu_action("whole_map")
 		KEY_ESCAPE: _on_escape()
 		KEY_F3: _on_toggle("Supply")
+		KEY_ENTER, KEY_KP_ENTER: _send_route()
+		KEY_BACKSPACE: _drop_waypoint()
 		KEY_F1: hud.toggle_help()
 		KEY_F2: hud.toggle_credits()
 		KEY_F4: hud.toggle_legend()
@@ -771,6 +785,9 @@ func _on_escape() -> void:
 		_close_pause()
 	elif tools.cancel():
 		return
+	elif not route_draft.is_empty():
+		_clear_route_draft()
+		hud.show_toast("Route plan dropped.", 2.0)
 	elif move_mode >= 0:
 		move_mode = -1
 		hud.show_toast("Armed order cancelled: right-click opens the order menu again.", 2.5)
@@ -1079,6 +1096,120 @@ func _order_move_to(world_pos: Vector2) -> void:
 	hud.show_toast("%s ordered for %d unit%s. Orders take effect in %s (command delay).%s" % [MODE_NAMES[mode], sent, "" if sent == 1 else "s", when, teams_txt])
 	# An armed order applies once: the next right-click opens the order menu again.
 	move_mode = -1
+
+
+# --- Routes (MRK-20) ---------------------------------------------------------------------
+
+## Who a route plan goes to: one unit, or a whole team when its leader and only its members
+## are selected. Empty when the selection is anything else.
+func _route_target() -> Dictionary:
+	var own := _own_selected()
+	if own.is_empty():
+		return {}
+	for gid in _selected_teams():
+		var tm := _team(gid)
+		if tm.is_empty() or not own.has(int(tm["leader"])):
+			continue
+		var members: PackedInt32Array = tm["units"]
+		var all_in := true
+		for id in own:
+			if not members.has(id):
+				all_in = false
+		if all_in:
+			return {"unit": int(tm["leader"]), "team": gid}
+	if own.size() == 1:
+		return {"unit": own[0], "team": -1}
+	return {}
+
+
+func _routes_supported() -> bool:
+	return world.has_method("order_route") # an older extension binary has no routes
+
+
+func _clear_route_draft() -> void:
+	route_draft.clear()
+	route_unit = -1
+	route_team = -1
+	route_preview = {}
+
+
+## Shift+right-click: adds a waypoint, at the armed move mode (hasty if none) for the leg to it.
+## The first waypoint for a unit starts from the route it is on, so the plan extends that route.
+func _add_waypoint(world_pos: Vector2) -> void:
+	if not _routes_supported():
+		hud.show_toast("Routes need the rebuilt extension (game/bin).")
+		return
+	var tgt := _route_target()
+	if tgt.is_empty():
+		hud.show_toast("Routes go to one unit or one team at a time: select it and Shift+right-click.")
+		return
+	if int(tgt["unit"]) != route_unit:
+		_clear_route_draft()
+		route_unit = int(tgt["unit"])
+		route_team = int(tgt["team"])
+		var info: Dictionary = world.get_unit_info(route_unit)
+		for w in info.get("route", []):
+			route_draft.append({"hex": w["hex"], "mode": int(w["mode"]), "halt": int(w["halt"]), "shape": int(w["shape"])})
+	if route_draft.size() >= MAX_WAYPOINTS:
+		hud.show_toast("A route holds %d waypoints at most." % MAX_WAYPOINTS)
+		return
+	var mode := maxi(move_mode, 0)
+	route_draft.append({"hex": world.world_to_hex(world_pos), "mode": mode, "halt": 0, "shape": -1})
+	var est: Dictionary = world.route_delay(route_unit, route_draft)
+	if int(est.get("delay", -1)) < 0:
+		route_draft.pop_back()
+		hud.show_toast("Can't put a waypoint there: water or off the map.")
+		return
+	route_preview = {}
+	hud.show_toast("Waypoint %d (%s). Enter sends the route: %s in %d min. Backspace removes the last, Esc drops the plan." % [
+		route_draft.size(), MODE_NAMES[mode].to_lower(),
+		"an adjustment" if est.get("adjust", false) else "a new order", int(est["delay"])], 5.0)
+
+
+func _drop_waypoint() -> void:
+	if route_draft.is_empty():
+		return
+	route_draft.pop_back()
+	route_preview = {}
+	if route_draft.is_empty():
+		_clear_route_draft()
+		hud.show_toast("Route plan dropped.", 2.0)
+	else:
+		hud.show_toast("Waypoint removed: %d left." % route_draft.size(), 2.0)
+
+
+## Enter: the whole route goes down the chain as one order with one command delay.
+func _send_route() -> void:
+	if route_draft.is_empty() or not _routes_supported():
+		return
+	var est: Dictionary = world.route_delay(route_unit, route_draft)
+	var d := -1
+	if route_team >= 0:
+		d = world.order_group_route(route_team, route_draft)
+	else:
+		d = world.order_route(route_unit, route_draft)
+	if d < 0:
+		hud.show_toast("That route can't be given.")
+		return
+	var last: Dictionary = route_draft[route_draft.size() - 1]
+	pings.append({"pos": world.hex_to_world(last["hex"]), "t": Time.get_ticks_msec(), "color": Color(0.6, 0.85, 1.0)})
+	hud.show_toast("Route of %d waypoint%s ordered%s. Takes effect in %d min (%s)." % [
+		route_draft.size(), "" if route_draft.size() == 1 else "s",
+		" for the team" if route_team >= 0 else "", d,
+		"adjustment" if est.get("adjust", false) else "command delay"])
+	_clear_route_draft()
+
+
+## The leg from the last waypoint to the cursor, with its travel time, while plotting.
+func _update_route_preview() -> void:
+	if route_draft.is_empty() or not _routes_supported():
+		return
+	var hex: Vector2i = world.world_to_hex(get_global_mouse_position())
+	if route_preview.get("hex", Vector2i(-1, -1)) == hex:
+		return
+	var last: Dictionary = route_draft[route_draft.size() - 1]
+	var plan: Dictionary = world.plan_leg(route_unit, last["hex"], hex, maxi(move_mode, 0))
+	route_preview = {"hex": hex, "path": plan.get("path", PackedVector2Array()), "minutes": float(plan.get("minutes", -1.0))}
 
 
 ## Orders from the command panel (and their keys).

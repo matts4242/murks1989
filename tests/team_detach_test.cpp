@@ -106,6 +106,27 @@ int main() {
         if (e.text.find("rejoins") != std::string::npos) ++rejoin_events;
     check(rejoin_events == 1, "reported once");
 
+    std::printf("Routes (MRK-20 with MRK-22):\n");
+    {
+        // A member on its own route with a halt stays out when the team gets a route; rejoin ends its route.
+        std::vector<Waypoint> own(2);
+        own[0].at = {50, 70}; own[0].halt_min = 60;
+        own[1].at = {50, 90};
+        const int od = w.order_route(a, own);
+        ticks(w, od + 1);
+        check(!w.units[a].follow && w.units[a].on_route(), "a member's own route detaches it");
+        std::vector<Waypoint> team(1);
+        team[0].at = {30, 64};
+        const int trd = w.order_group_route(g, team);
+        ticks(w, trd + 1);
+        check(!w.units[a].follow && w.units[a].on_route(), "a team route leaves the detached member on its own route");
+        const int rr = w.order_rejoin(a);
+        ticks(w, rr + 1);
+        check(w.units[a].follow && !w.units[a].on_route(), "rejoin ends the member's own route");
+        for (int m = 0; m < 900 && hex_distance(w.units[a].pos, w.units[l].pos) > 3; ++m) w.tick();
+        check(hex_distance(w.units[a].pos, w.units[l].pos) <= 3, "and it keeps station on the leader again");
+    }
+
     std::printf("Save/load:\n");
     {
         w.order_move(b, {40, 80}, MV_HASTY);

@@ -138,6 +138,12 @@ public:
     int get_unit_stride() const { return UNIT_STRIDE; }
     Dictionary get_unit_info(int id) const;
     int order_move(int id, Vector2i hex, int mode = 0);
+    // Routes (MRK-20). A route is an Array of Dictionaries {hex: Vector2i, mode: int,
+    // halt: int minutes, shape: int (-1 keep)}, up to 16.
+    int order_route(int id, const Array &route);
+    Dictionary route_delay(int id, const Array &route) const; // {delay, adjust}; delay -1 = not valid
+    int order_group_route(int gid, const Array &route);
+    Dictionary plan_leg(int id, Vector2i from, Vector2i to, int mode); // {minutes, path} (world positions)
     int order_hold(int id);
     int order_rejoin(int id); // detached team member takes its place again
     int order_fall_back(int id);
