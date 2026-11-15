@@ -7,7 +7,8 @@ extends Node2D
 ## shader falls back to the sprite's own texture (one average colour per hex, mipmapped)
 ## so nothing shimmers. Closer in, roads, rivers and railways are drawn over it as
 ## 64 x 64-hex chunk meshes built by the C++ core, streamed in as they come into view
-## and freed when far away.
+## and freed when far away. A planning mode (MRK-25) lays a tint per hex over the ground:
+## going, cover, slope from one whole-map image, line of sight from a small local one.
 
 const CHUNK_HEXES := 64
 const MAX_LOADED := 260          # chunk meshes kept before unloading far ones
@@ -19,6 +20,12 @@ const TOPO_CLOSE_PX := 20.0      # hex size on screen from which contours are ev
 const TOPO_FAR_PX := 3.0         # ... and below which every 500 m (100 m in between)
 const NATURAL_EDGE_NOISE := 0.3  # how far terrain borders wander (0 = crisp hex borders)
 const TERRAIN_SHADER := preload("res://shaders/terrain.gdshader")
+# Planning modes, as murks::PlanMode in core/include/murks/planning.hpp.
+const PLAN_OFF := 0
+const PLAN_COVER := 4
+const PLAN_SLOPE := 5
+const PLAN_SIGHT := 6
+const PLAN_COUNT := 7
 
 var build_budget_ms := 6.0       # per frame
 var world: MurksWorld
@@ -32,6 +39,9 @@ var topo_lod := 0                # 0: contours every 20 m, heavier every 100 m; 
 var show_grid := true
 var show_detail := true          # painted textures (off: one flat colour per terrain)
 var natural_edges := true        # terrain borders wander (off: crisp hex borders)
+var plan_mode := PLAN_OFF        # the planning mode shown
+var plan_built := -1             # the whole-map mode whose tint image is loaded
+var plan_build_ms := 0.0
 var chunk_count := Vector2i.ZERO
 var chunk_size_m := Vector2.ZERO
 var builds_last_frame := 0
@@ -81,6 +91,35 @@ func setup_relief() -> void:
 	terrain_mat.set_shader_parameter("height_tex", ImageTexture.create_from_image(img))
 	terrain_mat.set_shader_parameter("height_px", world.get_height_pixel_size())
 	terrain_mat.set_shader_parameter("has_height", true)
+
+
+## Shows a planning mode. Whole-map modes build their tint image once when chosen (a few
+## hundred milliseconds on a large map); line of sight shows whatever set_sight last gave.
+func set_plan_mode(mode: int) -> void:
+	plan_mode = clampi(mode, PLAN_OFF, PLAN_COUNT - 1)
+	if plan_mode == PLAN_OFF:
+		terrain_mat.set_shader_parameter("plan_mode", 0)
+	elif plan_mode == PLAN_SIGHT:
+		terrain_mat.set_shader_parameter("plan_mode", 2)
+	else:
+		if plan_built != plan_mode:
+			var t0 := Time.get_ticks_usec()
+			var img: Image = world.build_plan_image(plan_mode)
+			img.generate_mipmaps()
+			terrain_mat.set_shader_parameter("plan_tex", ImageTexture.create_from_image(img))
+			plan_built = plan_mode
+			plan_build_ms = (Time.get_ticks_usec() - t0) / 1000.0
+		terrain_mat.set_shader_parameter("plan_mode", 1)
+
+
+## The line-of-sight tint from MurksWorld.get_viewshed.
+func set_sight(view: Dictionary) -> void:
+	if view.is_empty():
+		return
+	terrain_mat.set_shader_parameter("local_tex", ImageTexture.create_from_image(view["image"]))
+	terrain_mat.set_shader_parameter("local_origin", view["origin"])
+	terrain_mat.set_shader_parameter("local_size", view["size"])
+	terrain_mat.set_shader_parameter("local_outside", view["outside"])
 
 
 func has_relief() -> bool:

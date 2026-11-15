@@ -49,6 +49,8 @@ func _draw() -> void:
 	_draw_towns(xf, zoom, view)
 	if main.show_los:
 		_draw_los(xf, zoom)
+	if main.plan_mode == MapView.PLAN_SIGHT:
+		_draw_sight_point(xf, zoom)
 	_draw_wrecks(xf, view)
 	if main.show_supply:
 		_draw_supply_routes(xf)
@@ -63,6 +65,33 @@ func _draw() -> void:
 	_draw_pings(xf)
 	_draw_hover(xf)
 	draw_ms = (Time.get_ticks_usec() - t0) / 1000.0
+
+
+# --- Planning map: the line-of-sight point ------------------------------------------------
+
+## An eye at the point the line-of-sight mode looks from, its height, and the 12 km limit.
+func _draw_sight_point(xf: Transform2D, zoom: float) -> void:
+	if main.sight_from.x < 0:
+		return
+	var p: Vector2 = xf * main.world.hex_to_world(main.sight_from)
+	var ink := Color(1.0, 0.86, 0.5)
+	draw_arc(p, 12000.0 * zoom, 0.0, TAU, 160, Color(1.0, 0.86, 0.5, 0.7), 1.5, true)
+	# Eye: almond outline, iris, on a dark disc.
+	draw_circle(p, 13.0, Color(0.05, 0.06, 0.05, 0.85))
+	var pts := PackedVector2Array()
+	for i in 17:
+		var t := float(i) / 16.0
+		pts.append(p + Vector2(lerpf(-10.0, 10.0, t), -sin(t * PI) * 6.0))
+	for i in range(1, 16):
+		var t := 1.0 - float(i) / 16.0
+		pts.append(p + Vector2(lerpf(-10.0, 10.0, t), sin(t * PI) * 6.0))
+	pts.append(pts[0])
+	draw_polyline(pts, ink, 1.6, true)
+	draw_circle(p, 3.2, ink)
+	var eye_m: float = float(main.hud.PLAN_EYES[main.sight_eye_index][0])
+	var text := "eye %d m" % int(eye_m)
+	draw_string_outline(font, p + Vector2(16, 5), text, HORIZONTAL_ALIGNMENT_LEFT, -1, 13, 4, Color(0, 0, 0, 0.8))
+	draw_string(font, p + Vector2(16, 5), text, HORIZONTAL_ALIGNMENT_LEFT, -1, 13, ink)
 
 
 # --- Topographic mode: heights -----------------------------------------------------------

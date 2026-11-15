@@ -59,6 +59,23 @@ struct UnitTypeInfo {
 };
 const UnitTypeInfo &unit_type_info(int type);
 
+// Factor on the chance of being hit for a unit in this terrain (forest 0.7 for vehicles, 0.5
+// for soft targets; town 0.6 / 0.4; wetland 0.9; open ground 1).
+float terrain_cover_factor(int terrain, bool soft_target);
+// The step-cost tables (minutes per hex at full readiness): off-road by terrain, on a road,
+// and the extra for crossing a river off-road.
+float terrain_minutes(int mobility, int terrain);
+float road_minutes(int mobility);
+float river_penalty_minutes(int mobility);
+// Forest and towns hide a unit that sits still (or moves deliberately) and has not fired for
+// a few minutes: it is spotted only within these ranges, beyond them only by chance.
+constexpr int CONCEAL_SPOT_HEXES = 2;       // 1 km
+constexpr int CONCEAL_SPOT_HEXES_RECON = 4; // 2 km
+inline bool terrain_conceals(int terrain) { return terrain == T_FOREST || terrain == T_URBAN; }
+// Eye and target heights (metres above ground) the spotting and direct-fire model uses.
+constexpr float SPOT_EYE_M = 3.0f;
+constexpr float SPOT_TARGET_M = 2.5f;
+
 struct PendingOrder {
     bool active = false;
     OrderKind kind = O_HOLD;
@@ -431,6 +448,9 @@ public:
     // off-road hexes heavily there so routes stick to roads, but off-road steps are then
     // driven at the normal rate.
     float move_cost(const Unit &u, int from_idx, int to_idx, bool planning = false) const;
+    // The same step cost for a mobility and move mode, with the road choice made by the caller
+    // (move_cost passes road_step). Used by the planning map's going mode.
+    float step_minutes(int mobility, int move_mode, int from_idx, int to_idx, bool road, bool planning = false) const;
     bool road_step(int from_idx, int to_idx) const; // both hexes joined by a road edge
     bool line_of_sight(HexCoord a, HexCoord b, float eye, float target) const;
     int hq_of(int side) const;

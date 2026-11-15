@@ -1,6 +1,7 @@
 #include "murks_world.h"
 
 #include "murks/geo.hpp"
+#include "murks/planning.hpp"
 #include "murks/render_data.hpp"
 
 #include <godot_cpp/classes/mesh.hpp>
@@ -65,6 +66,10 @@ void MurksWorld::_bind_methods() {
     ClassDB::bind_method(D_METHOD("get_chunk_spot_heights", "chunk"), &MurksWorld::get_chunk_spot_heights);
     ClassDB::bind_method(D_METHOD("build_overview_image"), &MurksWorld::build_overview_image);
     ClassDB::bind_method(D_METHOD("build_hex_data_image"), &MurksWorld::build_hex_data_image);
+    ClassDB::bind_method(D_METHOD("build_plan_image", "mode"), &MurksWorld::build_plan_image);
+    ClassDB::bind_method(D_METHOD("get_plan_key", "mode"), &MurksWorld::get_plan_key);
+    ClassDB::bind_method(D_METHOD("get_plan_mode_name", "mode"), &MurksWorld::get_plan_mode_name);
+    ClassDB::bind_method(D_METHOD("get_viewshed", "hex", "eye_m"), &MurksWorld::get_viewshed);
     ClassDB::bind_method(D_METHOD("get_hex_info", "hex"), &MurksWorld::get_hex_info);
     ClassDB::bind_method(D_METHOD("get_settlements", "min_population"), &MurksWorld::get_settlements);
     ClassDB::bind_method(D_METHOD("advance", "ticks", "budget_ms"), &MurksWorld::advance);
@@ -302,6 +307,67 @@ PackedFloat32Array MurksWorld::get_chunk_spot_heights(Vector2i chunk) const {
     return out;
 }
 
+// Planning map (MRK-25): the tint of a whole-map mode, one RGBA8 pixel per hex.
+Ref<Image> MurksWorld::build_plan_image(int mode) const {
+    std::vector<uint8_t> rgba;
+    murks::build_plan_rgba(world_, mode, rgba);
+    PackedByteArray bytes;
+    bytes.resize((int64_t)rgba.size());
+    std::memcpy(bytes.ptrw(), rgba.data(), rgba.size());
+    return Image::create_from_data(world_.map.cols(), world_.map.rows(), false, Image::FORMAT_RGBA8, bytes);
+}
+
+// The colour key of a mode: [Color tint (alpha = strength, 0 for a note row), label, note] per row.
+Array MurksWorld::get_plan_key(int mode) const {
+    std::vector<murks::PlanKey> key;
+    murks::plan_key(mode, key);
+    Array out;
+    for (const auto &k : key) {
+        Array row;
+        row.append(Color((k.rgba & 255) / 255.0f, ((k.rgba >> 8) & 255) / 255.0f, ((k.rgba >> 16) & 255) / 255.0f,
+                         ((k.rgba >> 24) & 255) / 255.0f));
+        row.append(to_gd(k.label));
+        row.append(to_gd(k.note));
+        out.append(row);
+    }
+    return out;
+}
+
+String MurksWorld::get_plan_mode_name(int mode) const {
+    return to_gd(std::string(murks::plan_mode_name(mode)));
+}
+
+// Line of sight from a hex at an eye height to 12 km, as the rules check it (target 2.5 m).
+// {origin: Vector2i, size: Vector2i, image: Image (RGBA8 tint per hex), seen: int, total: int}
+Dictionary MurksWorld::get_viewshed(Vector2i hex, float eye_m) const {
+    Dictionary d;
+    murks::HexCoord from{hex.x, hex.y};
+    if (!generated_ || !world_.map.in_bounds(from)) return d;
+    murks::Viewshed vs;
+    murks::viewshed(world_, from, eye_m, murks::SPOT_TARGET_M, murks::SIGHT_RADIUS_HEXES, vs);
+    PackedByteArray bytes;
+    bytes.resize((int64_t)vs.rgba.size());
+    std::memcpy(bytes.ptrw(), vs.rgba.data(), vs.rgba.size());
+    d["origin"] = Vector2i(vs.origin.col, vs.origin.row);
+    d["size"] = Vector2i(vs.w, vs.h);
+    d["image"] = Image::create_from_data(vs.w, vs.h, false, Image::FORMAT_RGBA8, bytes);
+    // 0 out of range, 1 dead ground, 2 seen, per hex of the box (for the status bar).
+    PackedByteArray mask;
+    mask.resize((int64_t)vs.w * vs.h);
+    const uint32_t seen_t = murks::sight_tint(0), dead_t = murks::sight_tint(1);
+    for (int64_t i = 0; i < (int64_t)vs.w * vs.h; ++i) {
+        const uint8_t *px = &vs.rgba[(size_t)i * 4];
+        uint32_t t = px[0] | (px[1] << 8) | (px[2] << 16) | ((uint32_t)px[3] << 24);
+        mask.set(i, t == seen_t ? 2 : (t == dead_t ? 1 : 0));
+    }
+    d["mask"] = mask;
+    d["seen"] = vs.seen;
+    d["total"] = vs.total;
+    d["outside"] = Color(((murks::sight_tint(2)) & 255) / 255.0f, ((murks::sight_tint(2) >> 8) & 255) / 255.0f,
+                         ((murks::sight_tint(2) >> 16) & 255) / 255.0f, ((murks::sight_tint(2) >> 24) & 255) / 255.0f);
+    return d;
+}
+
 // Per-hex terrain, density, elevation and cover for the terrain shader (one pixel per hex).
 Ref<Image> MurksWorld::build_hex_data_image() const {
     std::vector<uint8_t> rgba;
@@ -340,6 +406,17 @@ Dictionary MurksWorld::get_hex_info(Vector2i hex) const {
         d["slope_degrees"] = std::atan(pct / 100.0) * 180.0 / 3.14159265358979323846;
         d["slope_class"] = murks::slope_class(pct);
         d["slope_down"] = dir >= 0 ? to_gd(std::string(kDir[dir])) : String();
+    }
+    {
+        // The planning map's figures for this hex: going off-road per mobility (minutes),
+        // cover factors and whether it hides a unit that sits still.
+        const int idx = world_.map.index(h);
+        d["going_tracked"] = murks::hex_going(world_, idx, murks::M_TRACKED);
+        d["going_wheeled"] = murks::hex_going(world_, idx, murks::M_WHEELED);
+        d["going_foot"] = murks::hex_going(world_, idx, murks::M_FOOT);
+        d["cover_vehicles"] = murks::terrain_cover_factor(x.terrain, false);
+        d["cover_infantry"] = murks::terrain_cover_factor(x.terrain, true);
+        d["conceals"] = murks::terrain_conceals(x.terrain);
     }
     d["road"] = (x.features & murks::F_ROAD) != 0;
     d["major_road"] = (x.features & murks::F_MAJOR_ROAD) != 0;

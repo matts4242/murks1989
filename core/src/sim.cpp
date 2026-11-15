@@ -49,14 +49,7 @@ const float kRiverPenalty[3] = {25.0f, 60.0f, 20.0f};
 const char *kMonths[12] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
 const int kMonthDays[12] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
 
-float cover_mod(const Hex &h, bool soft_target) {
-    switch (h.terrain) {
-        case T_FOREST: return soft_target ? 0.5f : 0.7f;
-        case T_URBAN: return soft_target ? 0.4f : 0.6f;
-        case T_WETLAND: return 0.9f;
-        default: return 1.0f;
-    }
-}
+float cover_mod(const Hex &h, bool soft_target) { return terrain_cover_factor(h.terrain, soft_target); }
 
 std::string fmt(const char *f, ...) {
     char buf[512];
@@ -68,6 +61,19 @@ std::string fmt(const char *f, ...) {
 }
 
 } // namespace
+
+float terrain_cover_factor(int terrain, bool soft_target) {
+    switch (terrain) {
+        case T_FOREST: return soft_target ? 0.5f : 0.7f;
+        case T_URBAN: return soft_target ? 0.4f : 0.6f;
+        case T_WETLAND: return 0.9f;
+        default: return 1.0f;
+    }
+}
+
+float terrain_minutes(int mobility, int terrain) { return kTerrainCost[mobility][terrain]; }
+float road_minutes(int mobility) { return kRoadCost[mobility]; }
+float river_penalty_minutes(int mobility) { return kRiverPenalty[mobility]; }
 
 const UnitTypeInfo &unit_type_info(int type) { return kTypes[type < 0 || type >= U_TYPE_COUNT ? 0 : type]; }
 
@@ -1428,16 +1434,19 @@ bool World::road_step(int from_idx, int to_idx) const {
 }
 
 float World::move_cost(const Unit &u, int from_idx, int to_idx, bool planning) const {
+    if (map.at_index(to_idx).terrain == T_WATER) return -1;
+    return step_minutes(unit_type_info(u.type).mobility, u.mode, from_idx, to_idx, road_step(from_idx, to_idx), planning);
+}
+
+float World::step_minutes(int mob, int move_mode, int from_idx, int to_idx, bool road, bool planning) const {
     const Hex &a = map.at_index(from_idx), &b = map.at_index(to_idx);
     if (b.terrain == T_WATER) return -1;
-    const int mob = unit_type_info(u.type).mobility;
-    const bool road = road_step(from_idx, to_idx);
     float c = road ? kRoadCost[mob] : kTerrainCost[mob][b.terrain];
     if (road && (a.features & F_MAJOR_ROAD) && (b.features & F_MAJOR_ROAD)) c *= 0.8f;
     if (!road && (b.features & F_RIVER)) c += kRiverPenalty[mob];
     int dz = b.elev - a.elev;
     c += (dz > 0 ? dz : 0) * (mob == M_FOOT ? 0.04f : 0.03f) + std::abs(dz) * 0.004f;
-    switch (u.mode) {
+    switch (move_mode) {
         case MV_ROAD: c *= road ? 0.85f : (planning ? 1.8f : 1.0f); break;
         case MV_DELIBERATE: c *= 1.5f; break;
         case MV_ASSAULT: c *= 1.15f; break;
@@ -2523,9 +2532,9 @@ void World::update_spotting(bool full_pass) {
             if (time_min < t.seen_until[obs.side] && t.seen_until[obs.side] >= time_min + hold) return; // known
             // Units sitting still in cover are only found up close.
             const Hex &th = map.at(t.pos);
-            bool concealed = (th.terrain == T_FOREST || th.terrain == T_URBAN) &&
+            bool concealed = terrain_conceals(th.terrain) &&
                              (!t.moving() || t.mode == MV_DELIBERATE) && time_min - t.last_fired > 3;
-            if (concealed && d > (obs.type == U_RECON ? 4 : 2)) {
+            if (concealed && d > (obs.type == U_RECON ? CONCEAL_SPOT_HEXES_RECON : CONCEAL_SPOT_HEXES)) {
                 // Beyond close range a hidden unit is found only by chance (movement, a glint,
                 // a careless radio) - unless this side already has eyes on it.
                 bool tracked = time_min - t.last_seen[obs.side] <= 10;

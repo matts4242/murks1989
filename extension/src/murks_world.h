@@ -106,6 +106,10 @@ public:
     PackedFloat32Array get_chunk_spot_heights(Vector2i chunk) const;
     Ref<Image> build_overview_image() const;
     Ref<Image> build_hex_data_image() const;
+    Ref<Image> build_plan_image(int mode) const;
+    Array get_plan_key(int mode) const;
+    String get_plan_mode_name(int mode) const;
+    Dictionary get_viewshed(Vector2i hex, float eye_m) const;
     Dictionary get_hex_info(Vector2i hex) const;
     Array get_settlements(int min_population) const;
 

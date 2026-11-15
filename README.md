@@ -112,6 +112,7 @@ The prebuilt extension is in `game/bin/` (`libmurks.windows.template_debug.x86_6
 | F6 | Painted terrain textures on / off (off: one flat colour per terrain) |
 | F7 | Counters show vehicles / NATO symbols |
 | F8 | Topographic map: contour lines and heights on / off |
+| F10 | Planning map: steps through going (tracked, wheeled, foot), cover, slope, line of sight, off |
 | F5 / F9 | Quick save / quick load (one slot, in Godot's user folder) |
 | J / Shift+J | Form a team from the selection / disband the selection's teams |
 | L | Select the team of the selected unit (double-click does the same) |
@@ -190,6 +191,19 @@ python tools/bake_contours.py --bbox 10 49 24.2 55 --out game/data/poland_1989.m
 
 **F8** (View > Topographic map) prints contour lines into the painted ground: the terrain shader draws them from the height raster as a darker, browner tone of whatever lies beneath (forest, field or town), about a pixel wide, so they read as part of the ground rather than a sheet laid over it. They are every 20 m from 20 px per hex with every 100 m line heavier, every 100 m further out (500 m heavier) and every 500 m on the whole-map view; lines that would crowd closer than a few pixels fade out, the heavy ones last. Lines close together mean steep ground, and the hill shading shows which way slopes face. The 100 m lines carry their height (500 m further out) and summits are marked with a triangle and their height in metres; figures that would crowd each other are left out. The status bar and the order menu title give the slope of the hex under the cursor in every mode ("steep slope 18% (10°) down to the south-east"), from the per-hex heights the simulation uses. Slope is information only for now: movement rules do not use it yet (work board MRK-04).
 
+**Planning map (work board MRK-25).** View > Planning map, **F10** (steps through) or the mode panel shows the ground the way a commander plans on it: a tint per hex over the painted terrain (a little greyer underneath), crisp per hex because the rules are per hex, with a colour key next to the reports. Every figure comes from the functions the rules use, so the map shows what the simulation does (`core/src/planning.cpp`, checked by `tests/planning_test.cpp`):
+
+- **Going: tracked, wheeled, on foot.** Minutes to cross each hex off-road at full readiness: the mean of the pathfinder's own step cost (`World::step_minutes`, which `move_cost` now calls) into it from each land neighbour, with terrain, river crossings and climbing. Shown against open ground for that mobility (faster, as good, up to 1.6x, 2.6x, 5x slower, slower still, impassable); the key gives km/h per band and the road speeds.
+- **Cover and concealment.** The hit factor from fire for vehicles and infantry (`terrain_cover_factor`) and whether a unit sitting still is hidden (found only within 1 km, 2 km by recon); darker where cover is 20 m or taller, which also blocks sight.
+- **Slope.** The five slope classes from the per-hex heights, the same as the status-bar readout.
+- **Line of sight from a point.** Right-click > Look from here (or the selected unit, or the HQ): every hex within 12 km lit if a 2.5 m target there can be seen, darkened if it is dead ground, by `World::line_of_sight` as the spotting model uses it. Eye height 2 m (on foot), 3 m (vehicle, as the rules), 10 m (rooftop) or 30 m (mast or tower); the panel says how much is seen.
+
+The status bar adds the mode's figure for the hex under the cursor (going in km/h, cover factors, seen or dead ground). Sight (V) and Zones (Z) stay separate toggles: they are outlines and combine with a planning mode. A whole-map mode is worked out once when chosen (about 0.2 s on the Poland map). Drawing only: the sim refactor behind it keeps the arithmetic, so results and saves are unchanged.
+
+![Planning map: going for tracked vehicles around Sulechów](docs/screenshots/38_plan_going.png)
+
+![Planning map: line of sight from an observation post, eye 3 m](docs/screenshots/41_plan_sight.png)
+
 On Windows the `--finish-map` path is `build\Release\finish_map.exe`. The first run reads several hundred MB of source data and caches the processed tiles in `~/murks_cache`.
 
 Not yet corrected to 1989:
@@ -212,12 +226,12 @@ The same text is in the game (F2):
 ## Layout
 
 ```
-core/         Pure C++17 simulation (no Godot code): hex maths, map (+ file format), generator, A*, sim, render data, geo
+core/         Pure C++17 simulation (no Godot code): hex maths, map (+ file format), generator, A*, sim, render data, geo, planning map
 extension/    GDExtension binding: one class, MurksWorld, with coarse calls (whole chunks, snapshots, many ticks)
 game/         Godot project: scripts/main.gd (input, clock), map_view.gd (ground and line streaming), overlay.gd (symbols), hud.gd; shaders/terrain.gdshader (the painted ground)
 game/data/    Baked real map (.murkz = zlib-compressed MURKSMAP)
 tools/        bake_region.py (real-data pipeline), finish_map.cpp (adds local roads), bake_contours.py (height raster, height figures and spot heights for the topographic mode)
-tests/        core_bench.cpp: headless run of map + sim with timings; hq_loss_test.cpp: checks the HQ-loss rules; rules_test.cpp: checks the Historical Values rules; fire_support_test.cpp: checks gun ranges and the fire support net; dismount_test.cpp: checks mounted infantry; suppression_test.cpp: checks suppression; holdings_test.cpp: checks holdings, capture, loyalty, requisition, militia, supply routes and convoys; attrition_test.cpp: kill-rate harness (`attrition_test calibrate`); playtest.cpp: real-map 4-day scripted runs over many seeds (`playtest game/data/poland_1989.murkz 4 active 1989 12`, needs zlib); render_shot.cpp: draws flat-coloured hexes with the road, river and rail meshes to an image without Godot and times the chunk builds (`render_shot game/data/poland_1989.murkz shot.ppm 470 860 40`, or `... bench`, needs zlib)
+tests/        core_bench.cpp: headless run of map + sim with timings; hq_loss_test.cpp: checks the HQ-loss rules; rules_test.cpp: checks the Historical Values rules; fire_support_test.cpp: checks gun ranges and the fire support net; dismount_test.cpp: checks mounted infantry; suppression_test.cpp: checks suppression; holdings_test.cpp: checks holdings, capture, loyalty, requisition, militia, supply routes and convoys; planning_test.cpp: checks the planning map against the rules (going against move_cost, line of sight against the spotting model, tints and keys); attrition_test.cpp: kill-rate harness (`attrition_test calibrate`); playtest.cpp: real-map 4-day scripted runs over many seeds (`playtest game/data/poland_1989.murkz 4 active 1989 12`, needs zlib); render_shot.cpp: draws flat-coloured hexes with the road, river and rail meshes to an image without Godot and times the chunk builds (`render_shot game/data/poland_1989.murkz shot.ppm 470 860 40`, or `... bench`, needs zlib)
 SConstruct    Builds the extension into game/bin/
 CMakeLists.txt  Builds the core, benchmark and finish_map on their own (handy in Visual Studio)
 ```
@@ -250,8 +264,8 @@ Pass these after `--` when launching Godot:
 - `--groups=N`: number of hostile bands (default 24, about 212 units). Use 60 or more as a stress test.
 - `--procedural`: ignore the baked map and generate a fictional one.
 - `--autotest=DIR`: scripted run that saves screenshots and timing to `DIR`, then quits.
-- `--views=DIR`: renders seven fixed map views without the HUD to `DIR` (hills south of Wrocław at 10, 30 and 80 px per hex, the home area at 25 and 70, a town at 150, the region at 3), prints the average colour of each painted material, then quits; about 15 seconds. Add `--crisp`, `--flat` or `--topo` for crisp hex borders, flat colours or the topographic mode. The quick check after a change to the terrain shader.
-- `--uitest`: scripted check of the menus (title screen, right-click menu, armed orders, Esc and the pause menu, dropdowns, View and Orders menus, the painted ground (shader, textures on and off, natural or crisp edges, grid by zoom), the map legend, counter size and vehicles, the topographic mode, the holding panel, militia, a supply route and its cancellation): pushes real input events and menu picks, checks what reaches the simulation, prints PASS / FAIL lines and exits non-zero on a failure. Needs a window (on a Linux server: `xvfb-run godot --path game -- --uitest`).
+- `--views=DIR`: renders seven fixed map views without the HUD to `DIR` (hills south of Wrocław at 10, 30 and 80 px per hex, the home area at 25 and 70, a town at 150, the region at 3), prints the average colour of each painted material, then quits; about 15 seconds. Add `--crisp`, `--flat` or `--topo` for crisp hex borders, flat colours or the topographic mode, or `--plan=N` for a planning mode (1-3 going, 4 cover, 5 slope, 6 line of sight from the best observation post near home; `--eye=0..3` picks the eye height). The quick check after a change to the terrain shader.
+- `--uitest`: scripted check of the menus (title screen, right-click menu, armed orders, Esc and the pause menu, dropdowns, View and Orders menus, the painted ground (shader, textures on and off, natural or crisp edges, grid by zoom), the map legend, counter size and vehicles, the topographic mode, the planning map (menu, F10, panel, going tint, status bar, Look from here, eye height), the holding panel, militia, a supply route and its cancellation): pushes real input events and menu picks, checks what reaches the simulation, prints PASS / FAIL lines and exits non-zero on a failure. Needs a window (on a Linux server: `xvfb-run godot --path game -- --uitest`).
 
 Headless balance check (no window): `godot --headless --path game --script res://tests/playtest.gd -- 4 active` (or `passive`). It plays the scenario for N days and prints contact time, losses, supplies, the outcome and a save/load replay check.
 

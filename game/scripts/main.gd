@@ -43,6 +43,11 @@ var selected: Array[int] = []
 var snapshot := PackedFloat32Array()
 var stride := 10
 var los_hexes := PackedVector2Array()
+# Planning map (MRK-25): the mode shown, and for line of sight the point and eye height.
+var plan_mode := 0
+var sight_from := Vector2i(-1, -1)
+var sight_eye_index := 1           # into hud.PLAN_EYES: 3 m, as the rules
+var sight_view := {}               # MurksWorld.get_viewshed
 var los_for := -1
 var los_time := -1
 var pings: Array = []
@@ -162,6 +167,7 @@ func _start_world() -> void:
 	hud.set_toggle("Edges", map_view.natural_edges)
 	hud.set_toggle("Vehicles", overlay.show_vehicles)
 	hud.set_toggle("Topo", map_view.show_topo)
+	_show_plan_panel()   # fills the View > Planning map list
 	hud.set_toggle("Auto-pause", auto_pause)
 	hud.set_toggle("Group", group_companies)
 	set_speed(0)
@@ -604,6 +610,7 @@ func _on_key(key: Key) -> void:
 		KEY_F6: _on_toggle("Detail")
 		KEY_F7: _on_toggle("Vehicles")
 		KEY_F8: _on_toggle("Topo")
+		KEY_F10: set_plan_mode((plan_mode + 1) % MapView.PLAN_COUNT)
 		KEY_F5: quick_save()
 		KEY_F9: quick_load()
 
@@ -670,6 +677,13 @@ func _on_toggle(name: String) -> void:
 
 ## Game-level actions from the menu bar, the title screen and the pause menu.
 func _on_menu_action(name: String) -> void:
+	if name.begins_with("plan_") and name.substr(5).is_valid_int():
+		set_plan_mode(name.substr(5).to_int())
+		return
+	if name.begins_with("sight_eye_"):
+		sight_eye_index = clampi(name.substr(10).to_int(), 0, hud.PLAN_EYES.size() - 1)
+		_update_sight()
+		return
 	match name:
 		"start": _begin_campaign()
 		"continue":
@@ -695,6 +709,7 @@ func _on_menu_action(name: String) -> void:
 		"help": hud.toggle_help()
 		"credits": hud.toggle_credits()
 		"legend": hud.toggle_legend()
+		"plan_next": set_plan_mode((plan_mode + 1) % MapView.PLAN_COUNT)
 		"briefing": hud.show_banner(briefing_text, 10.0)
 		"centre":
 			if not selected.is_empty():
@@ -1031,6 +1046,8 @@ func _on_command(name: String) -> void:
 		move_mode = -1
 	elif name == "centre_here":
 		camera.position = menu_world_pos
+	elif name == "look_here":
+		look_from(world.world_to_hex(menu_world_pos))
 	elif name.begins_with("holding_select_"):
 		selected.clear()
 		selected_holding = name.substr(15).to_int()
@@ -1315,6 +1332,81 @@ func _slope_text(info: Dictionary) -> String:
 		roundi(float(info["slope_degrees"])), String(info["slope_down"])]
 
 
+# --- Planning map (MRK-25) ----------------------------------------------------------------
+
+## Shows a planning mode (MapView.PLAN_*; 0 = off). Line of sight looks from the point set
+## with "Look from here", else from the selected unit, else from the HQ.
+func set_plan_mode(mode: int) -> void:
+	plan_mode = clampi(mode, 0, MapView.PLAN_COUNT - 1)
+	if plan_mode == MapView.PLAN_SIGHT and world.get_hex_info(sight_from).is_empty():
+		var id: int = selected[0] if not selected.is_empty() else 0   # unit 0: the company HQ
+		sight_from = world.get_unit_info(id).get("hex", world.world_to_hex(camera.position))
+	if plan_mode != 0 and plan_mode != MapView.PLAN_SIGHT and map_view.plan_built != plan_mode:
+		hud.show_toast("Working out %s for the whole map..." % world.get_plan_mode_name(plan_mode), 1.5)
+	map_view.set_plan_mode(plan_mode)
+	if plan_mode == MapView.PLAN_SIGHT:
+		_update_sight()
+	else:
+		_show_plan_panel()
+
+
+## Line of sight from `hex` (right-click > Look from here).
+func look_from(hex: Vector2i) -> void:
+	sight_from = hex
+	set_plan_mode(MapView.PLAN_SIGHT)
+
+
+func _update_sight() -> void:
+	if plan_mode != MapView.PLAN_SIGHT:
+		return
+	sight_view = world.get_viewshed(sight_from, float(hud.PLAN_EYES[sight_eye_index][0]))
+	map_view.set_sight(sight_view)
+	_show_plan_panel()
+
+
+func _show_plan_panel() -> void:
+	var names: Array = []
+	for i in MapView.PLAN_COUNT:
+		names.append(world.get_plan_mode_name(i))
+	var info := ""
+	if plan_mode == MapView.PLAN_SIGHT and not sight_view.is_empty():
+		var hi: Dictionary = world.get_hex_info(sight_from)
+		var where: String = String(hi.get("settlement", hi.get("place", "")))
+		var seen := int(sight_view["seen"])
+		var total := maxi(1, int(sight_view["total"]))
+		info = "From hex %d,%d (%s, %d m), eye %d m: %d of %d hexes within 12 km seen (%d%%)." % [sight_from.x, sight_from.y,
+			where, int(hi.get("elevation", 0)), int(hud.PLAN_EYES[sight_eye_index][0]), seen, total, roundi(100.0 * seen / total)]
+	hud.show_plan(plan_mode, names, world.get_plan_key(plan_mode) if plan_mode != 0 else [], info, sight_eye_index)
+
+
+## The planning mode's figure for a hex, for the status bar ("" when no mode is shown).
+func _plan_text(info: Dictionary, hex: Vector2i) -> String:
+	match plan_mode:
+		1, 2, 3:
+			var key: String = ["", "going_tracked", "going_wheeled", "going_foot"][plan_mode]
+			var who: String = ["", "tracked", "wheeled", "on foot"][plan_mode]
+			var m := float(info.get(key, -1.0))
+			if m < 0.0:
+				return "impassable %s" % who
+			return "going %s %.0f km/h off-road (%.1f min a hex)" % [who, 30.0 / m, m]
+		MapView.PLAN_COVER:
+			if float(info.get("cover_vehicles", 1.0)) >= 1.0:
+				return "no cover"
+			return "cover: hits x%.1f vehicles, x%.1f infantry%s" % [float(info["cover_vehicles"]), float(info["cover_infantry"]),
+				", hides units that sit still" if info.get("conceals", false) else ""]
+		MapView.PLAN_SIGHT:
+			if sight_view.is_empty():
+				return ""
+			var o: Vector2i = sight_view["origin"]
+			var sz: Vector2i = sight_view["size"]
+			var l := hex - o
+			if l.x < 0 or l.y < 0 or l.x >= sz.x or l.y >= sz.y:
+				return "beyond 12 km of the point"
+			var v: int = (sight_view["mask"] as PackedByteArray)[l.y * sz.x + l.x]
+			return ["beyond 12 km of the point", "dead ground from the point", "seen from the point"][v]
+	return ""
+
+
 func _update_status() -> void:
 	var hex := world.world_to_hex(get_global_mouse_position())
 	var info: Dictionary = world.get_hex_info(hex)
@@ -1322,6 +1414,9 @@ func _update_status() -> void:
 		hud.set_status("")
 		return
 	var bits: Array[String] = [String(info["terrain"]), "%d m" % int(info["elevation"]), _slope_text(info)]
+	var pt := _plan_text(info, hex)
+	if pt != "":
+		bits.insert(0, pt)
 	if info.get("major_road", false): bits.append("main road")
 	elif info.get("road", false): bits.append("road")
 	if info.get("rail", false): bits.append("railway")
@@ -1826,6 +1921,75 @@ func _run_uitest() -> void:
 	camera.zoom = zoom_was
 	await _frames(2)
 
+	# Planning map (MRK-25): modes from the View menu, F10 and the panel; each tints the
+	# ground; the status bar gives the mode's figure; Look from here sets the line-of-sight
+	# point and a higher eye sees at least as much.
+	var cam_keep := camera.position
+	camera.zoom = Vector2.ONE * 0.05
+	for i in 4:
+		map_view.update_view(camera.get_screen_center_position(), camera.zoom.x, get_viewport_rect().size)
+		await get_tree().process_frame
+	await RenderingServer.frame_post_draw
+	var no_plan := get_viewport().get_texture().get_image()
+	view.show_popup()
+	await _frames(2)
+	var plan_menu := _submenu_of(view.get_popup(), "Planning map")
+	check.call(plan_menu != null and _menu_pick(plan_menu, "Going: tracked"), "View > Planning map > Going: tracked")
+	view.get_popup().hide()
+	await _frames(3)
+	var ptm: ShaderMaterial = map_view.terrain_mat
+	check.call(plan_mode == 1 and int(ptm.get_shader_parameter("plan_mode")) == 1 and hud.plan_panel.visible,
+		"going mode on: tint loaded in %.0f ms, panel shown" % map_view.plan_build_ms)
+	await RenderingServer.frame_post_draw
+	var going_img := get_viewport().get_texture().get_image()
+	var tinted := 0
+	for y in range(120, 780, 6):
+		for x in range(40, 1560, 6):
+			if no_plan.get_pixel(x, y).to_html() != going_img.get_pixel(x, y).to_html() and absf(no_plan.get_pixel(x, y).h - going_img.get_pixel(x, y).h) > 0.02:
+				tinted += 1
+	check.call(tinted > 5000, "the going tint changes the picture (%d of 27,940 sampled pixels)" % tinted)
+	var home_info: Dictionary = world.get_hex_info(world.world_to_hex(cam_keep))
+	var going_line := _plan_text(home_info, world.world_to_hex(cam_keep))
+	check.call(going_line.begins_with("going tracked") or going_line.begins_with("impassable"), "status bar gives the going: \"%s\"" % going_line)
+	check.call(hud.plan_keys.get_child_count() >= 5, "the panel lists the going key (%d rows)" % hud.plan_keys.get_child_count())
+	var modes_seen: Array = [plan_mode]
+	for i in 4:
+		_push_key(KEY_F10)
+		await _frames(2)
+		modes_seen.append(plan_mode)
+	check.call(modes_seen == [1, 2, 3, 4, 5], "F10 steps through the modes %s" % str(modes_seen))
+	hud.plan_pick.select(4)
+	hud.plan_pick.item_selected.emit(4)
+	await _frames(2)
+	check.call(plan_mode == MapView.PLAN_COVER, "the panel's selector picks Cover and concealment")
+	# Line of sight: right-click > Look from here on a lookout in the hills.
+	var lookout := _lookout_near(Vector2i(900, 1330), 16)
+	camera.position = world.hex_to_world(lookout)
+	await _frames(2)
+	selected = []
+	_open_order_menu(get_viewport_rect().size * 0.5)
+	await _frames(2)
+	check.call(_menu_pick(hud.order_popup, "Look from here (line of sight)"), "right-click menu has Look from here")
+	hud.order_popup.hide()
+	await _frames(2)
+	check.call(plan_mode == MapView.PLAN_SIGHT and sight_from == world.world_to_hex(menu_world_pos) and int(ptm.get_shader_parameter("plan_mode")) == 2,
+		"Look from here switches to line of sight from that hex")
+	var seen_3m := int(sight_view.get("seen", 0))
+	hud.plan_eye_pick.select(3)
+	hud.plan_eye_pick.item_selected.emit(3)
+	await _frames(2)
+	var seen_30m := int(sight_view.get("seen", 0))
+	check.call(seen_3m > 0 and seen_30m >= seen_3m, "a 30 m eye sees at least as much as 3 m (%d vs %d of %d hexes)" % [seen_30m, seen_3m, int(sight_view.get("total", 0))])
+	check.call(_plan_text(world.get_hex_info(lookout), lookout) == "seen from the point", "the point itself reads \"seen from the point\"")
+	hud.plan_eye_pick.select(1)
+	hud.plan_eye_pick.item_selected.emit(1)
+	_push_key(KEY_F10)
+	await _frames(2)
+	check.call(plan_mode == 0 and int(ptm.get_shader_parameter("plan_mode")) == 0 and not hud.plan_panel.visible, "F10 after line of sight turns the planning map off")
+	camera.position = cam_keep
+	camera.zoom = zoom_was
+	await _frames(2)
+
 	# Last in the test because it moves the clock: 1st Mech dismounts; the squads take the
 	# NATO symbol, the carriers keep their BMP.
 	var units_before := snapshot.size() / stride
@@ -1886,6 +2050,40 @@ func _submenu_of(pm: PopupMenu, prefix: String) -> PopupMenu:
 
 # --- Automated check: scripted run that saves screenshots, then quits. ---------------------
 
+## The highest hex of open ground or fields within `r` hexes: a good place to look from.
+func _lookout_near(c: Vector2i, r: int) -> Vector2i:
+	var best := c
+	var best_e := -1.0e9
+	for dy in range(-r, r + 1):
+		for dx in range(-r, r + 1):
+			var h := c + Vector2i(dx, dy)
+			var hi: Dictionary = world.get_hex_info(h)
+			if hi.is_empty() or not (String(hi["terrain"]) in ["Open ground", "Farmland"]):
+				continue
+			if float(hi["elevation"]) > best_e:
+				best_e = float(hi["elevation"])
+				best = h
+	return best
+
+
+## The hex of open ground or fields within `r` hexes that sees the most at 3 m: where a
+## commander would put an observation post (screenshots and checks).
+func _best_lookout(c: Vector2i, r: int) -> Vector2i:
+	var best := c
+	var best_seen := -1
+	for dy in range(-r, r + 1, 2):
+		for dx in range(-r, r + 1, 2):
+			var h := c + Vector2i(dx, dy)
+			var hi: Dictionary = world.get_hex_info(h)
+			if hi.is_empty() or not (String(hi["terrain"]) in ["Open ground", "Farmland"]) or int(hi["cover"]) > 0:
+				continue
+			var seen := int(world.get_viewshed(h, 3.0).get("seen", 0))
+			if seen > best_seen:
+				best_seen = seen
+				best = h
+	return best
+
+
 ## --views=<dir>: renders a fixed set of map views without the HUD and quits. A quick way
 ## to check how the map looks after a change to the terrain shader or the line meshes.
 ## Extra options: --crisp (crisp hex borders), --flat (painted textures off), --topo.
@@ -1899,9 +2097,19 @@ func _run_views() -> void:
 			map_view.show_detail = false
 		elif a == "--topo":
 			map_view.show_topo = true
+		elif a.begins_with("--plan="):
+			plan_mode = a.substr(7).to_int()
+		elif a.begins_with("--eye="):
+			sight_eye_index = a.substr(6).to_int()
 	DirAccess.make_dir_recursive_absolute(views_dir)
 	var hq: Vector2 = world.hex_to_world(world.get_unit_info(0)["hex"])
 	var hills: Vector2 = world.hex_to_world(Vector2i(900, 1330))
+	if plan_mode != 0:
+		hud.visible = true   # the planning panel is part of what to check
+		if plan_mode == MapView.PLAN_SIGHT:
+			sight_from = _best_lookout(world.world_to_hex(hq), 14)
+		set_plan_mode(plan_mode)
+		print("Views: planning mode %d built in %.0f ms" % [plan_mode, map_view.plan_build_ms])
 	var views := [["v1_hills_30px", hills, 0.06], ["v2_hills_10px", hills, 0.02], ["v3_home_25px", hq, 0.05],
 		["v4_home_70px", hq + Vector2(3000, -1500), 0.14], ["v5_town_150px", hq + Vector2(900, 300), 0.3],
 		["v6_region_3px", hills, 0.006], ["v7_hills_80px", hills + Vector2(-2500, 1200), 0.16]]
@@ -2001,6 +2209,17 @@ func _run_autotest() -> void:
 	map_view.natural_edges = false
 	await _shot("37_terrain_crisp", hq + Vector2(3000, -1500), 0.16)
 	map_view.natural_edges = true
+	# Planning map (MRK-25): going for tracks, cover, slope in the hills, line of sight from home.
+	set_plan_mode(1)
+	await _shot("38_plan_going", hq, 0.05)
+	set_plan_mode(MapView.PLAN_COVER)
+	await _shot("39_plan_cover", hq + Vector2(900, 300), 0.14)
+	set_plan_mode(MapView.PLAN_SLOPE)
+	await _shot("40_plan_slope", hills, 0.03)
+	sight_from = _best_lookout(world.world_to_hex(hq), 14)
+	set_plan_mode(MapView.PLAN_SIGHT)
+	await _shot("41_plan_sight", world.hex_to_world(sight_from), 0.025)
+	set_plan_mode(0)
 	selected = [0]
 	selected = [0]
 	# Holdings: the home town's panel, then a supply route from its stores to the trains.

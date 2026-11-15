@@ -15,6 +15,7 @@ add_library(murks_core STATIC
     core/src/map.cpp
     core/src/pathfinder.cpp
     core/src/contours.cpp
+    core/src/planning.cpp
     core/src/render_data.cpp
     core/src/sim.cpp
 )
@@ -52,6 +53,10 @@ add_executable(suppression_test tests/suppression_test.cpp)
 target_link_libraries(suppression_test PRIVATE murks_core)
 
 # Holdings, militia and supply routes: capture, loyalty, levy, training, convoys, save/load. build/holdings_test
+# Checks the planning map against the rules (going, line of sight, tints). build/planning_test
+add_executable(planning_test tests/planning_test.cpp)
+target_link_libraries(planning_test PRIVATE murks_core)
+
 add_executable(holdings_test tests/holdings_test.cpp)
 target_link_libraries(holdings_test PRIVATE murks_core)
 

@@ -37,6 +37,17 @@ uniform float relief = 1.0;            // hill shading strength
 uniform float contour_interval = 0.0;  // metres between contour lines; 0 = none
 uniform float contour_heavy = 5.0;     // every n-th line is heavier
 
+// Planning map (MRK-25): 1 = a whole-map tint per hex from plan_tex (going, cover, slope),
+// 2 = a local tint per hex from local_tex (line of sight), out of range outside its box.
+// The ground under a mode is a little greyer so the tints read; tints are crisp per hex
+// close in (the rules are per hex) and averaged (mipmapped) far out.
+uniform int plan_mode = 0;
+uniform sampler2D plan_tex : filter_linear_mipmap, repeat_disable;
+uniform sampler2D local_tex : filter_nearest, repeat_disable;
+uniform ivec2 local_origin = ivec2(0, 0);
+uniform ivec2 local_size = ivec2(1, 1);
+uniform vec4 local_outside = vec4(0.22, 0.22, 0.24, 0.43);
+
 // Legend swatches: paint terrain (swatch & 7, +8 for dense) across the rect, no relief.
 uniform int swatch = -1;
 uniform float swatch_size = 600.0;     // metres across a swatch
@@ -679,6 +690,19 @@ void fragment() {
 		}
 		if (contour_interval > 0.0 && has_height) {
 			col = contours(col, hg.x);
+		}
+		if (plan_mode > 0) {
+			ivec2 ph = world_to_hex(world);
+			vec4 tint;
+			if (plan_mode == 1) {
+				vec4 near_t = (ph.x >= 0 && ph.y >= 0 && ph.x < hex_count.x && ph.y < hex_count.y) ? texelFetch(plan_tex, ph, 0) : vec4(0.0);
+				tint = mix(near_t, texture(plan_tex, UV), smoothstep(25.0, 60.0, metres_per_pixel));
+			} else {
+				ivec2 lh = ph - local_origin;
+				tint = (lh.x >= 0 && lh.y >= 0 && lh.x < local_size.x && lh.y < local_size.y) ? texelFetch(local_tex, lh, 0) : local_outside;
+			}
+			col = mix(col, vec3(dot(col, vec3(0.30, 0.55, 0.15))), 0.35);
+			col = mix(col, tint.rgb, tint.a);
 		}
 		if (grid_alpha > 0.0) {
 			ivec2 gh = world_to_hex(world);

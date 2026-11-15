@@ -71,6 +71,14 @@ var stock_label: Label
 var perf_label: Label
 var menu_buttons := {}              # "Game" / "View" / ... -> MenuButton
 var toggle_state := {}              # toggle name -> on
+var plan_mode_state := 0            # the planning mode shown (MapView.PLAN_*)
+var plan_panel: PanelContainer
+var plan_pick: OptionButton
+var plan_keys: VBoxContainer
+var plan_eye_row: HBoxContainer
+var plan_eye_pick: OptionButton
+var plan_info: Label
+const PLAN_EYES := [[2.0, "2 m: on foot"], [3.0, "3 m: vehicle (as the rules)"], [10.0, "10 m: rooftop"], [30.0, "30 m: mast or tower"]]
 var speed_index := 0
 
 # Unit panel
@@ -140,6 +148,7 @@ func _ready() -> void:
 	_build_unit_panel()
 	_build_holding_panel()
 	_build_log()
+	_build_plan_panel()
 	_build_status()
 	_build_banners()
 	_build_end_screen()
@@ -367,6 +376,11 @@ func _fill_view(pm: PopupMenu) -> void:
 	pm.add_separator("Overlays")
 	for t in VIEW_TOGGLES:
 		_add(pm, String(t[1]), "toggle", t[0], int(t[2]), true, 1 if toggle_state.get(t[0], false) else 0)
+	var plan := _submenu(pm, "Planning map")
+	_add(plan, "Next planning mode", "menu", "plan_next", KEY_F10)
+	plan.add_separator()
+	for i in plan_names.size():
+		_add(plan, String(plan_names[i]), "menu", "plan_%d" % i, 0, true, 3 if plan_mode_state == i else 2)
 	pm.add_separator("Camera")
 	_add(pm, "Centre on the selection", "menu", "centre", KEY_C)
 	_add(pm, "Next unit", "menu", "next_unit", KEY_TAB)
@@ -411,6 +425,7 @@ func fill_orders(pm: PopupMenu, at_hex: bool, ctx: Dictionary) -> void:
 				_note(pm, String(ctx["info"]))
 			_fill_place(pm, ctx)
 			_add(pm, "Centre the map here", "cmd", "centre_here")
+			_add(pm, "Look from here (line of sight)", "cmd", "look_here")
 			_add(pm, "Whole map", "menu", "whole_map", KEY_M)
 			pm.add_separator()
 		_note(pm, "Select one of your units to give orders")
@@ -464,6 +479,7 @@ func fill_orders(pm: PopupMenu, at_hex: bool, ctx: Dictionary) -> void:
 	if at_hex:
 		pm.add_separator()
 		_add(pm, "Centre the map here", "cmd", "centre_here")
+		_add(pm, "Look from here (line of sight)", "cmd", "look_here")
 	if String(ord["delay"]) != "":
 		pm.add_separator()
 		_note(pm, "Orders arrive in %s (command delay)" % ord["delay"])
@@ -1042,6 +1058,103 @@ func _fire_support_line(info: Dictionary) -> String:
 		info.get("fs_battery", "guns"), float(info.get("fs_battery_km", 0.0)), float(info.get("radio_km", 20.0))]
 
 
+# --- Planning map panel (MRK-25) ----------------------------------------------------------
+# Next to the reports when a planning mode is on: the mode, its colour key (from the core,
+# so it always matches the map) and, for line of sight, the eye height and what is seen.
+
+var plan_names: Array = ["Off"]
+
+
+func _build_plan_panel() -> void:
+	plan_panel = PanelContainer.new()
+	plan_panel.add_theme_stylebox_override("panel", _panel_style(0.88))
+	plan_panel.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
+	_offsets(plan_panel, 652, -8, 1032, -8)
+	plan_panel.grow_vertical = Control.GROW_DIRECTION_BEGIN
+	plan_panel.visible = false
+	add_child(plan_panel)
+	var col := VBoxContainer.new()
+	col.add_theme_constant_override("separation", 4)
+	plan_panel.add_child(col)
+	var head := HBoxContainer.new()
+	col.add_child(head)
+	head.add_child(_label("Planning map", 14, AMBER))
+	plan_pick = OptionButton.new()
+	plan_pick.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	plan_pick.tooltip_text = "F10 steps through the modes."
+	plan_pick.item_selected.connect(func(i: int) -> void: menu_action.emit("plan_%d" % i))
+	head.add_child(plan_pick)
+	var close := Button.new()
+	close.text = "Off"
+	close.tooltip_text = "Planning map off"
+	close.pressed.connect(func() -> void: menu_action.emit("plan_0"))
+	head.add_child(close)
+	plan_keys = VBoxContainer.new()
+	plan_keys.add_theme_constant_override("separation", 2)
+	col.add_child(plan_keys)
+	plan_eye_row = HBoxContainer.new()
+	col.add_child(plan_eye_row)
+	plan_eye_row.add_child(_label("Eye height", 13, MUTED))
+	plan_eye_pick = OptionButton.new()
+	for e in PLAN_EYES:
+		plan_eye_pick.add_item(String(e[1]))
+	plan_eye_pick.select(1)
+	plan_eye_pick.item_selected.connect(func(i: int) -> void: menu_action.emit("sight_eye_%d" % i))
+	plan_eye_row.add_child(plan_eye_pick)
+	plan_info = _label("", 13, TEXT)
+	plan_info.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	plan_info.custom_minimum_size = Vector2(360, 0)
+	col.add_child(plan_info)
+
+
+## Shows the panel for `mode` (0 hides it). `key`: rows from MurksWorld.get_plan_key.
+## `info`: a line under the key (line of sight: the point and what is seen).
+func show_plan(mode: int, names: Array, key: Array, info := "", eye_index := 1) -> void:
+	plan_mode_state = mode
+	plan_names = names
+	plan_panel.visible = mode != 0
+	if mode == 0:
+		return
+	plan_pick.clear()
+	for n in names:
+		plan_pick.add_item(String(n))
+	plan_pick.select(mode)
+	for c in plan_keys.get_children():
+		c.queue_free()
+	for row in key:
+		var line := HBoxContainer.new()
+		line.add_theme_constant_override("separation", 8)
+		plan_keys.add_child(line)
+		var tint: Color = row[0]
+		if tint.a > 0.0:
+			# The swatch is what the shader does to a mid-green patch of ground.
+			var g := Color(0.50, 0.56, 0.34)
+			var l := g.r * 0.30 + g.g * 0.55 + g.b * 0.15
+			var base := g.lerp(Color(l, l, l), 0.35)
+			var sw := ColorRect.new()
+			sw.color = base.lerp(Color(tint.r, tint.g, tint.b), tint.a)
+			sw.custom_minimum_size = Vector2(26, 16)
+			sw.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+			line.add_child(sw)
+		else:
+			var gap := Control.new()
+			gap.custom_minimum_size = Vector2(26, 0)
+			line.add_child(gap)
+		var text := VBoxContainer.new()
+		text.add_theme_constant_override("separation", 0)
+		line.add_child(text)
+		text.add_child(_label(String(row[1]), 13))
+		if String(row[2]) != "":
+			var note := _label(String(row[2]), 11, MUTED)
+			note.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+			note.custom_minimum_size = Vector2(330, 0)
+			text.add_child(note)
+	plan_eye_row.visible = mode == MapView.PLAN_SIGHT
+	plan_eye_pick.select(eye_index)
+	plan_info.text = info
+	plan_info.visible = info != ""
+
+
 # --- Log, status line, banners ---------------------------------------------------------
 
 func _build_log() -> void:
@@ -1304,6 +1417,7 @@ func _controls_body() -> Control:
 		["Game", [["F5 / F9", "Quick save / quick load"], ["F1 / F2", "Controls / map data credits"],
 			["F4 / F6", "Map legend / painted terrain textures on or off"],
 			["F7", "Counters show vehicles or NATO symbols"],
+			["F10", "Planning map: going, cover, slope, line of sight (steps through)"],
 			["F8", "Topographic map: contour lines and heights"],
 			["Esc", "Pause menu"]]]]
 	var cols := HBoxContainer.new()
