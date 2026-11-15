@@ -284,6 +284,9 @@ void World::setup_scenario(int extra_groups) {
     trains_announced_ = -1;
     stats_.kills = stats_.losses = 0;
     time_min = 6 * 60; // 14 April 1989, 06:00
+    sandbox = false;
+    hostile_ai = true;
+    clock_started_ = false;
     rng_.reseed(seed * 31ull + 7);
     const auto &S = map.settlements;
     if (S.empty()) return;
@@ -2427,6 +2430,7 @@ void World::tick() {
     los_checks_ = 0;
     paths_this_tick_ = 0;
     ++time_min;
+    clock_started_ = true;
 
     update_orders();
     update_routes();
@@ -2443,9 +2447,9 @@ void World::tick() {
     update_suppression();
     update_morale_and_sop();
     update_standoff();
-    update_ai();
+    if (hostile_ai) update_ai();
     if (time_min % 60 == 0) update_logistics();
-    if (time_min % 5 == 0) check_outcome();
+    if (time_min % 5 == 0 && !sandbox) check_outcome();
 
     double us = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
     stats_.avg_tick_us = stats_.ticks == 0 ? us : stats_.avg_tick_us * 0.98 + us * 0.02;
@@ -3546,11 +3550,165 @@ bool World::player_in_contact() const {
 }
 
 // ------------------------------------------------------------------------------------
+// Sandbox (MRK-31)
+// ------------------------------------------------------------------------------------
+
+namespace {
+struct SandboxKit {
+    UnitType type;
+    const char *label;
+    const char *own_equip;
+    const char *hostile_equip;
+};
+// The scenario's own kit for each kind, so placed units fight like the ones already there.
+const SandboxKit kSandboxKit[World::SB_KIND_COUNT] = {
+    {U_TANK, "Tank", "4x T-55A", "3x T-72M"},
+    {U_MECH, "Mech", "3x BMP-1", "3x BMP-2"},
+    {U_INFANTRY, "Rifle", "35 men, RPG-7", "30 men"},
+    {U_RECON, "Recon", "2x BRDM-2", "BRDM-2"},
+    {U_ARTILLERY, "Battery", "4x 2S1 Gvozdika", "3x 2S1"},
+    {U_HQ, "HQ", "UAZ-469, R-145 radio", "BTR-60PU"},
+    {U_TRUCK, "Supply Col", "6x Ural-375D", "6x Ural-375D"},
+};
+} // namespace
+
+int World::sandbox_hostile_formation() const {
+    for (int i = 0; i < (int)formations.size(); ++i)
+        if (formations[i].side == SIDE_HOSTILE && formations[i].name == "Sandbox Hostiles") return i;
+    return -1;
+}
+
+int World::sandbox_place(int side, int kind, HexCoord at) {
+    if (!sandbox || formations.empty() || kind < 0 || kind >= SB_KIND_COUNT) return -1;
+    if (side != SIDE_PLAYER && side != SIDE_HOSTILE) return -1;
+    if (!map.in_bounds(at)) return -1;
+    if (side == SIDE_HOSTILE && kind == SB_SUPPLY) return -1; // hostile trains are not modelled yet
+    int f = 0;
+    if (side == SIDE_HOSTILE) {
+        f = sandbox_hostile_formation();
+        if (f < 0) {
+            Formation nf;
+            nf.name = "Sandbox Hostiles";
+            nf.side = SIDE_HOSTILE;
+            formations.push_back(nf);
+            f = (int)formations.size() - 1;
+        }
+    }
+    // Every hex a unit stands in is taken: the new one goes on the nearest free land hex.
+    std::vector<int> taken;
+    for (const auto &u : units)
+        if (u.alive) taken.push_back(map.index(u.pos));
+    const SandboxKit &k = kSandboxKit[kind];
+    int n = 1;
+    for (const auto &u : units)
+        if (u.side == side && u.type == k.type && u.name.rfind(side == SIDE_PLAYER ? "S " : "SH ", 0) == 0) ++n;
+    const std::string name = fmt("%s%s %d", side == SIDE_PLAYER ? "S " : "SH ", k.label, n);
+    const int id = spawn(f, (int8_t)side, k.type, name, side == SIDE_PLAYER ? k.own_equip : k.hostile_equip, at, taken);
+    if (map.at(units[id].pos).terrain == T_WATER) { // no land within reach of the click
+        formations[f].members.pop_back();
+        units.pop_back();
+        return -1;
+    }
+    Unit &u = units[id];
+    u.ai_next = time_min;
+    if (k.type == U_TRUCK) {
+        u.roe = ROE_RETURN;
+        u.brk = BC_LIGHT;
+    }
+    if (side == SIDE_PLAYER) stock.personnel += unit_type_info(k.type).crew;
+    if (k.type == U_MECH) add_dismounts(id);
+    rebuild_buckets();
+    update_zones();
+    push_event(EV_INFO, id, false, fmt("Sandbox: %s placed %s.", units[id].name.c_str(), place_name(units[id].pos).c_str()));
+    return id;
+}
+
+bool World::sandbox_remove(int unit_id) {
+    if (!sandbox || unit_id < 0 || unit_id >= (int)units.size()) return false;
+    Unit &u = units[unit_id];
+    if (u.removed || (!u.alive && !u.embarked)) return false;
+    // Squads go with their vehicles; squads taken off alone leave the platoon without any.
+    std::vector<int> take{unit_id};
+    if (u.dismounts >= 0 && !units[u.dismounts].removed) take.push_back(u.dismounts);
+    if (u.carrier >= 0) {
+        units[u.carrier].dismounts = -1;
+        u.carrier = -1;
+    }
+    const std::string name = u.name;
+    for (int id : take) {
+        Unit &x = units[id];
+        // Out of its team: a removed leader disbands the team, a member leaves it.
+        if (x.group >= 0 && x.group < (int)groups.size() && groups[x.group].alive) {
+            Group &g = groups[x.group];
+            if (g.leader == id) {
+                disband_group(x.group);
+            } else {
+                for (size_t k = 0; k < g.members.size(); ++k)
+                    if (g.members[k] == id) {
+                        g.members.erase(g.members.begin() + (long)k);
+                        g.keep_dx.erase(g.keep_dx.begin() + (long)k);
+                        g.keep_dy.erase(g.keep_dy.begin() + (long)k);
+                        break;
+                    }
+                if (g.members.empty()) disband_group(x.group);
+            }
+        }
+        x.group = -1;
+        x.follow = false;
+        // A supply column's route ends with it.
+        for (auto &r : routes)
+            if (r.convoy == id) {
+                r.active = false;
+                r.convoy = -1;
+            }
+        x.convoy_route = -1;
+        if (x.militia && x.holding >= 0 && x.holding < (int)holdings.size() && holdings[x.holding].militia_unit == id)
+            holdings[x.holding].militia_unit = -1;
+        auto &mem = formations[x.formation].members;
+        mem.erase(std::remove(mem.begin(), mem.end(), id), mem.end());
+        if (x.side == SIDE_PLAYER && x.carrier < 0 && x.alive)
+            stock.personnel = std::max(0, stock.personnel - unit_type_info(x.type).crew);
+        x.alive = false;
+        x.embarked = false;
+        x.removed = true;
+        x.pending.active = false;
+        x.pending_stance.active = false;
+        x.path.clear();
+        x.path_i = 0;
+        x.route.clear();
+        x.wp_i = 0;
+        x.dismounts = -1;
+        x.carrier = -1;
+    }
+    rebuild_buckets();
+    update_zones();
+    push_event(EV_INFO, -1, false, fmt("Sandbox: %s taken off the map.", name.c_str()));
+    return true;
+}
+
+bool World::set_start_time(int day, int hour) {
+    if (!sandbox || clock_started_ || day < 14 || day > 20 || hour < 0 || hour > 23) return false;
+    const int64_t t = (int64_t)(day - 14) * 1440 + hour * 60;
+    const int64_t delta = t - time_min;
+    time_min = t;
+    // Orders already on their way keep their delays.
+    for (auto &u : units) {
+        if (u.pending.active) {
+            u.pending.issued_at += delta;
+            u.pending.activates_at += delta;
+        }
+        if (u.pending_stance.active) u.pending_stance.activates_at += delta;
+        u.ai_next += delta;
+    }
+    return true;
+}
+
+// ------------------------------------------------------------------------------------
 // Quick save / load
 // ------------------------------------------------------------------------------------
 
 namespace {
-constexpr char kSaveMagic[8] = {'M', 'U', 'R', 'K', 'S', 'S', 'V', '9'};
+constexpr char kSaveMagic[8] = {'M', 'U', 'R', 'K', 'S', 'S', 'V', 'A'}; // v10
 
 struct SaveWriter {
     std::vector<uint8_t> b;
@@ -3649,6 +3807,8 @@ template <typename A, typename U> void io_unit(A &a, U &u) {
     // v7: holdings and supply.
     a.pod(u.militia); a.pod(u.holding); a.pod(u.convoy_state); a.pod(u.convoy_route);
     a.pod(u.cargo_l); a.pod(u.cargo_t); a.pod(u.cargo_kg); a.pod(u.convoy_wait_until); a.pod(u.trip_started);
+    // v10: sandbox.
+    a.pod(u.removed);
 }
 
 template <typename A, typename H> void io_holding(A &a, H &h) {
@@ -3719,6 +3879,7 @@ std::vector<uint8_t> World::save_state() const {
         w.str(m.name);
         w.ints(m.xy);
     }
+    w.pod(sandbox); w.pod(hostile_ai); w.pod(clock_started_);
     return w.b;
 }
 
@@ -3771,6 +3932,8 @@ bool World::load_state(const uint8_t *data, size_t size, std::string *error) {
         r.str(m.name);
         r.ints(m.xy);
     }
+    bool sbx = false, hai = true, clk = false;
+    r.pod(sbx); r.pod(hai); r.pod(clk);
     if (!r.ok) return fail("save is truncated or corrupt");
     for (const auto &m : mks)
         if (!marking_ok(map, m)) return fail("save is corrupt");
@@ -3823,6 +3986,9 @@ bool World::load_state(const uint8_t *data, size_t size, std::string *error) {
     outcome_ = oc;
     outcome_text_ = ot;
     default_standoff = dso;
+    sandbox = sbx;
+    hostile_ai = hai;
+    clock_started_ = clk;
     used_diesel_l_ = used_l;
     used_ammo_t_ = used_t;
     formations = std::move(fs);

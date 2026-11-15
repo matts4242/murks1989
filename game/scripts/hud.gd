@@ -84,6 +84,19 @@ var plan_eye_pick: OptionButton
 var plan_info: Label
 # Order of battle panel
 var oob_panel: PanelContainer
+var sandbox_panel: PanelContainer     # MRK-31: sandbox tools (place, delete, start time, AI)
+var sbx_side: OptionButton
+var sbx_kind: OptionButton
+var sbx_place: Button
+var sbx_delete_tool: Button
+var sbx_day: OptionButton
+var sbx_hour: OptionButton
+var sbx_time_note: Label
+var sbx_ai: CheckBox
+var sbx_reveal: CheckBox
+var title_new_game: Button
+var title_campaign: Button
+var title_sandbox: Button
 var oob_tree: Tree
 var oob_foot: Label
 var oob_items := {}                 # unit id -> TreeItem
@@ -185,6 +198,7 @@ func _ready() -> void:
 	_build_plan_panel()
 	_build_oob_panel()
 	_build_ruler_panel()
+	_build_sandbox_panel()
 	_build_status()
 	_build_banners()
 	_build_end_screen()
@@ -1208,6 +1222,110 @@ func _build_plan_panel() -> void:
 	col.add_child(plan_info)
 
 
+# --- Sandbox panel (MRK-31) --------------------------------------------------------------
+
+const SBX_KINDS := [["Tank platoon", "Own 4x T-55A, hostile 3x T-72M"], ["Mech platoon", "Own 3x BMP-1, hostile 3x BMP-2, with their squads aboard"],
+	["Rifle platoon", "Own 35 men with RPG-7, hostile 30 men"], ["Recon section", "Own 2x BRDM-2, hostile BRDM-2"],
+	["Battery", "Own 4x 2S1, hostile 3x 2S1"], ["HQ", "Own UAZ-469 with R-145 radio, hostile BTR-60PU"],
+	["Supply column", "6x Ural-375D (own side only)"]]
+
+
+func _build_sandbox_panel() -> void:
+	sandbox_panel = PanelContainer.new()
+	sandbox_panel.add_theme_stylebox_override("panel", _panel_style(0.9))
+	# Top left, beside the order of battle and under the contract line: clear of the unit
+	# panel (top right) and the reports, planning and ruler panels (bottom).
+	sandbox_panel.set_anchors_preset(Control.PRESET_TOP_LEFT)
+	_offsets(sandbox_panel, 356, 104, 676, 104)
+	sandbox_panel.visible = false
+	add_child(sandbox_panel)
+	var col := VBoxContainer.new()
+	col.add_theme_constant_override("separation", 4)
+	sandbox_panel.add_child(col)
+	var head := _label("Sandbox", 15, AMBER)
+	head.tooltip_text = "No victory or defeat. Tools for setting up fights to test."
+	head.mouse_filter = Control.MOUSE_FILTER_PASS
+	col.add_child(head)
+	var row := HBoxContainer.new()
+	col.add_child(row)
+	sbx_side = OptionButton.new()
+	sbx_side.focus_mode = Control.FOCUS_NONE
+	sbx_side.add_item("Own", 0)
+	sbx_side.add_item("Hostile", 1)
+	sbx_side.tooltip_text = "Which side the Place tool puts units down for"
+	sbx_side.item_selected.connect(func(i: int) -> void: menu_action.emit("sbx_side_%d" % i))
+	row.add_child(sbx_side)
+	sbx_kind = OptionButton.new()
+	sbx_kind.focus_mode = Control.FOCUS_NONE
+	sbx_kind.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	for i in SBX_KINDS.size():
+		sbx_kind.add_item(String(SBX_KINDS[i][0]), i)
+		sbx_kind.set_item_tooltip(i, String(SBX_KINDS[i][1]))
+	sbx_kind.tooltip_text = "What the Place tool puts down (the scenario's kit for that side)"
+	sbx_kind.item_selected.connect(func(i: int) -> void: menu_action.emit("sbx_kind_%d" % i))
+	row.add_child(sbx_kind)
+	var row2 := HBoxContainer.new()
+	col.add_child(row2)
+	sbx_place = _small_button("Place (Ins)", true, "Left-click the map to put a unit on the nearest free land hex. Ins or Esc ends it.")
+	sbx_place.pressed.connect(func() -> void: menu_action.emit("sbx_place_tool"))
+	row2.add_child(sbx_place)
+	var del := _small_button("Delete selected (Del)", false, "Take the selected units off the map (squads go with their vehicles). Not a kill or a loss.")
+	del.pressed.connect(func() -> void: menu_action.emit("sbx_delete"))
+	row2.add_child(del)
+	sbx_delete_tool = _small_button("Click-delete (Shift+Del)", true, "Left-click a unit, own or hostile, to take it off the map.")
+	sbx_delete_tool.pressed.connect(func() -> void: menu_action.emit("sbx_delete_tool"))
+	col.add_child(sbx_delete_tool)
+	var row3 := HBoxContainer.new()
+	col.add_child(row3)
+	row3.add_child(_label("Start", 13, MUTED))
+	sbx_day = OptionButton.new()
+	sbx_day.focus_mode = Control.FOCUS_NONE
+	for d in range(14, 21):
+		sbx_day.add_item("%d April" % d, d)
+	sbx_day.item_selected.connect(func(i: int) -> void: menu_action.emit("sbx_day_%d" % (14 + i)))
+	row3.add_child(sbx_day)
+	sbx_hour = OptionButton.new()
+	sbx_hour.focus_mode = Control.FOCUS_NONE
+	for h in 24:
+		sbx_hour.add_item("%02d:00" % h, h)
+	sbx_hour.item_selected.connect(func(i: int) -> void: menu_action.emit("sbx_hour_%d" % i))
+	row3.add_child(sbx_hour)
+	sbx_time_note = _label("", 12, MUTED)
+	col.add_child(sbx_time_note)
+	sbx_ai = CheckBox.new()
+	sbx_ai.text = "Hostile AI"
+	sbx_ai.focus_mode = Control.FOCUS_NONE
+	sbx_ai.tooltip_text = "Off: hostiles make no moves of their own (no hunting, no patrols).\nThey still fire by their rules of engagement and rearm."
+	sbx_ai.toggled.connect(func(on: bool) -> void: menu_action.emit("sbx_ai_%s" % ("on" if on else "off")))
+	col.add_child(sbx_ai)
+	sbx_reveal = CheckBox.new()
+	sbx_reveal.text = "Show all hostiles"
+	sbx_reveal.focus_mode = Control.FOCUS_NONE
+	sbx_reveal.tooltip_text = "Display only: every hostile is drawn where it is, seen or not. Spotting is unchanged."
+	sbx_reveal.toggled.connect(func(on: bool) -> void: menu_action.emit("sbx_reveal_%s" % ("on" if on else "off")))
+	col.add_child(sbx_reveal)
+
+
+## Fills the sandbox panel. `d`: visible, side, kind, tool ("", "place", "delete"), day, hour,
+## clock_started, hostile_ai, reveal.
+func show_sandbox(d: Dictionary) -> void:
+	sandbox_panel.visible = d.get("visible", false)
+	if not sandbox_panel.visible:
+		return
+	sbx_side.select(int(d.get("side", 0)))
+	sbx_kind.select(int(d.get("kind", 0)))
+	sbx_place.set_pressed_no_signal(String(d.get("tool", "")) == "place")
+	sbx_delete_tool.set_pressed_no_signal(String(d.get("tool", "")) == "delete")
+	sbx_day.select(clampi(int(d.get("day", 14)) - 14, 0, 6))
+	sbx_hour.select(clampi(int(d.get("hour", 6)), 0, 23))
+	var locked: bool = d.get("clock_started", false)
+	sbx_day.disabled = locked
+	sbx_hour.disabled = locked
+	sbx_time_note.text = "Locked: the clock has moved." if locked else "Can be changed until the clock first moves."
+	sbx_ai.set_pressed_no_signal(d.get("hostile_ai", true))
+	sbx_reveal.set_pressed_no_signal(d.get("reveal", true))
+
+
 # --- Order of battle panel ---------------------------------------------------------------
 
 const OOB_SEL_BG := Color(0.55, 0.42, 0.08, 0.55)   # the selection (amber, as on the map)
@@ -1976,7 +2094,15 @@ func _build_title_screen() -> void:
 	buttons.add_theme_constant_override("separation", 8)
 	buttons.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
 	col.add_child(buttons)
-	buttons.add_child(_menu_button("New campaign", "start", "Take the contract from the start: 14 April 1989, 06:00."))
+	title_new_game = _menu_button("New game", "new_game_placeholder", "Not built yet.")
+	title_new_game.disabled = true
+	buttons.add_child(title_new_game)
+	title_campaign = _menu_button("Campaign", "campaign_placeholder", "Not built yet.")
+	title_campaign.disabled = true
+	buttons.add_child(title_campaign)
+	title_sandbox = _menu_button("Sandbox", "sandbox",
+		"The map and the contract scenario with tools on top: place and delete units for either side,\nset the start time, switch the hostile AI off. No victory or defeat.")
+	buttons.add_child(title_sandbox)
 	title_continue = _menu_button("Continue from quick save", "continue", "Load the quick save (F5 saves during play).")
 	buttons.add_child(title_continue)
 	buttons.add_child(_menu_button("Controls", "help"))
@@ -2541,6 +2667,11 @@ func set_objectives(obj: Dictionary) -> void:
 			hq_text = "lost: orders slow, trains reorganising (%d min)" % left
 		else:
 			hq_text = "lost: orders slow, no resupply"
+	if obj.get("sandbox", false):
+		objective_label.text = "[b]Sandbox:[/b] no victory or defeat · hostile AI %s\nHQ [color=%s]%s[/color]   ·   kills %d, lost %d" % [
+			"on" if obj.get("hostile_ai", true) else "[color=#ffc040]off[/color]", "#7fe07f" if hq_ok else "#ff6050", hq_text,
+			int(obj.get("kills", 0)), int(obj.get("losses", 0))]
+		return
 	var t := ""
 	match int(obj.get("outcome", 0)):
 		1: t += "[color=#7fe07f][b]Victory.[/b][/color]  "

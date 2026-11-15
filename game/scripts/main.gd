@@ -45,6 +45,10 @@ var route_unit := -1          # who the plan is for (a team's leader for a team)
 var route_team := -1          # the team, when the plan is for a team
 var route_preview := {}       # {hex, path, minutes}: from the last waypoint to the cursor
 static var skip_title := false     # New game from the menus: reload straight into play, past the title screen
+static var sandbox_mode := false   # Sandbox (MRK-31): New game from its pause menu starts a fresh sandbox
+var sbx_side := 0                  # sandbox Place tool: 0 own, 1 hostile
+var sbx_kind := 0                  # World::SandboxKind
+var sbx_tool := ""                 # "", "place" or "delete": what a left-click on the map does
 var menu_world_pos := Vector2.ZERO # where the right-click order menu was opened (world units)
 var resume_speed := 0              # speed to go back to when the pause menu closes
 var briefing_text := ""
@@ -208,7 +212,10 @@ func _start_world() -> void:
 		_run_uitest()
 	elif skip_title:
 		skip_title = false
-		_begin_campaign()
+		if sandbox_mode:
+			_begin_sandbox()
+		else:
+			_begin_campaign()
 	else:
 		hud.show_title(_title_briefing())
 
@@ -225,6 +232,90 @@ func _title_briefing() -> String:
 func _begin_campaign() -> void:
 	hud.hide_title()
 	hud.show_banner(briefing_text + "\nSelect a unit and right-click the map for orders. Space starts the clock; Esc opens the menu; F1 shows all controls.", 12.0)
+
+
+## Sandbox (MRK-31): the same map and scenario, no victory or defeat, with the sandbox panel.
+func _begin_sandbox() -> void:
+	sandbox_mode = true
+	world.set_sandbox(true)
+	world.set_reveal_hostiles(true)
+	hud.hide_title()
+	_refresh_sandbox_panel()
+	_check_outcome()
+	hud.show_banner("Sandbox: no victory or defeat. Ins places a unit (pick side and type in the panel), Del deletes the selection, " +
+		"Shift+Del arms click-to-delete. Set the start time before the clock moves; Space starts it.", 10.0)
+
+
+func _refresh_sandbox_panel() -> void:
+	if world == null:
+		return
+	var on: bool = world.is_sandbox()
+	if not on:
+		sbx_tool = ""
+		hud.show_sandbox({"visible": false})
+		return
+	var t := int(world.get_objectives()["time_minutes"])
+	hud.show_sandbox({"visible": true, "side": sbx_side, "kind": sbx_kind, "tool": sbx_tool,
+		"day": 14 + t / 1440, "hour": (t % 1440) / 60, "clock_started": world.is_clock_started(),
+		"hostile_ai": world.get_hostile_ai(), "reveal": world.get_reveal_hostiles()})
+
+
+func _sandbox_set_tool(tool: String) -> void:
+	if not world.is_sandbox():
+		return
+	sbx_tool = "" if sbx_tool == tool else tool
+	if sbx_tool == "place":
+		hud.show_toast("Place: left-click the map for a %s %s. Ins or Esc ends it." % [
+			"hostile" if sbx_side == 1 else "own", String(hud.SBX_KINDS[sbx_kind][0]).to_lower()], 3.0)
+	elif sbx_tool == "delete":
+		hud.show_toast("Click-delete: left-click a unit to take it off the map. Shift+Del or Esc ends it.", 3.0)
+	_refresh_sandbox_panel()
+
+
+## A left-click with a sandbox tool armed.
+func _sandbox_click(screen_pos: Vector2) -> void:
+	if sbx_tool == "place":
+		var hex: Vector2i = world.world_to_hex(_screen_to_world(screen_pos))
+		var id: int = world.sandbox_place(sbx_side, sbx_kind, hex)
+		if id < 0:
+			hud.show_toast("Nothing placed there (no free land near the click%s)." % (
+				", and hostile supply columns are not modelled" if sbx_side == 1 and sbx_kind == 6 else ""), 3.0)
+		else:
+			if sbx_side == 0:
+				selected = [id]
+		_after_sandbox_change()
+	elif sbx_tool == "delete":
+		var keep := selected.duplicate()
+		_click_select(screen_pos, false)
+		var hit := selected.duplicate()
+		selected = keep
+		if hit.size() == 1:
+			_sandbox_remove([hit[0]])
+		else:
+			hud.show_toast("Click on a single unit to delete it.", 2.5)
+
+
+func _sandbox_remove(ids: Array) -> void:
+	if not world.is_sandbox() or ids.is_empty():
+		return
+	var n := 0
+	for id in ids:
+		if world.sandbox_remove(int(id)):
+			n += 1
+			selected.erase(int(id))
+	hud.show_toast("Deleted %d unit%s." % [n, "" if n == 1 else "s"] if n > 0 else "Nothing to delete.", 2.5)
+	_after_sandbox_change()
+
+
+func _after_sandbox_change() -> void:
+	overlay._veh_cache.clear()
+	_refresh_snapshot()
+	groups_cache = world.get_groups()
+	_prune_selection()
+	_poll_events()
+	_refresh_oob()
+	_refresh_selection_panel()
+	_refresh_sandbox_panel()
 
 
 ## Baked maps are a MURKSMAP file compressed with zlib: "MURKSZ01", u64 raw size, data.
@@ -320,6 +411,8 @@ func _process(delta: float) -> void:
 		_refresh_selection_panel()
 		_refresh_oob()
 		_check_outcome()
+		if sandbox_mode:
+			_refresh_sandbox_panel()
 	script_ms = script_ms * 0.9 + 0.1 * ((Time.get_ticks_usec() - _t_start) / 1000.0 + overlay.draw_ms)
 
 
@@ -566,7 +659,7 @@ func _unhandled_input(event: InputEvent) -> void:
 			_zoom_at(mb.position, 1.15)
 		elif mb.button_index == MOUSE_BUTTON_WHEEL_DOWN and mb.pressed:
 			_zoom_at(mb.position, 1.0 / 1.15)
-		elif mb.button_index == MOUSE_BUTTON_LEFT and mb.pressed and mb.double_click:
+		elif mb.button_index == MOUSE_BUTTON_LEFT and mb.pressed and mb.double_click and sbx_tool == "":
 			# Double-click a unit: select its team, or its whole company if it has none.
 			_click_select(mb.position, false)
 			if selected.size() == 1 and not _select_team_of(selected[0]):
@@ -579,7 +672,10 @@ func _unhandled_input(event: InputEvent) -> void:
 				drag_start = mb.position
 			else:
 				if mb.button_index == MOUSE_BUTTON_LEFT and not drag_moved:
-					_click_select(mb.position, mb.shift_pressed)
+					if sbx_tool != "":
+						_sandbox_click(mb.position)
+					else:
+						_click_select(mb.position, mb.shift_pressed)
 				dragging = false
 		elif mb.button_index == MOUSE_BUTTON_RIGHT and mb.pressed:
 			# Shift+right-click plots a waypoint; an armed order (F/Q/E/R or the panel) goes at
@@ -602,6 +698,9 @@ func _unhandled_input(event: InputEvent) -> void:
 	elif event is InputEventKey and event.pressed and not event.echo:
 		var ke := event as InputEventKey
 		if ke.shift_pressed and tools.shift_key(ke.keycode):
+			return
+		if ke.shift_pressed and ke.keycode == KEY_DELETE:
+			_sandbox_set_tool("delete")
 			return
 		_on_key(ke.keycode)
 
@@ -655,6 +754,8 @@ func _on_key(key: Key) -> void:
 		KEY_F11: _on_toggle("OOB")
 		KEY_F5: quick_save()
 		KEY_F9: quick_load()
+		KEY_INSERT: _sandbox_set_tool("place")
+		KEY_DELETE: _sandbox_remove(selected.duplicate())
 
 
 func _on_toggle(name: String) -> void:
@@ -735,22 +836,57 @@ func _on_menu_action(name: String) -> void:
 	if name.begins_with("plan_") and name.substr(5).is_valid_int():
 		set_plan_mode(name.substr(5).to_int())
 		return
+	if name.begins_with("sbx_kind_"):
+		sbx_kind = clampi(name.substr(9).to_int(), 0, hud.SBX_KINDS.size() - 1)
+		_refresh_sandbox_panel()
+		return
+	if name.begins_with("sbx_day_") or name.begins_with("sbx_hour_"):
+		var t := int(world.get_objectives()["time_minutes"])
+		var day := 14 + t / 1440
+		var hour := (t % 1440) / 60
+		if name.begins_with("sbx_day_"):
+			day = name.substr(8).to_int()
+		else:
+			hour = name.substr(9).to_int()
+		if not world.set_start_time(day, hour):
+			hud.show_toast("The start time is locked once the clock has moved.", 3.0)
+		_refresh_sandbox_panel()
+		return
 	if name.begins_with("sight_eye_"):
 		sight_eye_index = clampi(name.substr(10).to_int(), 0, hud.PLAN_EYES.size() - 1)
 		_update_sight()
 		tools.on_action("sight_eye_changed")
 		return
 	match name:
-		"start": _begin_campaign()
+		"start":
+			sandbox_mode = false
+			_begin_campaign()
+		"sandbox": _begin_sandbox()
+		"sbx_place_tool": _sandbox_set_tool("place")
+		"sbx_delete_tool": _sandbox_set_tool("delete")
+		"sbx_delete": _sandbox_remove(selected.duplicate())
+		"sbx_side_0", "sbx_side_1":
+			sbx_side = int(name.substr(9))
+			_refresh_sandbox_panel()
+		"sbx_ai_on", "sbx_ai_off":
+			world.set_hostile_ai(name == "sbx_ai_on")
+			_refresh_sandbox_panel()
+			_check_outcome()
+		"sbx_reveal_on", "sbx_reveal_off":
+			world.set_reveal_hostiles(name == "sbx_reveal_on")
+			_refresh_snapshot()
+			_refresh_sandbox_panel()
 		"continue":
 			if FileAccess.file_exists(SAVE_FILE):
 				hud.hide_title()
 				quick_load()
 		"new_game":
 			skip_title = true
+			sandbox_mode = world != null and world.is_sandbox()
 			get_tree().reload_current_scene()
 		"title":
 			skip_title = false
+			sandbox_mode = false
 			get_tree().reload_current_scene()
 		"quit": get_tree().quit()
 		"save": quick_save()
@@ -783,6 +919,9 @@ func _on_escape() -> void:
 		return
 	if hud.pause_screen.visible:
 		_close_pause()
+	elif sbx_tool != "":
+		sbx_tool = ""
+		_refresh_sandbox_panel()
 	elif tools.cancel():
 		return
 	elif not route_draft.is_empty():
@@ -1886,6 +2025,10 @@ func quick_load() -> void:
 	if not hq.is_empty() and hq["alive"]:
 		selected = [0]
 		camera.position = world.hex_to_world(hq["hex"])
+	sandbox_mode = world.is_sandbox()
+	_refresh_sandbox_panel()
+	_refresh_oob()
+	_check_outcome()
 	hud.show_toast("Loaded the quick save (%s). Paused." % world.get_time_string(), 4.0)
 
 
@@ -2474,6 +2617,84 @@ func _run_uitest() -> void:
 	camera.zoom = zoom_was
 	await _frames(2)
 
+	# Sandbox (MRK-31): title buttons, the panel, Place by Ins and a click, Esc, Del, Shift+Del,
+	# the start time, the hostile AI and Show all hostiles.
+	check.call(hud.title_new_game.disabled and hud.title_campaign.disabled and not hud.title_sandbox.disabled,
+		"title screen: New game and Campaign greyed out, Sandbox available")
+	check.call(not hud.sandbox_panel.visible, "no sandbox panel in the contract")
+	_push_key(KEY_INSERT)
+	await _frames(1)
+	check.call(sbx_tool == "", "Ins does nothing outside the sandbox")
+	var sbx_cam := camera.position
+	var sbx_zoom := camera.zoom
+	selected = [0]
+	camera.position = unit_position(0)
+	camera.zoom = Vector2.ONE * 0.06
+	hud.menu_action.emit("sandbox")
+	await _frames(3)
+	check.call(world.is_sandbox() and hud.sandbox_panel.visible and hud.objective_label.text.contains("Sandbox"),
+		"Sandbox: the panel is up and the contract line reads \"Sandbox: no victory or defeat\"")
+	if not world.is_clock_started():
+		hud.sbx_day.select(2)
+		hud.sbx_day.item_selected.emit(2)
+		await _frames(1)
+		check.call(int(world.get_objectives()["time_minutes"]) / 1440 == 2, "start day set to 16 April before the clock moves")
+	else:
+		hud.sbx_day.item_selected.emit(3)
+		await _frames(1)
+		check.call(hud.sbx_day.disabled and int(world.get_objectives()["time_minutes"]) / 1440 != 3, "start time locked: the clock has moved")
+	var n_units: int = world.get_oob().size()
+	_push_key(KEY_INSERT)
+	await _frames(1)
+	check.call(sbx_tool == "place" and hud.sbx_place.button_pressed, "Ins arms the Place tool")
+	var vcs := get_viewport_rect().size * 0.5
+	_push_click(MOUSE_BUTTON_LEFT, vcs + Vector2(140, 60))
+	await _frames(2)
+	var placed := selected[0] if selected.size() == 1 else -1
+	var pinfo: Dictionary = world.get_unit_info(placed) if placed >= 0 else {}
+	check.call(placed > 0 and String(pinfo.get("name", "")).begins_with("S Tank") and world.get_oob().size() == n_units + 1,
+		"a click puts an own tank platoon down (\"%s\") and it joins the order of battle" % pinfo.get("name", ""))
+	hud.sbx_side.select(1)
+	hud.sbx_side.item_selected.emit(1)
+	hud.sbx_kind.select(2)
+	hud.sbx_kind.item_selected.emit(2)
+	_push_click(MOUSE_BUTTON_LEFT, vcs + Vector2(-160, -40))
+	await _frames(2)
+	var hostile := -1
+	_refresh_snapshot()
+	for i in snapshot.size() / stride:
+		var hid := int(snapshot[i * stride])
+		if int(snapshot[i * stride + 1]) == 1 and hid == placed + 1 and int(snapshot[i * stride + 2]) == 3:
+			hostile = hid # the next id after the tank: a hostile rifle platoon (type 3, infantry)
+	check.call(hostile >= 0, "a hostile rifle platoon is placed and drawn (Show all hostiles is on)")
+	_push_key(KEY_ESCAPE)
+	await _frames(1)
+	check.call(sbx_tool == "" and not hud.pause_screen.visible, "Esc ends the Place tool first")
+	selected = [placed]
+	_push_key(KEY_DELETE)
+	await _frames(2)
+	check.call(not bool(world.get_unit_info(placed).get("alive", true)) and world.get_oob().size() == n_units, "Del takes the selected unit off the map")
+	if hostile >= 0:
+		_push_shift_key(KEY_DELETE)
+		await _frames(1)
+		check.call(sbx_tool == "delete", "Shift+Del arms click-to-delete")
+		var hp: Vector2 = get_viewport().get_canvas_transform() * display_position(hostile)
+		_push_click(MOUSE_BUTTON_LEFT, hp)
+		await _frames(2)
+		check.call(not bool(world.get_unit_info(hostile).get("alive", true)), "a click deletes the hostile")
+		_push_key(KEY_ESCAPE)
+		await _frames(1)
+	hud.sbx_ai.button_pressed = false
+	await _frames(1)
+	check.call(not world.get_hostile_ai() and hud.objective_label.text.contains("off"), "the Hostile AI box switches the AI off")
+	hud.sbx_ai.button_pressed = true
+	await _frames(1)
+	var fresh_world := world.get_objectives()
+	check.call(world.get_hostile_ai() and int(fresh_world["outcome"]) == 0, "and on again; no outcome in the sandbox")
+	camera.position = sbx_cam
+	camera.zoom = sbx_zoom
+	await _frames(2)
+
 	# Last in the test because it moves the clock: 1st Mech dismounts; the squads take the
 	# NATO symbol, the carriers keep their BMP.
 	var units_before := snapshot.size() / stride
@@ -2837,6 +3058,30 @@ func _run_autotest() -> void:
 		show_oob = false
 		hud.set_oob_visible(false)
 		selected.clear()
+	# Sandbox (MRK-31): on a saved copy of the state, restored afterwards so the run is unchanged.
+	var sbx_blob: PackedByteArray = world.save_state()
+	world.set_sandbox(true)
+	world.set_reveal_hostiles(true)
+	var sh: Vector2i = world.get_unit_info(0)["hex"]
+	var st := int(world.sandbox_place(0, 0, sh + Vector2i(6, -3)))
+	world.sandbox_place(0, 1, sh + Vector2i(7, -1))
+	world.sandbox_place(1, 0, sh + Vector2i(16, -2))
+	world.sandbox_place(1, 2, sh + Vector2i(17, 0))
+	sbx_tool = "place"
+	sbx_side = 1
+	_after_sandbox_change()
+	selected = [st]
+	hud.set_objectives(world.get_objectives())
+	hud.refresh(world.get_time_string(), world.is_night(), world.get_stats(), 60, "")
+	_refresh_selection_panel()
+	await _shot("46_sandbox", world.hex_to_world(sh + Vector2i(10, -1)), 0.05)
+	world.load_state(sbx_blob)
+	world.set_reveal_hostiles(false)
+	sbx_tool = ""
+	sbx_side = 0
+	_after_sandbox_change()
+	selected.clear()
+	hud.set_objectives(world.get_objectives())
 	await _shot("02_region_chunks", hq, 0.016)
 	await _shot("03_whole_map_overview", world.get_world_size() * 0.5, get_viewport_rect().size.x / world.get_world_size().x * 0.95)
 

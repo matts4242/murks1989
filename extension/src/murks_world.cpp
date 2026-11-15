@@ -140,6 +140,16 @@ void MurksWorld::_bind_methods() {
     ClassDB::bind_method(D_METHOD("cancel_supply_route", "rid"), &MurksWorld::cancel_supply_route);
     ClassDB::bind_method(D_METHOD("get_supply_routes"), &MurksWorld::get_supply_routes);
     ClassDB::bind_method(D_METHOD("is_orderable", "id"), &MurksWorld::is_orderable);
+    ClassDB::bind_method(D_METHOD("set_sandbox", "on"), &MurksWorld::set_sandbox);
+    ClassDB::bind_method(D_METHOD("is_sandbox"), &MurksWorld::is_sandbox);
+    ClassDB::bind_method(D_METHOD("set_hostile_ai", "on"), &MurksWorld::set_hostile_ai);
+    ClassDB::bind_method(D_METHOD("get_hostile_ai"), &MurksWorld::get_hostile_ai);
+    ClassDB::bind_method(D_METHOD("sandbox_place", "side", "kind", "hex"), &MurksWorld::sandbox_place);
+    ClassDB::bind_method(D_METHOD("sandbox_remove", "id"), &MurksWorld::sandbox_remove);
+    ClassDB::bind_method(D_METHOD("set_start_time", "day", "hour"), &MurksWorld::set_start_time);
+    ClassDB::bind_method(D_METHOD("is_clock_started"), &MurksWorld::is_clock_started);
+    ClassDB::bind_method(D_METHOD("set_reveal_hostiles", "on"), &MurksWorld::set_reveal_hostiles);
+    ClassDB::bind_method(D_METHOD("get_reveal_hostiles"), &MurksWorld::get_reveal_hostiles);
 }
 
 Dictionary MurksWorld::generate(int seed, int chunks_x, int chunks_y) {
@@ -618,6 +628,8 @@ Dictionary MurksWorld::get_objectives() const {
     d["losses"] = world_.stats().losses;
     d["time_minutes"] = (int64_t)world_.time_min;
     d["hq_alive"] = world_.hq_of(murks::SIDE_PLAYER) >= 0;
+    d["sandbox"] = world_.sandbox;
+    d["hostile_ai"] = world_.hostile_ai;
     // Who runs the trains once the HQ is lost: "" while the HQ lives or during the handover.
     const int acting = world_.acting_hq(0);
     d["acting_hq"] = acting >= 0 && world_.units[acting].type != murks::U_HQ ? to_gd(world_.units[acting].name) : String();
@@ -686,7 +698,7 @@ PackedFloat32Array MurksWorld::get_units_snapshot() const {
         if (u.side == murks::SIDE_PLAYER) {
             flags |= FLAG_SEEN;
             pos = unit_world_pos(u);
-        } else if (world_.seen_by(u, murks::SIDE_PLAYER)) {
+        } else if (world_.seen_by(u, murks::SIDE_PLAYER) || (reveal_hostiles_ && world_.sandbox)) {
             flags |= FLAG_SEEN;
             pos = unit_world_pos(u);
         } else if (now - u.last_seen[murks::SIDE_PLAYER] <= 60) {
@@ -1417,6 +1429,19 @@ Dictionary MurksWorld::set_supply_route(int source, int dest) {
 }
 
 bool MurksWorld::cancel_supply_route(int rid) { return world_.cancel_supply_route(rid); }
+
+void MurksWorld::set_sandbox(bool on) { world_.sandbox = on; }
+bool MurksWorld::is_sandbox() const { return world_.sandbox; }
+void MurksWorld::set_hostile_ai(bool on) { world_.hostile_ai = on; }
+bool MurksWorld::get_hostile_ai() const { return world_.hostile_ai; }
+int MurksWorld::sandbox_place(int side, int kind, Vector2i hex) {
+    return world_.sandbox_place(side, kind, murks::HexCoord{hex.x, hex.y});
+}
+bool MurksWorld::sandbox_remove(int id) { return world_.sandbox_remove(id); }
+bool MurksWorld::set_start_time(int day, int hour) { return world_.set_start_time(day, hour); }
+bool MurksWorld::is_clock_started() const { return world_.clock_started(); }
+void MurksWorld::set_reveal_hostiles(bool on) { reveal_hostiles_ = on; }
+bool MurksWorld::get_reveal_hostiles() const { return reveal_hostiles_; }
 
 bool MurksWorld::is_orderable(int id) const {
     return id >= 0 && id < (int)world_.units.size() && world_.units[id].alive && world_.orderable(world_.units[id]);

@@ -197,6 +197,7 @@ struct Unit {
     int64_t fire_pos_since = -1;
     int displace_after = 0; // minutes, drawn when the first shot from a position is fired
     bool alive = true;
+    bool removed = false; // taken off the map in the sandbox (MRK-31): not a kill, not a loss
     bool out_of_fuel_reported = false;
 
     // Mounted infantry. An APC/IFV platoon (the carrier) has a squad unit of its own (one squad
@@ -637,6 +638,26 @@ public:
     // Days of supply at the smoothed consumption (1e9 when nothing is being used).
     double days_of_diesel() const;
     double days_of_ammo() const;
+    // Sandbox (MRK-31): the scenario with tools on top. No victory or defeat; units can be put
+    // on the map and taken off for either side; the start time can be changed until the clock
+    // first moves; the hostile AI can be switched off (hostiles then make no moves of their own,
+    // but still fire by their rules of engagement and rearm). All saved with the game.
+    enum SandboxKind { SB_TANK = 0, SB_MECH, SB_RIFLE, SB_RECON, SB_BATTERY, SB_HQ, SB_SUPPLY, SB_KIND_COUNT };
+    bool sandbox = false;
+    bool hostile_ai = true;
+    bool clock_started() const { return clock_started_; }
+    // Puts a unit of this kind for this side on the nearest free land hex to `at`. Own units join
+    // the company; hostile ones a "Sandbox Hostiles" formation with no objective (they react to
+    // what they see, otherwise hold). APC/IFV platoons get their squads. Returns the id or -1.
+    int sandbox_place(int side, int kind, HexCoord at);
+    // Takes a unit off the map, with a carrier's squads (or squads' vehicles' link), out of its
+    // team (a removed leader disbands it), ending a removed supply column's route. Not a kill
+    // or a loss. False when not in the sandbox or the unit is already gone.
+    bool sandbox_remove(int unit_id);
+    // Day 14..20 (April 1989) and hour 0..23; only in the sandbox and before the clock moves.
+    bool set_start_time(int day, int hour);
+    int sandbox_hostile_formation() const; // -1 until a hostile is placed
+
     double days_of_food() const;
     // A unit the player may order: not militia, and not a column working a route.
     bool orderable(const Unit &u) const;
@@ -718,6 +739,7 @@ private:
     mutable int los_checks_ = 0;
     int paths_this_tick_ = 0;
     bool alert_ = false; // a pause-worthy event was raised this tick
+    bool clock_started_ = false; // the clock has moved since setup (locks the sandbox start time)
     Outcome outcome_ = OUT_ONGOING;
     std::string outcome_text_;
     // Who the company trains were last reported working for (-1 the HQ or no one). Only used

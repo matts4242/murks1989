@@ -68,6 +68,10 @@ target_link_libraries(holdings_test PRIVATE murks_core)
 add_executable(route_test tests/route_test.cpp)
 target_link_libraries(route_test PRIVATE murks_core)
 
+# Sandbox mode: placing, removing, start time, hostile AI off, no outcome, save/load. build/sandbox_test
+add_executable(sandbox_test tests/sandbox_test.cpp)
+target_link_libraries(sandbox_test PRIVATE murks_core)
+
 # Real-map 4-day scripted runs over several seeds (needs zlib). build/playtest game/data/poland_1989.murkz 4 active 1989 8
 find_package(ZLIB)
 if(ZLIB_FOUND)

@@ -178,12 +178,27 @@ public:
     Array get_supply_routes() const;                // every route still worth showing (active or suspended)
     bool is_orderable(int id) const;                // not militia, not a column working a route
 
+    // Sandbox (MRK-31). The flag is set right after setup_scenario; kinds follow World::SandboxKind
+    // (0 tank, 1 mech, 2 rifle, 3 recon, 4 battery, 5 HQ, 6 supply column).
+    void set_sandbox(bool on);
+    bool is_sandbox() const;
+    void set_hostile_ai(bool on);
+    bool get_hostile_ai() const;
+    int sandbox_place(int side, int kind, Vector2i hex);
+    bool sandbox_remove(int id);
+    bool set_start_time(int day, int hour);
+    bool is_clock_started() const;
+    // Display only: draw every hostile where it is, seen or not (spotting is unchanged).
+    void set_reveal_hostiles(bool on);
+    bool get_reveal_hostiles() const;
+
 protected:
     static void _bind_methods();
 
 private:
     Vector2 unit_world_pos(const murks::Unit &u) const;
     murks::World world_;
+    bool reveal_hostiles_ = false;
     murks::ContourSet contours_;
     bool generated_ = false;
 };
