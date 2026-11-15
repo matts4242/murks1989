@@ -48,9 +48,10 @@ const VIEW_TOGGLES := [["Group", "Company grouping on the theater map", KEY_O],
 	["Direct command", "Direct command: who takes orders from whom", KEY_T],
 	["Fire support", "Fire support net and gun ranges", KEY_I],
 	["Supply", "Supply routes and convoys", KEY_F3],
-	["Grid", "Hex grid", KEY_G], ["Detail", "Terrain detail when zoomed in", KEY_F6],
+	["Grid", "Hex grid", KEY_G], ["Detail", "Painted terrain textures (off: flat colours)", KEY_F6],
+	["Edges", "Natural terrain edges (off: crisp hex borders)", 0],
 	["Vehicles", "Vehicles on counters (off: NATO symbols)", KEY_F7],
-	["Topo", "Topographic map: height bands and heights", KEY_F8], ["Sight", "Line of sight of the selected unit", KEY_V],
+	["Topo", "Topographic map: contour lines and heights", KEY_F8], ["Sight", "Line of sight of the selected unit", KEY_V],
 	["Zones", "Simulation fidelity zones", KEY_Z]]
 const LEVY_TIPS := ["0.1 kg a head from the town's larders (a farm collective gives 0.5). Loyalty -10.",
 	"0.5 L a head from garages and stations. Loyalty -10.",
@@ -1301,9 +1302,9 @@ func _controls_body() -> Control:
 		["Holdings", [["Click a pennant", "Open the place's panel"],
 			["Right-click a town", "Raise militia, requisition, supply route"]]],
 		["Game", [["F5 / F9", "Quick save / quick load"], ["F1 / F2", "Controls / map data credits"],
-			["F4 / F6", "Map legend / terrain detail on or off"],
+			["F4 / F6", "Map legend / painted terrain textures on or off"],
 			["F7", "Counters show vehicles or NATO symbols"],
-			["F8", "Topographic map: height bands and heights"],
+			["F8", "Topographic map: contour lines and heights"],
 			["Esc", "Pause menu"]]]]
 	var cols := HBoxContainer.new()
 	cols.add_theme_constant_override("separation", 28)
@@ -1374,35 +1375,37 @@ func close_dialog() -> bool:
 
 
 # --- Map legend ----------------------------------------------------------------------
-# Colours and shapes repeat what core/src/render_data.cpp draws (base_color, the passes in
-# build_chunk_geometry, and build_chunk_detail). Change both together.
+# The ground swatches are painted by the map's own terrain shader (swatch mode), so they
+# always match the map. Line colours and widths repeat append_lines in
+# core/src/render_data.cpp; contour colours repeat contours() in the shader. Change both
+# together.
 
 const LEGEND_TERRAIN := [
-	["open", "Open ground", "Pasture and rough ground. Fast going, no cover."],
-	["fields", "Fields", "Crops, stubble or ploughed earth by parcel. Open; slower when wet."],
-	["forest", "Forest", "Light woods: cover from view and fire, slow for vehicles."],
-	["forest_dense", "Dense forest", "Tall, close timber: the best concealment, the slowest going."],
-	["wetland", "Wetland", "Marsh and bog: very slow, little cover."],
-	["urban", "Built-up, light", "Villages and suburbs: good cover."],
-	["urban_dense", "Built-up, dense", "Town and city blocks: the strongest cover."],
-	["water", "Water", "Lakes, sea and wide rivers: darker where deeper."]]
+	[1, "Open ground", "Pasture and rough ground. Fast going, no cover."],
+	[2, "Fields", "Ploughed, sown or fallow parcels. Open; slower when wet."],
+	[3, "Forest", "Light woods: cover from view and fire, slow for vehicles."],
+	[11, "Dense forest", "Tall, close timber: the best concealment, the slowest going."],
+	[4, "Wetland", "Marsh, bog and pools: very slow, little cover."],
+	[5, "Built-up, light", "Villages, farms and suburbs: good cover."],
+	[13, "Built-up, dense", "Town blocks, estates and works: the strongest cover."],
+	[0, "Water", "Lakes, sea and wide rivers: darker where deeper."]]
 const LEGEND_LINES := [
 	["road_major", "Main road", "Trunk roads and motorways."],
 	["road", "Road", "Minor and local roads."],
-	["rail", "Railway", "Sleepers show when zoomed in."],
+	["rail", "Railway", "With sleepers across it."],
 	["river_major", "Major river", "Crossed at bridges."],
 	["river", "River or stream", ""],
 	["bridge", "Bridge", "Pale deck with dark parapets."],
-	["band", "Height step (F8)", "The ground steps every 20 m: dark below, lit above."],
-	["band_heavy", "Every fifth step", "Heavier, with its height (every 100 m)."],
-	["band_steep", "Steep ground", "Steps close together, and darker."],
+	["contour", "Contour line (F8)", "Every 20 m close in, every 100 m further out."],
+	["contour_index", "Index contour", "Every fifth line, heavier, with its height."],
 	["spot", "Spot height", "A summit and its height in metres."]]
+const LEGEND_SWATCH_M := 420.0   # metres of ground across a terrain swatch
 
 
 func _legend_body() -> Control:
 	var cols := HBoxContainer.new()
 	cols.add_theme_constant_override("separation", 30)
-	for part in [["Ground", LEGEND_TERRAIN], ["Roads, rail and water", LEGEND_LINES]]:
+	for part in [["Ground", LEGEND_TERRAIN], ["Roads, rail, water and relief", LEGEND_LINES]]:
 		var col := VBoxContainer.new()
 		col.add_theme_constant_override("separation", 6)
 		cols.add_child(col)
@@ -1411,9 +1414,13 @@ func _legend_body() -> Control:
 			var line := HBoxContainer.new()
 			line.add_theme_constant_override("separation", 10)
 			col.add_child(line)
-			var sw := Control.new()
+			var sw: Control
+			if row[0] is int:
+				sw = _terrain_swatch(int(row[0]))
+			else:
+				sw = Control.new()
+				sw.draw.connect(_draw_legend_swatch.bind(sw, String(row[0])))
 			sw.custom_minimum_size = Vector2(58, 44)
-			sw.draw.connect(_draw_legend_swatch.bind(sw, String(row[0])))
 			line.add_child(sw)
 			var text := VBoxContainer.new()
 			text.add_theme_constant_override("separation", 0)
@@ -1423,135 +1430,78 @@ func _legend_body() -> Control:
 			if String(row[2]) != "":
 				text.add_child(_label(String(row[2]), 12, MUTED))
 		if part[0] == "Ground":
-			var note := _label("Hill shading: slopes facing north-west are lit,\nslopes facing south-east are in shadow.\nHigh ground turns brown, then white above 1,500 m.\nClose in, forest shows conifers (dark, pointed), broadleaf\n(round) and young plantations (rows); towns show blocks,\nslab estates, works, old quarters, villages and farms.\nThat variety is decoration: only light or dense counts.", 12, MUTED)
-			col.add_child(note)
+			col.add_child(_label("Hill shading from the 90 m elevation data: slopes facing\nnorth-west are lit, south-east in shadow; high ground is paler.\nWoods and towns cast a shadow to the south-east.\nBorders between terrains wander naturally (View menu:\ncrisp hex borders); the grid shows the true hexes and the\nstatus bar names the terrain of the hex under the cursor.\nForest stands, field parcels and building types are\ndecoration: only the terrain and light or dense count.", 12, MUTED))
 		else:
-			col.add_child(_label("Patterns, sleepers and bridges appear from\nmedium zoom (F6 turns them off).\nTown names are sized by population.", 12, MUTED))
+			col.add_child(_label("Roads, rivers and railways bend smoothly through\nthe hexes they link. Contour lines are a darker tone of\nthe ground they cross; lines close together mean steep\nground. Town names are sized by population.", 12, MUTED))
 	return cols
 
 
-func _legend_hex(c: Vector2, rad: float) -> PackedVector2Array:
-	var pts := PackedVector2Array()
-	for i in 6:
-		var a := deg_to_rad(60.0 * i - 30.0)
-		pts.append(c + Vector2(cos(a), sin(a)) * rad)
-	return pts
-
-
-func _legend_blob(sw: Control, c: Vector2, rad: float, n: int, rot: float, col: Color) -> void:
-	var pts := PackedVector2Array()
-	for i in n:
-		var a := rot + TAU * i / n
-		pts.append(c + Vector2(cos(a), sin(a)) * rad)
-	sw.draw_colored_polygon(pts, col)
+## A swatch of one ground type, painted by the terrain shader itself.
+func _terrain_swatch(code: int) -> Control:
+	var r := ColorRect.new()
+	var m := ShaderMaterial.new()
+	m.shader = MapView.TERRAIN_SHADER
+	m.set_shader_parameter("swatch", code)
+	m.set_shader_parameter("swatch_size", LEGEND_SWATCH_M)
+	m.set_shader_parameter("metres_per_pixel", LEGEND_SWATCH_M / 58.0)
+	r.material = m
+	return r
 
 
 func _draw_legend_swatch(sw: Control, kind: String) -> void:
 	var c := sw.size * 0.5
-	var rad := 21.0
-	var k := rad / 288.7   # metres on the map -> pixels in the swatch
-	var ground := Color8(172, 182, 122)
+	var k := 21.0 / 288.7   # metres on the map -> pixels in the swatch, as for a 21 px hex
+	var ground := Color8(124, 149, 77)
+	sw.draw_rect(Rect2(Vector2(0, c.y - 15), Vector2(sw.size.x, 30)), ground)
+	var a := Vector2(2, c.y)
+	var b := Vector2(sw.size.x - 2, c.y)
 	match kind:
-		"open":
-			sw.draw_colored_polygon(_legend_hex(c, rad), ground)
-			for p in [Vector2(-8, -4), Vector2(7, 3), Vector2(-2, 9)]:
-				for i in [-1, 0, 1]:
-					sw.draw_line(c + p + Vector2(i * 1.2, 1.5), c + p + Vector2(i * 2.0, -1.5), Color8(96, 118, 70, 170), 1.0)
-		"fields":
-			sw.draw_colored_polygon(_legend_hex(c, rad), Color8(214, 198, 132))
-			for i in [-1, 0, 1]:
-				var off := Vector2(0, i * 120.0 * k)
-				var half := sqrt(maxf(0.0, pow(205.0 * k, 2) - off.y * off.y))
-				sw.draw_line(c + off - Vector2(half, 0), c + off + Vector2(half, 0), Color8(96, 84, 44, 120), 1.0)
-		"forest", "forest_dense":
-			var dense := kind == "forest_dense"
-			sw.draw_colored_polygon(_legend_hex(c, rad), Color8(74, 108, 66) if dense else Color8(92, 126, 76))
-			var n := 5 if dense else 4
-			for i in n:
-				var a := TAU * i / n + 0.4
-				var p := c + (Vector2.ZERO if i == 0 else Vector2(cos(a), sin(a)) * 11.0)
-				_legend_blob(sw, p + Vector2(1.2, 1.4), 4.4, 4, 0.785, Color8(30, 52, 30, 120))
-				_legend_blob(sw, p, 4.4, 6, 0.3 * i, Color8(59, 96, 55) if dense else Color8(74, 113, 63))
-		"wetland":
-			sw.draw_colored_polygon(_legend_hex(c, rad), Color8(126, 156, 136))
-			for p in [Vector2(0, 2), Vector2(-9, -6), Vector2(9, 8), Vector2(8, -8), Vector2(-8, 10)]:
-				sw.draw_line(c + p - Vector2(3.4, 0), c + p + Vector2(3.4, 0), Color8(70, 118, 160), 1.2)
-				for i in [-1, 0, 1]:
-					sw.draw_line(c + p + Vector2(i * 1.6, -1.0), c + p + Vector2(i * 2.2, -3.4 - (1.2 if i == 0 else 0.0)), Color8(58, 96, 62), 1.0)
-		"urban", "urban_dense":
-			var dense := kind == "urban_dense"
-			sw.draw_colored_polygon(_legend_hex(c, rad), Color8(124, 112, 106) if dense else Color8(164, 152, 138))
-			var roofs := [Color8(168, 86, 66), Color8(96, 92, 92), Color8(188, 176, 160)]
-			var span := 2 if dense else 1
-			var pitch := (86.0 if dense else 120.0) * k
-			var half := Vector2(34.0, 30.0) * k if dense else Vector2(30.0, 24.0) * k
-			var idx := 0
-			for j in range(-span, span + 1):
-				for i in range(-span, span + 1):
-					idx += 1
-					var p := Vector2(i, j) * pitch
-					if p.length() > 205.0 * k or (not dense and idx % 3 == 0):
-						continue
-					sw.draw_rect(Rect2(c + p - half + Vector2(0.8, 0.9), half * 2.0), Color8(40, 34, 32, 110))
-					sw.draw_rect(Rect2(c + p - half, half * 2.0), roofs[idx % 3])
-		"water":
-			sw.draw_colored_polygon(_legend_hex(c, rad), Color8(92, 138, 178))
-		_:
-			# Line features on a strip of open ground.
-			sw.draw_rect(Rect2(Vector2(0, c.y - 15), Vector2(sw.size.x, 30)), ground)
-			var a := Vector2(2, c.y)
-			var b := Vector2(sw.size.x - 2, c.y)
-			match kind:
-				"road_major":
-					sw.draw_line(a, b, Color8(96, 40, 28), 64.0 * 2 * k)
-					sw.draw_line(a, b, Color8(222, 104, 58), 46.0 * 2 * k)
-				"road":
-					sw.draw_line(a, b, Color8(84, 66, 46), 40.0 * 2 * k)
-					sw.draw_line(a, b, Color8(236, 222, 176), 26.0 * 2 * k)
-				"rail":
-					sw.draw_line(a, b, Color8(34, 34, 38), 2.6)
-					for i in 6:
-						var x := a.x + (i + 0.5) * (b.x - a.x) / 6.0
-						sw.draw_line(Vector2(x, c.y - 3.2), Vector2(x, c.y + 3.2), Color8(34, 34, 38), 1.4)
-				"river_major":
-					sw.draw_line(a, b, Color8(52, 94, 146), 92.0 * 2 * k)
-					sw.draw_line(a, b, Color8(84, 136, 188), 76.0 * 2 * k)
-				"river":
-					sw.draw_line(a, b, Color8(58, 100, 150), 54.0 * 2 * k)
-					sw.draw_line(a, b, Color8(98, 148, 196), 40.0 * 2 * k)
-				"band", "band_heavy", "band_steep":
-					# A strip of ground rising to the right: each step shadowed below, lit above.
-					var steps: Array = [0.5] if kind != "band_steep" else [0.2, 0.36, 0.52, 0.68, 0.84]
-					if kind == "band_steep":
-						sw.draw_rect(Rect2(Vector2(a.x + (b.x - a.x) * 0.12, c.y - 15), Vector2((b.x - a.x) * 0.8, 30)), Color(0.13, 0.08, 0.04, 0.22))
-					for st in steps:
-						var x := lerpf(a.x, b.x, float(st))
-						var wd := 7.0 if kind == "band_heavy" else 4.0
-						for i in int(wd):
-							var t := 1.0 - i / wd
-							sw.draw_line(Vector2(x - i - 0.5, c.y - 15), Vector2(x - i - 0.5, c.y + 15), Color(0.13, 0.08, 0.04, (0.62 if kind == "band_heavy" else 0.42) * t), 1.0)
-						for i in 2:
-							sw.draw_line(Vector2(x + i + 0.5, c.y - 15), Vector2(x + i + 0.5, c.y + 15), Color(1.0, 0.98, 0.88, (0.34 if kind == "band_heavy" else 0.24) * (1.0 - i * 0.5)), 1.0)
-					if kind == "band_heavy":
-						sw.draw_string(get_theme_default_font(), Vector2(c.x + 6, c.y + 4), "300", HORIZONTAL_ALIGNMENT_LEFT, -1, 10, Color8(42, 26, 12))
-				"spot":
-					sw.draw_colored_polygon(PackedVector2Array([c + Vector2(-12, -5), c + Vector2(-7.5, 3), c + Vector2(-16.5, 3)]), Color8(42, 26, 12))
-					sw.draw_string(get_theme_default_font(), c + Vector2(-4, 4), "412", HORIZONTAL_ALIGNMENT_LEFT, -1, 11, Color8(42, 26, 12))
-				"bridge":
-					var top := Vector2(c.x, c.y - 15)
-					var bot := Vector2(c.x, c.y + 15)
-					sw.draw_line(top, bot, Color8(58, 100, 150), 54.0 * 2 * k)
-					sw.draw_line(top, bot, Color8(98, 148, 196), 40.0 * 2 * k)
-					sw.draw_line(a, b, Color8(84, 66, 46), 40.0 * 2 * k)
-					sw.draw_line(a, b, Color8(236, 222, 176), 26.0 * 2 * k)
-					var l := 150.0 * k
-					var w := 46.0 * k
-					sw.draw_line(c - Vector2(l, 0), c + Vector2(l, 0), Color8(240, 236, 222), (46.0 - 12.0) * 2 * k)
-					for sgn in [-1.0, 1.0]:
-						sw.draw_line(c + Vector2(-l, w * sgn), c + Vector2(l, w * sgn), Color8(30, 28, 26), 1.4)
-						for e in [-1.0, 1.0]:
-							var q := c + Vector2(l * e, w * sgn)
-							sw.draw_line(q, q + Vector2(e, sgn) * 2.6, Color8(30, 28, 26), 1.4)
+		"road_major":
+			sw.draw_line(a, b, Color8(112, 46, 30), 58.0 * 2 * k)
+			sw.draw_line(a, b, Color8(230, 112, 58), 41.0 * 2 * k)
+		"road":
+			sw.draw_line(a, b, Color8(104, 82, 58), 36.0 * 2 * k)
+			sw.draw_line(a, b, Color8(242, 230, 192), 23.0 * 2 * k)
+		"rail":
+			sw.draw_line(a, b, Color8(44, 42, 46), 2.0)
+			for i in 7:
+				var x := a.x + (i + 0.5) * (b.x - a.x) / 7.0
+				sw.draw_line(Vector2(x, c.y - 28.0 * k), Vector2(x, c.y + 28.0 * k), Color8(44, 42, 46), 1.2)
+		"river_major":
+			sw.draw_line(a, b, Color8(64, 104, 144), 84.0 * 2 * k)
+			sw.draw_line(a, b, Color8(98, 146, 190), 70.0 * 2 * k)
+		"river":
+			sw.draw_line(a, b, Color8(70, 110, 148), 46.0 * 2 * k)
+			sw.draw_line(a, b, Color8(110, 156, 196), 33.0 * 2 * k)
+		"bridge":
+			var top := Vector2(c.x, c.y - 15)
+			var bot := Vector2(c.x, c.y + 15)
+			sw.draw_line(top, bot, Color8(70, 110, 148), 46.0 * 2 * k)
+			sw.draw_line(top, bot, Color8(110, 156, 196), 33.0 * 2 * k)
+			var l := 130.0 * k
+			var w := 52.0 * k
+			sw.draw_line(c - Vector2(l, 0), c + Vector2(l, 0), Color8(232, 226, 210), w * 2.0)
+			sw.draw_line(a, b, Color8(104, 82, 58), 36.0 * 2 * k)
+			sw.draw_line(a, b, Color8(242, 230, 192), 23.0 * 2 * k)
+			for sgn in [-1.0, 1.0]:
+				sw.draw_line(c + Vector2(-l, w * sgn), c + Vector2(l, w * sgn), Color8(34, 30, 28), 1.2)
+				for e in [-1.0, 1.0]:
+					var q := c + Vector2(l * e, w * sgn)
+					sw.draw_line(q, q + Vector2(e * 1.8, sgn * 2.2), Color8(34, 30, 28), 1.2)
+		"contour", "contour_index":
+			# The shader prints contours as the ground colour times (0.50, 0.40, 0.30).
+			var ink := Color(ground.r * 0.5, ground.g * 0.4, ground.b * 0.3)
+			var heavy := kind == "contour_index"
+			var pts := PackedVector2Array()
+			for i in 13:
+				var t := i / 12.0
+				pts.append(Vector2(lerpf(a.x, b.x, t), c.y + sin(t * 5.0) * 7.0))
+			sw.draw_polyline(pts, ground.lerp(ink, 0.9 if heavy else 0.65), 2.0 if heavy else 1.0, true)
+			if heavy:
+				sw.draw_string(get_theme_default_font(), Vector2(c.x - 9, c.y + 13), "300", HORIZONTAL_ALIGNMENT_LEFT, -1, 10, Color8(42, 26, 12))
+		"spot":
+			sw.draw_colored_polygon(PackedVector2Array([c + Vector2(-12, -5), c + Vector2(-7.5, 3), c + Vector2(-16.5, 3)]), Color8(42, 26, 12))
+			sw.draw_string(get_theme_default_font(), c + Vector2(-4, 4), "412", HORIZONTAL_ALIGNMENT_LEFT, -1, 11, Color8(42, 26, 12))
 
 
 # --- Updates -------------------------------------------------------------------------

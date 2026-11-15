@@ -97,8 +97,6 @@ public:
     float get_row_spacing() const;
 
     Ref<ArrayMesh> build_chunk_mesh(Vector2i chunk) const;
-    Ref<ArrayMesh> build_chunk_detail_mesh(Vector2i chunk) const;
-    Ref<ArrayMesh> build_chunk_grid_mesh(Vector2i chunk) const;
     // Relief for the topographic mode (drawing data baked beside the map; optional).
     bool load_contour_bytes(const PackedByteArray &bytes);
     bool has_contours() const;
@@ -107,6 +105,7 @@ public:
     PackedFloat32Array get_chunk_contour_labels(Vector2i chunk, int step) const;
     PackedFloat32Array get_chunk_spot_heights(Vector2i chunk) const;
     Ref<Image> build_overview_image() const;
+    Ref<Image> build_hex_data_image() const;
     Dictionary get_hex_info(Vector2i hex) const;
     Array get_settlements(int min_population) const;
 

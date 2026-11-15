@@ -44,7 +44,7 @@ func _draw() -> void:
 	var view := Rect2(Vector2(-60, -60), size + Vector2(120, 120))
 	if main.show_zones:
 		_draw_zones(xf, zoom)
-	if main.map_view.relief.visible and not main.map_view.relief_labels.is_empty():
+	if main.map_view.show_topo and not main.map_view.relief_labels.is_empty():
 		_draw_topo(xf, zoom, view)
 	_draw_towns(xf, zoom, view)
 	if main.show_los:

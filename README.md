@@ -33,7 +33,7 @@ This build proves the risky technical core of the design plan (roadmap phase 1, 
 - **Stand-off.** Each unit can stay and fight or keep known enemies at a distance: 1, 2 or 3 km, or its own weapon range. With a stand-off, a unit on the move halts before closing inside it, and a unit an enemy comes closer to pulls back out to it (checked every 5 minutes). It is a standing order: the per-unit setting travels down the chain like fire orders, and "Default" follows the company default, which the player sets in the Orders panel and which applies at once. An assault ignores stand-off; team members go by their leader's. Counters show "S/O 2.0km" and the unit panel says what the unit does. The company default starts at "stay and fight".
 - **Map marks.** Selected units show their route in blue with an arrowhead and arrival time, a dashed arrow and yellow tag for an order still travelling ("Road march +35′"), and a dashed line to their company HQ. Shots in sight draw a tracer and an impact flash, artillery a muzzle flash and a spread of bursts, fire from shooters you can't see shows as incoming bursts on your unit, and a destroyed unit explodes and leaves a wreck mark. The hex under the mouse is outlined. These are display only; they don't change any simulation result.
 - **Streaming.** Far out you see a one-pixel-per-hex overview; closer in, 64 × 64-hex chunk meshes are built in C++ and streamed in and out as the camera moves.
-- **Map look (work board MRK-24).** A Flashpoint-style game map with crisp hexes: every hex shows exactly one terrain type and nothing blends across hex edges. Pasture is olive green; fields come in parcels a few hexes across (ripe grain, stubble, green crop, ploughed earth); forest is green, darker where the timber is tall and dense; wetland is grey-green; built-up hexes are grey, darker for dense blocks; water is blue, darker where deeper. Hill shading lies under everything. Roads and rivers have a dark outline: main roads orange-red, other roads pale, railways black. From about 16 px per hex a detail layer fades in with a pattern inside each hex (tree crowns with shadows, buildings, furrows that share a direction within a parcel, marsh marks with reeds, a few grass tufts), sleepers on the railways and bridges where a road or railway crosses a river. All of it is placed by a hash of the hex coordinates, so the map never changes between runs. Forest varies by stand over a few kilometres (dark pointed conifers, round broadleaf crowns, mixed, young plantations in rows) and from hex to hex (tree count and size, clearings, rides, undergrowth). Built-up quarters of 2 x 2 hexes each have a character: dense ones are courtyard blocks, slab housing estates, works with sheds, tanks and a chimney, or an old town with a market square and church; light ones are a village street with garden strips, houses with gardens, farmsteads with orchards, or allotments. That variety is decoration (the map data has no stand or building types); the rules only know light or dense. **F4** (View > Map legend) shows the legend; **F6** turns the detail layer off. It is drawing only: no simulation or save-format change.
+- **Map look (work board MRK-29).** The ground is one sprite over the whole map, painted pixel by pixel by a shader (`game/shaders/terrain.gdshader`). For each pixel it finds the hex underneath in a per-hex data texture (terrain, light or dense, elevation, cover; `build_hex_data_image`) and paints that terrain with a material computed in world space, so a wood or a field runs on seamlessly from one hex into the next: forest canopy in clumps with single lit crowns close in, stands that change between broadleaf and conifer over a few kilometres; farm districts about a kilometre across, each with its own field direction and parcel size (long strips to collective-farm blocks), crops of mid-April (ploughed, harrowed, winter wheat, stubble, rapeseed) and grass strips between parcels; pasture with drifts of greener and drier grass and copses; marsh with pools and reeds; towns as quarters of their own kind (blocks round courtyards, slab estates, works with sheds, village lanes with houses and garden strips, farmsteads) with roofs, streets and shadows; water darker where deeper. Woods and towns cast a soft shadow to the south-east. Hill shading comes from the 180 m height raster (a smooth cubic surface, light from the north-west), and high ground grows a little paler. **Natural edges** (default; View > Natural terrain edges switches to crisp hex borders): the three hex centres around a pixel vote for their terrain with their barycentric weights plus a little noise per terrain, so a jagged row of hex edges becomes one curving wood edge, while the centre of every hex always keeps its own terrain; the grid, the hover readout and the rules use the true hexes. Detail smaller than a few pixels fades to its average, and far out the shader uses one average colour per hex (mipmapped; the averages are measured from the materials with `--views`), so nothing shimmers. The hex grid is drawn in the same shader and fades in from 22 px per hex. Roads, rivers and railways are chunk meshes over the ground, drawn as smooth curves through the middles of the hex edges they cross (a quadratic curve with the hex centre as control point) instead of zig-zags between hex centres, with casings, rail sleepers and bridges. The variety (stands, parcels, building types) is decoration: the rules only know the terrain type and light or dense. **F4** (View > Map legend) shows the legend, whose ground swatches are painted by the same shader; **F6** switches the painted textures off (one flat colour per terrain). It is drawing only: no simulation or save-format change.
 - **One clock.** A fixed one-minute tick, pause, five speeds, auto-pause on contact, a speed cap while units are in contact, and an optional WeGo pulse.
 - **Command friction.** Orders take 5–30+ minutes to reach units, longer out of radio range, in combat, or when tired.
 - **Flashpoint-style combat.** Line of sight from elevation and cover, concealment in forests and towns, night spotting, fog of war with last-known positions, direct and indirect fire, morale, and standing orders that make hurt units fall back.
@@ -59,13 +59,15 @@ The map is baked from real data by `tools/bake_region.py` (see "The real map" be
 
 ![Whole map](docs/screenshots/03_whole_map_overview.png)
 
-![Terrain close in: forest, fields by parcel, a town and a railway](docs/screenshots/29_terrain_close.png)
+![The painted ground close in: woods with natural edges, farm districts, a town and railways](docs/screenshots/29_terrain_close.png)
+
+![The same place with crisp hex borders (View > Natural terrain edges off)](docs/screenshots/37_terrain_crisp.png)
 
 ![Counters inside their hexes, showing each unit's main vehicle](docs/screenshots/31_counters_vehicles.png)
 
-![Topographic mode: the ground steps every 20 m, shadowed below each step and lit above](docs/screenshots/33_topo_close.png)
+![Topographic mode: contours every 20 m printed into the ground, heights on the 100 m lines and summits](docs/screenshots/33_topo_close.png)
 
-![Topographic mode further out: 100 m steps](docs/screenshots/34_topo_far.png)
+![Topographic mode further out: contours every 100 m](docs/screenshots/34_topo_far.png)
 
 ![Map legend](docs/screenshots/28_map_legend.png)
 
@@ -107,9 +109,9 @@ The prebuilt extension is in `game/bin/` (`libmurks.windows.template_debug.x86_6
 | F1 | Show / hide the controls dialog |
 | F2 | Map data credits |
 | F4 | Map legend |
-| F6 | Terrain detail (patterns inside hexes when zoomed in) on / off |
+| F6 | Painted terrain textures on / off (off: one flat colour per terrain) |
 | F7 | Counters show vehicles / NATO symbols |
-| F8 | Topographic map: height bands and heights on / off |
+| F8 | Topographic map: contour lines and heights on / off |
 | F5 / F9 | Quick save / quick load (one slot, in Godot's user folder) |
 | J / Shift+J | Form a team from the selection / disband the selection's teams |
 | L | Select the team of the selected unit (double-click does the same) |
@@ -148,8 +150,8 @@ Measured in a 2-core cloud Linux VM. Your PC will be faster.
 | Baking the real map from scratch (downloads included) | ~1-2 min; re-bakes from cache ~45 s |
 | Procedural map generation (2.2 M hexes) | ~2.6 s at startup |
 | Map memory | 30.3 MB real map, 17.3 MB procedural (8 bytes per hex) |
-| Chunk mesh build (4,096 hexes) | ~0.5 ms in C++ |
-| Detail layer build per chunk (close zoom only) | ~3.5 ms average, 8.3 ms worst (dense forest) in C++; at most one per frame |
+| Chunk mesh build (roads, rivers, railways of 4,096 hexes) | ~0.4 ms average, 1.2 ms worst in C++ |
+| Ground | One shader pass over the screen; no per-chunk geometry. Not yet measured on a real graphics card |
 | Worst single frame while panning 720 km at chunk zoom | ~7 ms of chunk building |
 | Simulation, 212 units | ~0.2–0.5 ms per game minute (2 days in 0.85 s) |
 | Simulation, 499 units (`--groups=60`) | ~0.8 ms per game minute |
@@ -186,7 +188,7 @@ pip install contourpy scipy
 python tools/bake_contours.py --bbox 10 49 24.2 55 --out game/data/poland_1989.murkc
 ```
 
-**F8** (View > Topographic map) makes the terrain itself show the relief; nothing is drawn as a line. A shader (`game/shaders/relief.gdshader`) lays the height raster over the map as a 16-bit float texture and steps the ground into height bands: along every step the lower band falls into shadow and the upper band catches a lit lip, so the border between two bands is the contour and it is plain which side is higher. Terrain colours, tree and building patterns, roads and rivers all stay and step with the ground. Bands are 20 m from 20 px per hex (every 100 m step heavier), 100 m further out (every 500 m heavier) and 500 m on the whole-map view; steps that would fall closer than a few pixels fade out. Slope reads from the picture: steps close together mean steep ground, and ground darkens with its grade. The 100 m steps carry their height (500 m further out) and summits are marked with a triangle and their height in metres; figures that would crowd each other are left out. The status bar and the order menu title give the slope of the hex under the cursor in every mode ("steep slope 18% (10°) down to the south-east"), from the per-hex heights the simulation uses. Slope is information only for now: movement rules do not use it yet (work board MRK-04).
+**F8** (View > Topographic map) prints contour lines into the painted ground: the terrain shader draws them from the height raster as a darker, browner tone of whatever lies beneath (forest, field or town), about a pixel wide, so they read as part of the ground rather than a sheet laid over it. They are every 20 m from 20 px per hex with every 100 m line heavier, every 100 m further out (500 m heavier) and every 500 m on the whole-map view; lines that would crowd closer than a few pixels fade out, the heavy ones last. Lines close together mean steep ground, and the hill shading shows which way slopes face. The 100 m lines carry their height (500 m further out) and summits are marked with a triangle and their height in metres; figures that would crowd each other are left out. The status bar and the order menu title give the slope of the hex under the cursor in every mode ("steep slope 18% (10°) down to the south-east"), from the per-hex heights the simulation uses. Slope is information only for now: movement rules do not use it yet (work board MRK-04).
 
 On Windows the `--finish-map` path is `build\Release\finish_map.exe`. The first run reads several hundred MB of source data and caches the processed tiles in `~/murks_cache`.
 
@@ -212,10 +214,10 @@ The same text is in the game (F2):
 ```
 core/         Pure C++17 simulation (no Godot code): hex maths, map (+ file format), generator, A*, sim, render data, geo
 extension/    GDExtension binding: one class, MurksWorld, with coarse calls (whole chunks, snapshots, many ticks)
-game/         Godot project: scripts/main.gd (input, clock), map_view.gd (streaming), overlay.gd (symbols), hud.gd
+game/         Godot project: scripts/main.gd (input, clock), map_view.gd (ground and line streaming), overlay.gd (symbols), hud.gd; shaders/terrain.gdshader (the painted ground)
 game/data/    Baked real map (.murkz = zlib-compressed MURKSMAP)
 tools/        bake_region.py (real-data pipeline), finish_map.cpp (adds local roads), bake_contours.py (height raster, height figures and spot heights for the topographic mode)
-tests/        core_bench.cpp: headless run of map + sim with timings; hq_loss_test.cpp: checks the HQ-loss rules; rules_test.cpp: checks the Historical Values rules; fire_support_test.cpp: checks gun ranges and the fire support net; dismount_test.cpp: checks mounted infantry; suppression_test.cpp: checks suppression; holdings_test.cpp: checks holdings, capture, loyalty, requisition, militia, supply routes and convoys; attrition_test.cpp: kill-rate harness (`attrition_test calibrate`); playtest.cpp: real-map 4-day scripted runs over many seeds (`playtest game/data/poland_1989.murkz 4 active 1989 12`, needs zlib); render_shot.cpp: draws the map geometry to an image without Godot and times the chunk builds (`render_shot game/data/poland_1989.murkz shot.ppm 470 860 40`, or `... bench`, needs zlib)
+tests/        core_bench.cpp: headless run of map + sim with timings; hq_loss_test.cpp: checks the HQ-loss rules; rules_test.cpp: checks the Historical Values rules; fire_support_test.cpp: checks gun ranges and the fire support net; dismount_test.cpp: checks mounted infantry; suppression_test.cpp: checks suppression; holdings_test.cpp: checks holdings, capture, loyalty, requisition, militia, supply routes and convoys; attrition_test.cpp: kill-rate harness (`attrition_test calibrate`); playtest.cpp: real-map 4-day scripted runs over many seeds (`playtest game/data/poland_1989.murkz 4 active 1989 12`, needs zlib); render_shot.cpp: draws flat-coloured hexes with the road, river and rail meshes to an image without Godot and times the chunk builds (`render_shot game/data/poland_1989.murkz shot.ppm 470 860 40`, or `... bench`, needs zlib)
 SConstruct    Builds the extension into game/bin/
 CMakeLists.txt  Builds the core, benchmark and finish_map on their own (handy in Visual Studio)
 ```
@@ -248,7 +250,8 @@ Pass these after `--` when launching Godot:
 - `--groups=N`: number of hostile bands (default 24, about 212 units). Use 60 or more as a stress test.
 - `--procedural`: ignore the baked map and generate a fictional one.
 - `--autotest=DIR`: scripted run that saves screenshots and timing to `DIR`, then quits.
-- `--uitest`: scripted check of the menus (title screen, right-click menu, armed orders, Esc and the pause menu, dropdowns, View and Orders menus, the terrain detail layer and the map legend, counter size and vehicles, the holding panel, militia, a supply route and its cancellation): pushes real input events and menu picks, checks what reaches the simulation, prints PASS / FAIL lines and exits non-zero on a failure. Needs a window (on a Linux server: `xvfb-run godot --path game -- --uitest`).
+- `--views=DIR`: renders seven fixed map views without the HUD to `DIR` (hills south of Wrocław at 10, 30 and 80 px per hex, the home area at 25 and 70, a town at 150, the region at 3), prints the average colour of each painted material, then quits; about 15 seconds. Add `--crisp`, `--flat` or `--topo` for crisp hex borders, flat colours or the topographic mode. The quick check after a change to the terrain shader.
+- `--uitest`: scripted check of the menus (title screen, right-click menu, armed orders, Esc and the pause menu, dropdowns, View and Orders menus, the painted ground (shader, textures on and off, natural or crisp edges, grid by zoom), the map legend, counter size and vehicles, the topographic mode, the holding panel, militia, a supply route and its cancellation): pushes real input events and menu picks, checks what reaches the simulation, prints PASS / FAIL lines and exits non-zero on a failure. Needs a window (on a Linux server: `xvfb-run godot --path game -- --uitest`).
 
 Headless balance check (no window): `godot --headless --path game --script res://tests/playtest.gd -- 4 active` (or `passive`). It plays the scenario for N days and prints contact time, losses, supplies, the outcome and a save/load replay check.
 

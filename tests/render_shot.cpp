@@ -1,4 +1,6 @@
 // Murks 1989 — draws the map geometry to an image without Godot, and times the chunk builds.
+// The picture is flat-coloured hexes with the roads, rivers and railways the game draws over
+// its painted terrain (the painting itself is a shader: run the game with --views for that).
 //
 //   build/render_shot game/data/poland_1989.murkz shot.ppm <col> <row> <px per hex> [width height]
 //   build/render_shot game/data/poland_1989.murkz bench
@@ -82,8 +84,8 @@ int main(int argc, char **argv) {
     using clk = std::chrono::steady_clock;
     if (std::string(argv[2]) == "bench") {
         ChunkGeometry g;
-        double base_ms = 0, det_ms = 0, det_worst = 0;
-        size_t base_v = 0, det_v = 0, det_v_worst = 0;
+        double base_ms = 0, line_ms = 0, line_worst = 0;
+        size_t base_v = 0, line_v = 0, line_v_worst = 0;
         int n = 0;
         for (int cy = 0; cy < map.chunks_y(); cy += 2) {
             for (int cx = 0; cx < map.chunks_x(); cx += 2, ++n) {
@@ -91,18 +93,18 @@ int main(int argc, char **argv) {
                 build_chunk_geometry(map, cx, cy, false, g);
                 auto t1 = clk::now();
                 base_v += g.xy.size() / 2;
-                build_chunk_detail(map, cx, cy, g);
+                build_chunk_lines(map, cx, cy, g);
                 auto t2 = clk::now();
                 double d = std::chrono::duration<double, std::milli>(t2 - t1).count();
                 base_ms += std::chrono::duration<double, std::milli>(t1 - t0).count();
-                det_ms += d;
-                det_worst = std::max(det_worst, d);
-                det_v += g.xy.size() / 2;
-                det_v_worst = std::max(det_v_worst, g.xy.size() / 2);
+                line_ms += d;
+                line_worst = std::max(line_worst, d);
+                line_v += g.xy.size() / 2;
+                line_v_worst = std::max(line_v_worst, g.xy.size() / 2);
             }
         }
-        std::printf("%d chunks: chunk mesh %.2f ms avg (%zu vertices avg); detail %.2f ms avg, %.2f ms worst (%zu vertices avg, %zu worst)\n",
-                    n, base_ms / n, base_v / n, det_ms / n, det_worst, det_v / n, det_v_worst);
+        std::printf("%d chunks: hexes + lines %.2f ms avg (%zu vertices avg); lines (the game's chunk mesh) %.2f ms avg, %.2f ms worst (%zu vertices avg, %zu worst)\n",
+                    n, base_ms / n, base_v / n, line_ms / n, line_worst, line_v / n, line_v_worst);
         return 0;
     }
     if (argc < 6) return 2;
@@ -120,15 +122,11 @@ int main(int argc, char **argv) {
     int cx0 = std::max(0, (int)std::floor(cv.ox / cw) - 1), cx1 = std::min(map.chunks_x() - 1, (int)std::floor((cv.ox + cv.w / cv.scale) / cw) + 1);
     int cy0 = std::max(0, (int)std::floor(cv.oy / ch) - 1), cy1 = std::min(map.chunks_y() - 1, (int)std::floor((cv.oy + cv.h / cv.scale) / ch) + 1);
     ChunkGeometry g;
-    for (int pass = 0; pass < 2; ++pass) {
-        if (pass == 1 && pxhex < 16.0) break;
-        for (int cy = cy0; cy <= cy1; ++cy)
-            for (int cx = cx0; cx <= cx1; ++cx) {
-                if (pass == 0) build_chunk_geometry(map, cx, cy, false, g);
-                else build_chunk_detail(map, cx, cy, g);
-                cv.draw(g);
-            }
-    }
+    for (int cy = cy0; cy <= cy1; ++cy)
+        for (int cx = cx0; cx <= cx1; ++cx) {
+            build_chunk_geometry(map, cx, cy, false, g);
+            cv.draw(g);
+        }
     std::ofstream out(argv[2], std::ios::binary);
     out << "P6\n" << cv.w << " " << cv.h << "\n255\n";
     std::vector<uint8_t> row8((size_t)cv.w * 3);

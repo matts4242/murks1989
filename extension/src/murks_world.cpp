@@ -57,8 +57,6 @@ void MurksWorld::_bind_methods() {
     ClassDB::bind_method(D_METHOD("get_hex_width"), &MurksWorld::get_hex_width);
     ClassDB::bind_method(D_METHOD("get_row_spacing"), &MurksWorld::get_row_spacing);
     ClassDB::bind_method(D_METHOD("build_chunk_mesh", "chunk"), &MurksWorld::build_chunk_mesh);
-    ClassDB::bind_method(D_METHOD("build_chunk_detail_mesh", "chunk"), &MurksWorld::build_chunk_detail_mesh);
-    ClassDB::bind_method(D_METHOD("build_chunk_grid_mesh", "chunk"), &MurksWorld::build_chunk_grid_mesh);
     ClassDB::bind_method(D_METHOD("load_contour_bytes", "bytes"), &MurksWorld::load_contour_bytes);
     ClassDB::bind_method(D_METHOD("has_contours"), &MurksWorld::has_contours);
     ClassDB::bind_method(D_METHOD("get_height_image"), &MurksWorld::get_height_image);
@@ -66,6 +64,7 @@ void MurksWorld::_bind_methods() {
     ClassDB::bind_method(D_METHOD("get_chunk_contour_labels", "chunk", "step"), &MurksWorld::get_chunk_contour_labels);
     ClassDB::bind_method(D_METHOD("get_chunk_spot_heights", "chunk"), &MurksWorld::get_chunk_spot_heights);
     ClassDB::bind_method(D_METHOD("build_overview_image"), &MurksWorld::build_overview_image);
+    ClassDB::bind_method(D_METHOD("build_hex_data_image"), &MurksWorld::build_hex_data_image);
     ClassDB::bind_method(D_METHOD("get_hex_info", "hex"), &MurksWorld::get_hex_info);
     ClassDB::bind_method(D_METHOD("get_settlements", "min_population"), &MurksWorld::get_settlements);
     ClassDB::bind_method(D_METHOD("advance", "ticks", "budget_ms"), &MurksWorld::advance);
@@ -221,6 +220,7 @@ static void fill_triangle_mesh(const murks::ChunkGeometry &g, Ref<ArrayMesh> &me
     mesh->add_surface_from_arrays(Mesh::PRIMITIVE_TRIANGLES, arrays);
 }
 
+// Roads, rivers and railways of a chunk (the ground itself is painted by the terrain shader).
 Ref<ArrayMesh> MurksWorld::build_chunk_mesh(Vector2i chunk) const {
     Ref<ArrayMesh> mesh;
     mesh.instantiate();
@@ -228,20 +228,7 @@ Ref<ArrayMesh> MurksWorld::build_chunk_mesh(Vector2i chunk) const {
         chunk.y >= world_.map.chunks_y())
         return mesh;
     murks::ChunkGeometry g;
-    murks::build_chunk_geometry(world_.map, chunk.x, chunk.y, false, g);
-    fill_triangle_mesh(g, mesh);
-    return mesh;
-}
-
-// Terrain patterns, rail sleepers and bridges for close zoom; drawn over the chunk mesh.
-Ref<ArrayMesh> MurksWorld::build_chunk_detail_mesh(Vector2i chunk) const {
-    Ref<ArrayMesh> mesh;
-    mesh.instantiate();
-    if (!generated_ || chunk.x < 0 || chunk.y < 0 || chunk.x >= world_.map.chunks_x() ||
-        chunk.y >= world_.map.chunks_y())
-        return mesh;
-    murks::ChunkGeometry g;
-    murks::build_chunk_detail(world_.map, chunk.x, chunk.y, g);
+    murks::build_chunk_lines(world_.map, chunk.x, chunk.y, g);
     fill_triangle_mesh(g, mesh);
     return mesh;
 }
@@ -315,24 +302,14 @@ PackedFloat32Array MurksWorld::get_chunk_spot_heights(Vector2i chunk) const {
     return out;
 }
 
-Ref<ArrayMesh> MurksWorld::build_chunk_grid_mesh(Vector2i chunk) const {
-    Ref<ArrayMesh> mesh;
-    mesh.instantiate();
-    if (!generated_ || chunk.x < 0 || chunk.y < 0 || chunk.x >= world_.map.chunks_x() ||
-        chunk.y >= world_.map.chunks_y())
-        return mesh;
-    murks::ChunkGeometry g;
-    murks::build_chunk_geometry(world_.map, chunk.x, chunk.y, true, g);
-    const int64_t nv = (int64_t)g.grid_xy.size() / 2;
-    PackedVector2Array verts;
-    verts.resize(nv);
-    Vector2 *vp = verts.ptrw();
-    for (int64_t i = 0; i < nv; ++i) vp[i] = Vector2(g.grid_xy[i * 2], g.grid_xy[i * 2 + 1]);
-    Array arrays;
-    arrays.resize(Mesh::ARRAY_MAX);
-    arrays[Mesh::ARRAY_VERTEX] = verts;
-    mesh->add_surface_from_arrays(Mesh::PRIMITIVE_LINES, arrays);
-    return mesh;
+// Per-hex terrain, density, elevation and cover for the terrain shader (one pixel per hex).
+Ref<Image> MurksWorld::build_hex_data_image() const {
+    std::vector<uint8_t> rgba;
+    murks::build_hex_data_rgba(world_.map, rgba);
+    PackedByteArray bytes;
+    bytes.resize((int64_t)rgba.size());
+    std::memcpy(bytes.ptrw(), rgba.data(), rgba.size());
+    return Image::create_from_data(world_.map.cols(), world_.map.rows(), false, Image::FORMAT_RGBA8, bytes);
 }
 
 Ref<Image> MurksWorld::build_overview_image() const {

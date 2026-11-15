@@ -80,6 +80,7 @@ var hostile_groups := HOSTILE_GROUPS
 var force_procedural := false
 var outcome_shown := 0             # outcome already announced with the end screen (0 none)
 var uitest := false                # --uitest: scripted check of the menus, then quit
+var views_dir := ""                # --views=<dir>: render a fixed set of map views, then quit
 
 
 func _ready() -> void:
@@ -92,6 +93,8 @@ func _ready() -> void:
 			force_procedural = true
 		elif a == "--uitest":
 			uitest = true
+		elif a.begins_with("--views="):
+			views_dir = a.substr(8)
 
 	camera = Camera2D.new()
 	add_child(camera)
@@ -156,6 +159,7 @@ func _start_world() -> void:
 	hud.loading.visible = false
 	hud.set_toggle("Grid", map_view.show_grid)
 	hud.set_toggle("Detail", map_view.show_detail)
+	hud.set_toggle("Edges", map_view.natural_edges)
 	hud.set_toggle("Vehicles", overlay.show_vehicles)
 	hud.set_toggle("Topo", map_view.show_topo)
 	hud.set_toggle("Auto-pause", auto_pause)
@@ -166,7 +170,9 @@ func _start_world() -> void:
 		obj.get("home", _home_name()), obj.get("enemy_name", "enemy")]
 	_poll_events()
 	ready_to_play = true
-	if autotest_dir != "":
+	if views_dir != "":
+		_run_views()
+	elif autotest_dir != "":
 		_run_autotest()
 	elif uitest:
 		hud.show_title(_title_briefing())
@@ -610,6 +616,11 @@ func _on_toggle(name: String) -> void:
 		"Detail":
 			map_view.show_detail = not map_view.show_detail
 			hud.set_toggle(name, map_view.show_detail)
+		"Edges":
+			map_view.natural_edges = not map_view.natural_edges
+			hud.set_toggle(name, map_view.natural_edges)
+			hud.show_toast("Terrain borders wander naturally; the grid shows the true hexes." if map_view.natural_edges
+				else "Terrain follows the hex borders exactly.")
 		"Topo":
 			if not world.has_contours():
 				hud.show_toast("This map has no relief data (bake it with tools/bake_contours.py).")
@@ -1586,31 +1597,56 @@ func _run_uitest() -> void:
 	view.get_popup().hide()
 	check.call(map_view.show_grid != grid_was, "View > Hex grid toggles the grid")
 
-	# Map visuals (MRK-24): the terrain detail layer follows the zoom and its View toggle,
-	# and the legend opens from the View menu and closes with Esc.
+	# Map visuals (MRK-29): the ground is painted by the terrain shader, with roads, rivers and
+	# railways as chunk meshes over it. F6 and the View menu switch the painted textures off
+	# and on; the View menu switches natural terrain edges; the grid fades in with the zoom.
 	var zoom_was := camera.zoom
 	camera.zoom = Vector2.ONE * 0.08   # 40 px per hex
-	for i in 30:
+	for i in 10:
 		map_view.update_view(camera.get_screen_center_position(), camera.zoom.x, get_viewport_rect().size)
 		await get_tree().process_frame
-	check.call(map_view.detail_root.visible and map_view.details.size() > 0, "terrain detail is drawn when zoomed in (%d chunks)" % map_view.details.size())
-	var some_detail := false
-	for mi in map_view.details.values():
-		if (mi as MeshInstance2D).mesh.get_surface_count() > 0:
-			some_detail = true
-	check.call(some_detail, "detail chunks carry geometry")
+	var tmat: ShaderMaterial = map_view.terrain_mat
+	check.call(map_view.ground.material == tmat and tmat.shader != null and tmat.get_shader_parameter("hex_data") != null,
+		"the ground is painted by the terrain shader")
+	var line_meshes := 0
+	for mi in map_view.chunks.values():
+		line_meshes += (mi as MeshInstance2D).mesh.get_surface_count()
+	check.call(map_view.chunk_root.visible and line_meshes > 0, "roads, rivers and railways are drawn over it (%d chunk meshes)" % line_meshes)
+	if not map_view.show_grid:
+		_on_toggle("Grid")   # the check above left it switched off
+		await _frames(2)
+	check.call(float(tmat.get_shader_parameter("grid_alpha")) > 0.0, "the hex grid shows at 40 px per hex")
+	await RenderingServer.frame_post_draw
+	var painted := get_viewport().get_texture().get_image()
 	_push_key(KEY_F6)
-	await _frames(2)
-	check.call(not map_view.show_detail and not map_view.detail_root.visible, "F6 turns terrain detail off")
+	await _frames(3)
+	check.call(not map_view.show_detail and float(tmat.get_shader_parameter("detail")) == 0.0, "F6 switches the painted textures off")
+	await RenderingServer.frame_post_draw
+	var flat_img := get_viewport().get_texture().get_image()
+	var differ := 0
+	for y in range(120, 780, 6):
+		for x in range(40, 1560, 6):
+			if absf(painted.get_pixel(x, y).v - flat_img.get_pixel(x, y).v) > 0.04:
+				differ += 1
+	check.call(differ > 2000, "the painted textures change the picture (%d of 27,940 sampled pixels)" % differ)
 	view.show_popup()
 	await _frames(2)
-	check.call(_menu_pick(view.get_popup(), "Terrain detail when zoomed in"), "View menu has Terrain detail")
+	check.call(_menu_pick(view.get_popup(), "Painted terrain textures (off: flat colours)"), "View menu has Painted terrain textures")
 	view.get_popup().hide()
 	await _frames(2)
-	check.call(map_view.show_detail and map_view.detail_root.visible, "View > Terrain detail turns it back on")
+	check.call(map_view.show_detail and float(tmat.get_shader_parameter("detail")) == 1.0, "View > Painted terrain textures turns them back on")
+	view.show_popup()
+	await _frames(2)
+	check.call(_menu_pick(view.get_popup(), "Natural terrain edges (off: crisp hex borders)"), "View menu has Natural terrain edges")
+	view.get_popup().hide()
+	await _frames(2)
+	check.call(not map_view.natural_edges and float(tmat.get_shader_parameter("edge_noise")) == 0.0, "crisp hex borders on request")
+	_on_toggle("Edges")
+	await _frames(2)
+	check.call(map_view.natural_edges and float(tmat.get_shader_parameter("edge_noise")) > 0.0, "natural edges back on")
 	camera.zoom = Vector2.ONE * 0.02   # 10 px per hex
 	await _frames(2)
-	check.call(not map_view.detail_root.visible and map_view.chunk_root.visible, "terrain detail is hidden at theater zoom")
+	check.call(float(tmat.get_shader_parameter("grid_alpha")) == 0.0 and map_view.chunk_root.visible, "no grid at 10 px per hex; roads still drawn")
 	camera.zoom = zoom_was
 	await _frames(2)
 	view.show_popup()
@@ -1739,57 +1775,53 @@ func _run_uitest() -> void:
 	check.call(hud.order_popup.visible and not has_move, "nothing selected: map menu without move orders")
 	hud.order_popup.hide()
 
-	# Topographic mode (MRK-23): the ground steps in height bands drawn by a shader over the
-	# baked height raster (20 m close in, 100 m further out, 500 m on the whole map), with
-	# height figures; nothing is drawn as a line and the terrain patterns stay. F8 and the
-	# View menu toggle it.
-	check.call(world.has_contours() and map_view.relief.texture != null, "the map's relief file is loaded into the band shader")
+	# Topographic mode (MRK-23 / MRK-29): contour lines printed into the painted ground by the
+	# terrain shader from the baked height raster (20 m close in, 100 m further out, 500 m
+	# on the whole map), with height figures. F8 and the View menu toggle it.
+	check.call(world.has_contours() and map_view.has_relief(), "the map's relief file is loaded for hill shading and contours")
 	var cam_was := camera.position
 	camera.position = world.hex_to_world(Vector2i(900, 1330))   # hill country south of Wroclaw
 	camera.zoom = Vector2.ONE * 0.06   # 30 px per hex
+	for i in 6:
+		map_view.update_view(camera.get_screen_center_position(), camera.zoom.x, get_viewport_rect().size)
+		await get_tree().process_frame
+	await RenderingServer.frame_post_draw
+	var plain := get_viewport().get_texture().get_image()
 	_push_key(KEY_F8)
-	for i in 10:
+	for i in 6:
 		map_view.update_view(camera.get_screen_center_position(), camera.zoom.x, get_viewport_rect().size)
 		await get_tree().process_frame
 	var topo_labels := 0
 	for entry in map_view.relief_labels.values():
 		topo_labels += (entry["labels"] as PackedFloat32Array).size() / 4 + (entry["spots"] as PackedFloat32Array).size() / 3
-	var band_mat: ShaderMaterial = map_view.relief.material
-	check.call(map_view.show_topo and map_view.relief.visible and map_view.topo_lod == 0 and is_equal_approx(float(band_mat.get_shader_parameter("interval")), 20.0),
-		"F8 steps the ground every 20 m close in")
-	check.call(topo_labels > 0, "100 m steps and summits carry heights (%d)" % topo_labels)
-	check.call(map_view.detail_root.visible, "topographic mode keeps the terrain patterns")
-	# The picture itself: with the mode on, the same view must differ from the plain map.
+	var tm: ShaderMaterial = map_view.terrain_mat
+	check.call(map_view.show_topo and map_view.topo_lod == 0 and is_equal_approx(float(tm.get_shader_parameter("contour_interval")), 20.0),
+		"F8 prints contours every 20 m close in")
+	check.call(topo_labels > 0, "100 m contours and summits carry heights (%d)" % topo_labels)
 	await RenderingServer.frame_post_draw
-	var with_bands := get_viewport().get_texture().get_image()
-	map_view.show_topo = false
-	await _frames(3)
-	await RenderingServer.frame_post_draw
-	var plain := get_viewport().get_texture().get_image()
-	map_view.show_topo = true
-	await _frames(2)
+	var with_lines := get_viewport().get_texture().get_image()
 	var changed := 0
 	for y in range(120, 780, 6):
 		for x in range(40, 1560, 6):
-			if absf(with_bands.get_pixel(x, y).v - plain.get_pixel(x, y).v) > 0.04:
+			if absf(with_lines.get_pixel(x, y).v - plain.get_pixel(x, y).v) > 0.04:
 				changed += 1
-	check.call(changed > 800, "the bands visibly shade the hills (%d of 27,940 sampled pixels differ)" % changed)
+	check.call(changed > 800, "the contours show in the hills (%d of 27,940 sampled pixels differ)" % changed)
 	var steep: Dictionary = world.get_hex_info(Vector2i(900, 1330))
 	var flat: Dictionary = world.get_hex_info(world.world_to_hex(cam_was))
 	check.call(float(steep["slope_percent"]) > float(flat["slope_percent"]) and _slope_text(steep).contains("down to the") ,
 		"the hex readout gives the slope: hills \"%s\", home \"%s\"" % [_slope_text(steep), _slope_text(flat)])
 	camera.zoom = Vector2.ONE * 0.024   # 12 px per hex
 	await _frames(3)
-	check.call(map_view.topo_lod == 1 and is_equal_approx(float(band_mat.get_shader_parameter("interval")), 100.0), "further out the steps are 100 m")
+	check.call(map_view.topo_lod == 1 and is_equal_approx(float(tm.get_shader_parameter("contour_interval")), 100.0), "further out the contours are 100 m apart")
 	camera.zoom = Vector2.ONE * 0.003   # whole-map view
 	await _frames(3)
-	check.call(map_view.relief.visible and map_view.topo_lod == 2, "on the whole-map view the steps are 500 m")
+	check.call(map_view.topo_lod == 2 and is_equal_approx(float(tm.get_shader_parameter("contour_interval")), 500.0), "on the whole-map view they are 500 m apart")
 	view.show_popup()
 	await _frames(2)
-	check.call(_menu_pick(view.get_popup(), "Topographic map: height bands and heights"), "View menu has Topographic map")
+	check.call(_menu_pick(view.get_popup(), "Topographic map: contour lines and heights"), "View menu has Topographic map")
 	view.get_popup().hide()
 	await _frames(2)
-	check.call(not map_view.show_topo and not map_view.relief.visible, "View > Topographic map turns it off again")
+	check.call(not map_view.show_topo and float(tm.get_shader_parameter("contour_interval")) == 0.0, "View > Topographic map turns it off again")
 	camera.position = cam_was
 	camera.zoom = zoom_was
 	await _frames(2)
@@ -1854,6 +1886,69 @@ func _submenu_of(pm: PopupMenu, prefix: String) -> PopupMenu:
 
 # --- Automated check: scripted run that saves screenshots, then quits. ---------------------
 
+## --views=<dir>: renders a fixed set of map views without the HUD and quits. A quick way
+## to check how the map looks after a change to the terrain shader or the line meshes.
+## Extra options: --crisp (crisp hex borders), --flat (painted textures off), --topo.
+func _run_views() -> void:
+	hud.visible = false
+	map_view.build_budget_ms = 1.0e9
+	for a in OS.get_cmdline_user_args():
+		if a == "--crisp":
+			map_view.natural_edges = false
+		elif a == "--flat":
+			map_view.show_detail = false
+		elif a == "--topo":
+			map_view.show_topo = true
+	DirAccess.make_dir_recursive_absolute(views_dir)
+	var hq: Vector2 = world.hex_to_world(world.get_unit_info(0)["hex"])
+	var hills: Vector2 = world.hex_to_world(Vector2i(900, 1330))
+	var views := [["v1_hills_30px", hills, 0.06], ["v2_hills_10px", hills, 0.02], ["v3_home_25px", hq, 0.05],
+		["v4_home_70px", hq + Vector2(3000, -1500), 0.14], ["v5_town_150px", hq + Vector2(900, 300), 0.3],
+		["v6_region_3px", hills, 0.006], ["v7_hills_80px", hills + Vector2(-2500, 1200), 0.16]]
+	selected = []
+	for v in views:
+		camera.position = v[1]
+		camera.zoom = Vector2.ONE * float(v[2])
+		_refresh_snapshot()
+		for i in 3:
+			map_view.update_view(camera.get_screen_center_position(), camera.zoom.x, get_viewport_rect().size)
+			overlay.queue_redraw()
+			await get_tree().process_frame
+		await RenderingServer.frame_post_draw
+		get_viewport().get_texture().get_image().save_png(views_dir.path_join(String(v[0]) + ".png"))
+		print("Views: saved %s" % v[0])
+	# The average colour of each painted ground type at ~10 m per pixel: the far-zoom
+	# palette (base_color in core/src/render_data.cpp) should match these.
+	var layer := CanvasLayer.new()
+	layer.layer = 5
+	add_child(layer)
+	var rect := ColorRect.new()
+	rect.position = Vector2.ZERO
+	rect.size = Vector2(800, 800)
+	var sm := ShaderMaterial.new()
+	sm.shader = MapView.TERRAIN_SHADER
+	sm.set_shader_parameter("swatch_size", 8000.0)
+	sm.set_shader_parameter("metres_per_pixel", 10.0)
+	rect.material = sm
+	layer.add_child(rect)
+	for code in [0, 1, 2, 3, 11, 4, 5, 13]:
+		sm.set_shader_parameter("swatch", code)
+		for i in 2:
+			await get_tree().process_frame
+		await RenderingServer.frame_post_draw
+		var img := get_viewport().get_texture().get_image()
+		var sum := Vector3.ZERO
+		var n := 0
+		for y in range(0, 800, 4):
+			for x in range(0, 800, 4):
+				var c := img.get_pixel(x, y)
+				sum += Vector3(c.r, c.g, c.b)
+				n += 1
+		sum = sum / n * 255.0
+		print("Views: average of terrain %d = %d, %d, %d" % [code, roundi(sum.x), roundi(sum.y), roundi(sum.z)])
+	get_tree().quit()
+
+
 func _run_autotest() -> void:
 	print("Autotest: writing screenshots to ", autotest_dir)
 	DirAccess.make_dir_recursive_absolute(autotest_dir)
@@ -1884,7 +1979,7 @@ func _run_autotest() -> void:
 	hud.toggle_help()
 	await _shot("25_controls", hq, 0.05)
 	hud.toggle_help()
-	# Map visuals (MRK-24): terrain patterns close in, forest and town, and the legend.
+	# Map visuals (MRK-24, MRK-29): the painted ground close in and further out, the legend.
 	hud.toggle_legend()
 	await _shot("28_map_legend", hq, 0.08)
 	hud.toggle_legend()
@@ -1903,6 +1998,9 @@ func _run_autotest() -> void:
 	overlay.show_vehicles = true
 	await _shot("29_terrain_close", hq + Vector2(3000, -1500), 0.16)
 	await _shot("30_terrain_medium", hq, 0.045)
+	map_view.natural_edges = false
+	await _shot("37_terrain_crisp", hq + Vector2(3000, -1500), 0.16)
+	map_view.natural_edges = true
 	selected = [0]
 	selected = [0]
 	# Holdings: the home town's panel, then a supply route from its stores to the trains.

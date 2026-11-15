@@ -29,10 +29,16 @@ inline uint32_t rgba8(int r, int g, int b, int a = 255) {
 
 void chunk_origin(int cx, int cy, double &ox, double &oy);
 uint32_t hex_color(const Map &map, int c, int r);
+// Flat-coloured hexes plus roads, rivers and railways (tests and tools; the game paints the
+// ground with game/shaders/terrain.gdshader and uses build_chunk_lines).
 void build_chunk_geometry(const Map &map, int cx, int cy, bool with_grid, ChunkGeometry &out);
-// Close-zoom detail layer (terrain patterns, rail sleepers, bridges) as coloured triangles
-// with alpha, drawn over the chunk mesh. Built only when the player zooms in.
-void build_chunk_detail(const Map &map, int cx, int cy, ChunkGeometry &out);
+// Roads, rivers and railways of a chunk as smooth curves through hex edge midpoints, with
+// rail sleepers and bridges, as coloured triangles.
+void build_chunk_lines(const Map &map, int cx, int cy, ChunkGeometry &out);
+// Per-hex data for the terrain shader, one RGBA8 pixel per hex, rows top to bottom:
+// R terrain (bits 0-2) + 8 if dense (forest or town with cover of 20 m or more),
+// G and B elevation + 32768 (high byte, low byte), A cover height in metres.
+void build_hex_data_rgba(const Map &map, std::vector<uint8_t> &rgba);
 // Slope of a hex from the per-hex heights the simulation itself uses: the steepest grade
 // to a neighbouring hex, in percent (100 x rise / 500 m), and the direction (0..5, as
 // `neighbor`) in which the ground falls most steeply (-1 on level ground and on water).
