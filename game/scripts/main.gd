@@ -387,11 +387,14 @@ func _update_orders_state() -> void:
 	hud.set_team_state(not teams.is_empty(), _own_selected().size() >= 2, shape, spacing, team_name)
 	var can_dis := false
 	var can_mnt := false
+	var detached := false
 	for id in _own_selected():
 		var mi: Dictionary = world.get_unit_info(id)
 		can_dis = can_dis or bool(mi.get("can_dismount", false))
 		can_mnt = can_mnt or bool(mi.get("can_mount", false))
+		detached = detached or String(mi.get("group_role", "")) == "detached"
 	hud.set_mount_state(can_dis, can_mnt)
+	hud.set_rejoin_state(detached)
 	var so := -2
 	for id in _own_selected():
 		var inf: Dictionary = world.get_unit_info(id)
@@ -597,6 +600,7 @@ func _on_key(key: Key) -> void:
 		KEY_R: _on_command("mode_3")
 		KEY_B: _on_command("fall_back")
 		KEY_Y: _on_command("regroup")
+		KEY_U: _on_command("rejoin")
 		KEY_N: _on_command("rest")
 		KEY_COMMA: _on_command("mount_toggle")
 		KEY_X: _cycle_roe()
@@ -1091,6 +1095,18 @@ func _on_command(name: String) -> void:
 			_select_company_of(selected[0])
 	elif name == "hold":
 		_order_hold()
+	elif name == "rejoin":
+		var n := 0
+		var lo := 1 << 30
+		for id in _own_selected():
+			var d: int = world.order_rejoin(id)
+			if d >= 0:
+				n += 1
+				lo = mini(lo, d)
+		if n > 0:
+			hud.show_toast("Rejoin team: %d unit%s, orders arrive in %d min." % [n, "" if n == 1 else "s", lo])
+		else:
+			hud.show_toast("Nothing to rejoin: select a team member that left its formation.")
 	elif name == "fall_back" or name == "regroup" or name == "rest":
 		_order_group(name)
 	elif name == "dismount" or name == "mount" or name == "mount_toggle":
@@ -1815,6 +1831,24 @@ func _run_uitest() -> void:
 	_update_orders_state()
 	hud.shape_opt.item_selected.emit(3)
 	check.call(teams.size() == 1 and int(_team(teams[0]).get("shape", -1)) == 3, "Formation dropdown: wedge")
+	# A member's own order detaches it when it arrives; Rejoin puts it back (MRK-22).
+	var member := -1
+	for id in [1, 2, 3]:
+		if String(world.get_unit_info(id).get("group_role", "")) == "in formation":
+			member = id
+	var mhex: Vector2i = world.get_unit_info(member).get("hex", Vector2i.ZERO)
+	var mdelay: int = world.order_move(member, mhex + Vector2i(6, 0), 0)
+	check.call(mdelay > 0 and String(world.get_unit_info(member).get("group_role", "")) == "in formation",
+		"a solo order to a team member leaves it in formation while the order travels")
+	world.advance(mdelay + 2, 500.0)
+	check.call(String(world.get_unit_info(member).get("group_role", "")) == "detached", "when the order arrives the member is detached")
+	selected = [member]
+	_update_orders_state()
+	check.call(hud.rejoin_button.visible and bool(hud.ord["detached"]), "the unit panel offers Rejoin")
+	_on_command("rejoin")
+	world.advance(60, 500.0)
+	check.call(String(world.get_unit_info(member).get("group_role", "")) == "in formation", "Rejoin team puts it back in formation")
+	selected = [1, 2, 3]
 
 	# Holdings: the home town's panel, Raise militia, a supply route from its stores to the trains, cancel.
 	selected.clear()

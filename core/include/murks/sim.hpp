@@ -26,7 +26,7 @@ enum UnitType : uint8_t { U_HQ = 0, U_TANK, U_MECH, U_INFANTRY, U_RECON, U_ARTIL
 enum Mobility : uint8_t { M_TRACKED = 0, M_WHEELED, M_FOOT };
 enum Side : int8_t { SIDE_PLAYER = 0, SIDE_HOSTILE = 1, SIDE_COUNT = 2 };
 // O_DISMOUNT and O_MOUNT only travel as pending orders; they never become a unit's current order.
-enum OrderKind : uint8_t { O_HOLD = 0, O_MOVE, O_RETREAT, O_REGROUP, O_REST, O_DISMOUNT, O_MOUNT };
+enum OrderKind : uint8_t { O_HOLD = 0, O_MOVE, O_RETREAT, O_REGROUP, O_REST, O_DISMOUNT, O_MOUNT, O_REJOIN };
 // How a unit moves (Flashpoint-style move orders).
 enum MoveMode : uint8_t {
     MV_HASTY = 0,   // normal speed, fires on the move at a penalty
@@ -416,6 +416,7 @@ public:
     int create_group(const std::vector<int> &ids, int leader);
     bool disband_group(int gid);
     bool set_group_shape(int gid, int shape, int spacing);
+    int order_rejoin(int unit_id);                                            // a detached member takes its place again (command delay)
     int order_group_move(int gid, HexCoord target, MoveMode mode = MV_HASTY); // leader moves, team follows
     int order_group_hold(int gid);                                           // leader halts, team forms up on it
     void detach(int unit_id); // a member given its own order leaves the formation until the next team order

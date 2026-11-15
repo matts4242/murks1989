@@ -104,6 +104,7 @@ void MurksWorld::_bind_methods() {
     ClassDB::bind_method(D_METHOD("get_visible_hexes", "id"), &MurksWorld::get_visible_hexes);
     ClassDB::bind_method(D_METHOD("poll_events"), &MurksWorld::poll_events);
     ClassDB::bind_method(D_METHOD("get_stats"), &MurksWorld::get_stats);
+    ClassDB::bind_method(D_METHOD("order_rejoin", "id"), &MurksWorld::order_rejoin);
     ClassDB::bind_method(D_METHOD("get_holdings"), &MurksWorld::get_holdings);
     ClassDB::bind_method(D_METHOD("get_holding", "hid"), &MurksWorld::get_holding);
     ClassDB::bind_method(D_METHOD("holding_at", "hex"), &MurksWorld::holding_at);
@@ -815,8 +816,8 @@ Dictionary MurksWorld::get_unit_info(int id) const {
     d["militia"] = u.militia;
     d["pending"] = u.pending.active;
     if (u.pending.active) {
-        static const char *kPend[7] = {"Hold", "Move", "Fall back", "Regroup", "Rest & resupply", "Dismount",
-                                       "Mount up"};
+        static const char *kPend[8] = {"Hold", "Move", "Fall back", "Regroup", "Rest & resupply", "Dismount",
+                                       "Mount up", "Rejoin team"};
         d["pending_kind"] = u.pending.kind == murks::O_MOVE && u.pending.mode != murks::MV_HASTY
                                 ? kModes[u.pending.mode]
                                 : kPend[u.pending.kind];
@@ -846,19 +847,16 @@ static bool own_unit(const murks::World &w, int id) {
 }
 
 int MurksWorld::order_move(int id, Vector2i hex, int mode) {
-    if (!own_unit(world_, id)) return -1;
-    world_.detach(id); // a team member given its own order leaves the formation
+    if (!own_unit(world_, id)) return -1; // a team member's own order detaches it when it arrives (core)
     return world_.order_move(id, {hex.x, hex.y}, (murks::MoveMode)std::max(0, std::min(mode, 3)));
 }
 
 int MurksWorld::order_fall_back(int id) {
     if (!own_unit(world_, id)) return -1;
-    world_.detach(id);
     return world_.order_fall_back(id);
 }
 int MurksWorld::order_regroup(int id, bool rest) {
     if (!own_unit(world_, id)) return -1;
-    world_.detach(id);
     return world_.order_regroup(id, rest);
 }
 int MurksWorld::order_dismount(int id) {
@@ -866,7 +864,6 @@ int MurksWorld::order_dismount(int id) {
 }
 int MurksWorld::order_mount(int id) {
     if (!own_unit(world_, id)) return -1;
-    world_.detach(id);
     return world_.order_mount(id);
 }
 int MurksWorld::set_stance(int id, int roe, int break_contact) {
@@ -875,9 +872,10 @@ int MurksWorld::set_stance(int id, int roe, int break_contact) {
 
 int MurksWorld::order_hold(int id) {
     if (id < 0 || id >= (int)world_.units.size() || world_.units[id].side != murks::SIDE_PLAYER) return -1;
-    world_.detach(id);
     return world_.order_hold(id);
 }
+
+int MurksWorld::order_rejoin(int id) { return own_unit(world_, id) ? world_.order_rejoin(id) : -1; }
 
 int MurksWorld::create_group(const PackedInt32Array &ids, int leader) {
     std::vector<int> v;

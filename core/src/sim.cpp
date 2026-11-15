@@ -1908,6 +1908,19 @@ int World::order_hold(int unit_id) {
     return delay;
 }
 
+// A team member that left the formation on its own orders is told to take its place again.
+// The order travels like any other; once it arrives the member keeps station on the leader.
+int World::order_rejoin(int unit_id) {
+    if (unit_id < 0 || unit_id >= (int)units.size()) return -1;
+    Unit &u = units[unit_id];
+    if (!u.alive || !orderable(u)) return -1;
+    if (u.group < 0 || u.group >= (int)groups.size() || !groups[u.group].alive || groups[u.group].leader == unit_id) return -1;
+    if (u.follow && !u.pending.active) return -1; // already in formation
+    int delay = command_delay(u);
+    u.pending = {true, O_REJOIN, u.pos, time_min, time_min + delay};
+    return delay;
+}
+
 void World::start_path(Unit &u, HexCoord target, OrderKind kind, bool announce) {
     u.path.clear();
     u.path_i = 0;
@@ -1984,6 +1997,21 @@ void World::update_orders() {
         if (paths_this_tick_ >= MAX_PATHS_PER_TICK) continue; // spread heavy route-finding over ticks
         u.pending.active = false;
         OrderKind kind = u.pending.kind;
+        // A team member's own order detaches it from the formation when the order arrives, not
+        // when it is given, so it keeps station until then (MRK-22). Rejoin puts it back.
+        const bool member = u.group >= 0 && u.group < (int)groups.size() && groups[u.group].alive &&
+                            groups[u.group].leader != u.id;
+        if (kind == O_REJOIN) {
+            if (member) {
+                u.follow = true;
+                u.formation_wait = false;
+                groups[u.group].has_dest = false; // take up the slot again
+                if (u.side == SIDE_PLAYER)
+                    push_event(EV_ORDER, u.id, false, fmt("%s rejoins %s.", u.name.c_str(), groups[u.group].name.c_str()));
+            }
+            continue;
+        }
+        if (member) detach(u.id);
         if (kind == O_DISMOUNT) {
             dismount_now(u);
             continue;
@@ -2163,28 +2191,25 @@ bool World::set_group_shape(int gid, int shape, int spacing) {
             g.keep_dy[k] = (float)(mc.y - lc.y);
         }
     }
-    for (int id : g.members) units[id].follow = true;
     g.has_dest = false; // members take up their new slots
     return true;
 }
 
+// Team orders go to the leader; the members keeping station come along. A member that left
+// the formation on its own orders stays out until it is told to rejoin (MRK-22).
 int World::order_group_move(int gid, HexCoord target, MoveMode mode) {
     if (gid < 0 || gid >= (int)groups.size() || !groups[gid].alive) return -1;
     Group &g = groups[gid];
-    for (int id : g.members) {
-        units[id].follow = true;
-        units[id].pending.active = false; // the team order replaces anything still on its way
-    }
+    for (int id : g.members)
+        if (units[id].follow) units[id].pending.active = false; // the team order replaces anything still on its way
     return order_move(g.leader, target, mode);
 }
 
 int World::order_group_hold(int gid) {
     if (gid < 0 || gid >= (int)groups.size() || !groups[gid].alive) return -1;
     Group &g = groups[gid];
-    for (int id : g.members) {
-        units[id].follow = true;
-        units[id].pending.active = false;
-    }
+    for (int id : g.members)
+        if (units[id].follow) units[id].pending.active = false;
     return order_hold(g.leader);
 }
 

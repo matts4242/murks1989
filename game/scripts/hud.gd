@@ -90,6 +90,7 @@ var orders_toggle: Button
 var delay_label: Label
 var mode_buttons: Array[Button] = []
 var mount_button: Button
+var rejoin_button: Button
 var roe_opt: OptionButton
 var brk_opt: OptionButton
 var standoff_opt: OptionButton
@@ -102,7 +103,7 @@ var orders_hint: Label
 # roe / brk / shape / spacing / standoff: -1 mixed across the selection.
 var ord := {"has_own": false, "mode": -1, "roe": 0, "brk": 0, "pending": false, "delay": "",
 	"in_team": false, "can_form": false, "shape": -1, "spacing": -1, "team": "",
-	"standoff": 255, "default_standoff": 0, "can_dismount": false, "can_mount": false}
+	"standoff": 255, "default_standoff": 0, "can_dismount": false, "can_mount": false, "detached": false}
 
 # Holding panel (a town, farm collective or depot selected by its pennant)
 var holding_panel: PanelContainer
@@ -458,6 +459,8 @@ func fill_orders(pm: PopupMenu, at_hex: bool, ctx: Dictionary) -> void:
 		_add(pm, "Dismount the squads", "cmd", "dismount", KEY_COMMA, true, -1, "The vehicles halt and the squads get out to move and fight on foot.")
 	if ord["can_mount"]:
 		_add(pm, "Mount up", "cmd", "mount", KEY_COMMA, true, -1, "The squads walk back to their vehicles and climb aboard (2 min once together).")
+	if ord["detached"]:
+		_add(pm, "Rejoin team", "cmd", "rejoin", KEY_U, true, -1, "A member that left its formation on its own orders takes its place by the leader again.")
 	pm.add_separator("Standing orders")
 	var fire := _submenu(pm, "Fire: " + _choice_name(ROES, int(ord["roe"])))
 	for i in ROES.size():
@@ -868,6 +871,10 @@ func _build_orders(parent: Control) -> void:
 		acts.add_child(b)
 	mount_button = _small_button("Dismount", false, "APC/IFV platoons: dismount the squads, or mount them up again. Key , (comma)")
 	mount_button.pressed.connect(func() -> void: command.emit("mount_toggle"))
+	rejoin_button = _small_button("Rejoin", false, "A team member that left its formation on its own orders takes its place by the leader again. Key U")
+	rejoin_button.pressed.connect(func() -> void: command.emit("rejoin"))
+	rejoin_button.visible = false
+	acts.add_child(rejoin_button)
 	acts.add_child(mount_button)
 
 	var grid := GridContainer.new()
@@ -982,6 +989,12 @@ func set_standoff_state(setting: int, default_value: int) -> void:
 		if int(STANDOFFS[i][1]) == default_value:
 			di = i - 1
 	_show_choice(default_opt, di)
+
+
+## Teams: whether the selection holds a detached member (shows Rejoin team).
+func set_rejoin_state(detached: bool) -> void:
+	ord["detached"] = detached
+	rejoin_button.visible = detached
 
 
 ## Mounted infantry: what the comma key / Dismount button would do for the selection.
@@ -1403,7 +1416,7 @@ func _controls_body() -> Control:
 			["Drag, WASD, arrows", "Pan the map"], ["Wheel", "Zoom"]]],
 		["Orders", [["F  Q  E  R", "Arm the next right-click: move, road march,\ndeliberate move, assault"],
 			["Esc", "Disarm; with nothing armed, the pause menu"],
-			["H", "Hold position"], ["B  Y  N", "Fall back, regroup on the HQ, rest & resupply"],
+			["H", "Hold position"], ["B  Y  N", "Fall back, regroup on the HQ, rest & resupply"], ["U", "Rejoin team (a detached member)"],
 			[", (comma)", "Dismount or mount up"], ["X", "Cycle fire: at will, return fire, hold fire"],
 			["J / Shift+J", "Form a team / disband it"], ["L / K", "Select the whole team / company"],
 			["Tab / C", "Next unit / centre on the selection"]]],
