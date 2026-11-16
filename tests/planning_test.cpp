@@ -274,8 +274,9 @@ int main() {
         }
         std::vector<uint8_t> a = v.save_state(), b = plain.save_state();
         // The same run with and without markings: everything up to the markings is identical, and
-        // so are the sandbox flags saved after them (v10, MRK-31: 3 bytes).
-        const size_t tail = 3;
+        // so are the sandbox flags and the scenario kind saved after them (v10, MRK-31: 3 bytes;
+        // v11, three-way: 1 byte).
+        const size_t tail = 4;
         size_t marks_bytes = 4;
         for (const Marking &mk : v.markings) marks_bytes += 1 + 4 + mk.name.size() + 4 + 4 * mk.xy.size();
         check(a.size() == b.size() - 4 + marks_bytes &&

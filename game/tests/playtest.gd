@@ -1,18 +1,20 @@
 extends SceneTree
 ## Headless playtest: runs the real-map scenario for several game days with a
 ## scripted player and reports anything that would hurt play.
-## godot --headless --path game --script res://tests/playtest.gd -- [days] [mode]
+## godot --headless --path game --script res://tests/playtest.gd -- [days] [mode] [scenario]
 ##   mode: passive (never give orders) | active (scripted company orders)
+##   scenario: contract (default) | three-way (1v1v1 with Kessler's Free Corps)
 
 func _init() -> void:
 	var args := OS.get_cmdline_user_args()
 	var days := int(args[0]) if args.size() > 0 else 3
 	var mode := args[1] if args.size() > 1 else "active"
+	var scenario := 1 if args.size() > 2 and args[2] == "three-way" else 0
 	var w := MurksWorld.new()
 	var data := FileAccess.get_file_as_bytes("res://data/poland_1989.murkz")
 	var raw := data.slice(16).decompress(data.decode_u64(8), FileAccess.COMPRESSION_DEFLATE)
 	w.load_map_bytes(raw)
-	w.setup_scenario(24)
+	w.setup_scenario(24, scenario)
 	var stride := w.get_unit_stride()
 	var t0 := Time.get_ticks_msec()
 	var kinds := {}

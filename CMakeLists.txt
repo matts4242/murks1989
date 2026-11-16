@@ -72,6 +72,10 @@ target_link_libraries(route_test PRIVATE murks_core)
 add_executable(sandbox_test tests/sandbox_test.cpp)
 target_link_libraries(sandbox_test PRIVATE murks_core)
 
+# The three-way (1v1v1) scenario: third side, AI against AI, hunters, holdings, outcome, save/load. build/three_way_test
+add_executable(three_way_test tests/three_way_test.cpp)
+target_link_libraries(three_way_test PRIVATE murks_core)
+
 # Real-map 4-day scripted runs over several seeds (needs zlib). build/playtest game/data/poland_1989.murkz 4 active 1989 8
 find_package(ZLIB)
 if(ZLIB_FOUND)

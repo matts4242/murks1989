@@ -60,7 +60,8 @@ void MurksWorld::_bind_methods() {
     ClassDB::bind_method(D_METHOD("load_map_bytes", "bytes"), &MurksWorld::load_map_bytes);
     ClassDB::bind_method(D_METHOD("get_map_info"), &MurksWorld::get_map_info);
     ClassDB::bind_method(D_METHOD("world_to_lonlat", "pos"), &MurksWorld::world_to_lonlat);
-    ClassDB::bind_method(D_METHOD("setup_scenario", "hostile_groups"), &MurksWorld::setup_scenario);
+    ClassDB::bind_method(D_METHOD("setup_scenario", "hostile_groups", "kind"), &MurksWorld::setup_scenario, DEFVAL(0));
+    ClassDB::bind_method(D_METHOD("get_scenario"), &MurksWorld::get_scenario);
     ClassDB::bind_method(D_METHOD("get_map_size"), &MurksWorld::get_map_size);
     ClassDB::bind_method(D_METHOD("get_chunk_count"), &MurksWorld::get_chunk_count);
     ClassDB::bind_method(D_METHOD("get_world_size"), &MurksWorld::get_world_size);
@@ -211,8 +212,10 @@ Vector2 MurksWorld::world_to_lonlat(Vector2 pos) const {
     return Vector2((real_t)lon, (real_t)lat);
 }
 
-void MurksWorld::setup_scenario(int hostile_groups) {
-    if (generated_) world_.setup_scenario(hostile_groups);
+int MurksWorld::get_scenario() const { return (int)world_.scenario; }
+
+void MurksWorld::setup_scenario(int hostile_groups, int kind) {
+    if (generated_) world_.setup_scenario(hostile_groups, kind);
 }
 
 Vector2i MurksWorld::get_map_size() const { return Vector2i(world_.map.cols(), world_.map.rows()); }
@@ -642,6 +645,17 @@ Dictionary MurksWorld::get_objectives() const {
     d["enemy_name"] = sf >= 0 ? to_gd(world_.formations[sf].name) : String();
     d["enemy_effective"] = sf >= 0 ? world_.effective_combat_units(sf) : 0;
     d["enemy_start"] = sf >= 0 ? world_.formations[sf].start_combat : 0;
+    // Three-way: the second hunter, Kessler's Free Corps.
+    d["three_way"] = world_.scenario == murks::SC_THREE_WAY;
+    const std::vector<int> hunters = world_.hunter_formations();
+    const int rf = hunters.size() > 1 ? hunters[1] : -1;
+    d["rival_name"] = rf >= 0 ? to_gd(world_.formations[rf].name) : String();
+    d["rival_effective"] = rf >= 0 ? world_.effective_combat_units(rf) : 0;
+    d["rival_start"] = rf >= 0 ? world_.formations[rf].start_combat : 0;
+    if (rf >= 0) {
+        const int t = world_.formations[rf].objective;
+        d["rival_from"] = t >= 0 && t < (int)world_.map.settlements.size() ? to_gd(world_.map.settlements[t].name) : String();
+    }
     int home = world_.player_home;
     d["home"] = home >= 0 && home < (int)world_.map.settlements.size() ? to_gd(world_.map.settlements[home].name)
                                                                        : String();
@@ -1334,7 +1348,10 @@ Dictionary MurksWorld::get_holding(int hid) const {
     d["population"] = h.population;
     // The owner as the player knows it: their own places exactly, the rest as last seen.
     d["owner"] = (int)h.known_owner;
-    d["owner_name"] = h.known_owner == murks::SIDE_PLAYER ? "Company Murks" : h.known_owner == murks::SIDE_HOSTILE ? "Hostile" : "Independent";
+    d["owner_name"] = h.known_owner == murks::SIDE_PLAYER   ? "Company Murks"
+                      : h.known_owner == murks::SIDE_HOSTILE ? "Hostile"
+                      : h.known_owner == murks::SIDE_RIVAL   ? "Rival"
+                                                             : "Independent";
     d["own"] = own;
     d["location"] = to_gd(world_.place_name(h.pos));
     // Garrison: own militia exactly; others' when seen.
