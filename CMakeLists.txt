@@ -72,6 +72,10 @@ target_link_libraries(route_test PRIVATE murks_core)
 add_executable(sandbox_test tests/sandbox_test.cpp)
 target_link_libraries(sandbox_test PRIVATE murks_core)
 
+# Slope in the movement rules (MRK-04). build/slope_test
+add_executable(slope_test tests/slope_test.cpp)
+target_link_libraries(slope_test PRIVATE murks_core)
+
 # Real-map 4-day scripted runs over several seeds (needs zlib). build/playtest game/data/poland_1989.murkz 4 active 1989 8
 find_package(ZLIB)
 if(ZLIB_FOUND)

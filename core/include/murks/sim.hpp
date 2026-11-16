@@ -67,6 +67,16 @@ float terrain_cover_factor(int terrain, bool soft_target);
 float terrain_minutes(int mobility, int terrain);
 float road_minutes(int mobility);
 float river_penalty_minutes(int mobility);
+// Slope (MRK-04): factor on a step's minutes for its grade (rise / 500 m, negative downhill).
+// Vehicles: 1 on the level, rising with the climb (tracked x1.2 at 10%, x1.4 at 15%, x2.6 at
+// 30%; wheeled x1.4, x1.8 and x4), held at most x10 / x20; a descent counts as a climb of 0.6
+// of its grade (-10%: tracked x1.07, wheeled x1.2). Nothing is impassable. On foot,
+// Tobler's hiking function (x0.84 at -5%, x1.7 at +15%, x2.9 at +30%, at most x8). A road takes
+// a hill at 0.7 of its grade. The river penalty is added after the factor, unchanged.
+constexpr float SLOPE_DESCENT_SHARE = 0.6f; // a vehicle's descent counts as a climb of this share
+constexpr float SLOPE_ROAD_SHARE = 0.7f;    // roads wind up a hill: they take it at this share
+float slope_factor(int mobility, float grade, bool road);
+float slope_factor_min(int mobility); // the smallest slope_factor can be (x0.84 on foot, else 1)
 // Forest and towns hide a unit that sits still (or moves deliberately) and has not fired for
 // a few minutes: it is spotted only within these ranges, beyond them only by chance.
 constexpr int CONCEAL_SPOT_HEXES = 2;       // 1 km

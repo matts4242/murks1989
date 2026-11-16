@@ -167,11 +167,23 @@ void plan_key(int mode, std::vector<PlanKey> &out) {
         return;
     }
     if (mode == PLAN_SLOPE) {
-        out.push_back({kSlopeTint[1], "Gentle, 3-7%", "Steepest grade to a neighbouring hex."});
-        out.push_back({kSlopeTint[2], "Moderate, 7-15%", ""});
-        out.push_back({kSlopeTint[3], "Steep, 15-30%", ""});
-        out.push_back({kSlopeTint[4], "Very steep, over 30%", ""});
-        out.push_back({0, "Level ground is left clear", "Climbing costs 0.03 min a metre (vehicles), 0.04 (foot)."});
+        // MRK-04: the time factor of an off-road climb at the steepest grade of each class
+        // (slope_factor), e.g. "Climbs up to x1.4 tracked, x1.8 wheeled, x1.7 on foot."
+        static const char *name[4] = {"Gentle, 3-7%", "Moderate, 7-15%", "Steep, 15-30%", "Very steep, over 30%"};
+        static const float top[4] = {0.07f, 0.15f, 0.30f, 0.30f};
+        for (int k = 0; k < 4; ++k) {
+            char b[160];
+            std::snprintf(b, sizeof b, "Climbs %s x%.1f tracked, x%.1f wheeled, x%.1f on foot%s",
+                          k == 3 ? "from" : "up to", slope_factor(M_TRACKED, top[k], false),
+                          slope_factor(M_WHEELED, top[k], false), slope_factor(M_FOOT, top[k], false),
+                          k == 3 ? " and worse: severely restricted." : ".");
+            out.push_back({kSlopeTint[k + 1], name[k], b});
+        }
+        char b[200];
+        std::snprintf(b, sizeof b, "Vehicles go down as slowly as they climb %.0f%% of the grade; on foot a gentle "
+                      "descent is fastest. Roads take a hill at %.0f%% of its grade.",
+                      SLOPE_DESCENT_SHARE * 100.0f, SLOPE_ROAD_SHARE * 100.0f);
+        out.push_back({0, "Steepest grade to a neighbouring hex; level ground is left clear", b});
         return;
     }
     if (mode == PLAN_SIGHT) {

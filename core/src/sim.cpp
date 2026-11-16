@@ -46,6 +46,28 @@ const float kTerrainCost[3][T_COUNT] = {
 const float kRoadCost[3] = {1.2f, 0.9f, 6.0f};
 const float kRiverPenalty[3] = {25.0f, 60.0f, 20.0f};
 
+// Slope (MRK-04). Factor on a step's minutes by the grade of the step (rise over the 500 m
+// between hex centres), for vehicles from these points, linear in between and held beyond the
+// last. A 500 m average hides steeper pitches inside the hex, so these bite earlier than the
+// vehicles' rated gradients (about 60%): from 30% a hex is severely restricted for armour
+// (cf. FM 34-130's 30% / 45% categories) and worse for wheels, which lose traction and power
+// first. Nothing is made impassable: a slow climb is always possible, so routes and reach stay
+// as before. Estimates.
+const float kGradePts[8] = {0.0f, 0.05f, 0.10f, 0.15f, 0.20f, 0.30f, 0.45f, 0.60f};
+const float kClimbFactor[2][8] = {
+    {1.0f, 1.05f, 1.2f, 1.4f, 1.7f, 2.6f, 5.0f, 10.0f}, // tracked
+    {1.0f, 1.15f, 1.4f, 1.8f, 2.4f, 4.0f, 10.0f, 20.0f}, // wheeled
+};
+const float kFootSlopeCap = 8.0f;
+
+float vehicle_climb_factor(int mob, float grade) {
+    if (grade <= 0.0f) return 1.0f;
+    const float *f = kClimbFactor[mob == M_WHEELED ? 1 : 0];
+    for (int i = 1; i < 8; ++i)
+        if (grade < kGradePts[i]) return f[i - 1] + (f[i] - f[i - 1]) * (grade - kGradePts[i - 1]) / (kGradePts[i] - kGradePts[i - 1]);
+    return f[7];
+}
+
 const char *kMonths[12] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
 const int kMonthDays[12] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
 
@@ -74,6 +96,18 @@ float terrain_cover_factor(int terrain, bool soft_target) {
 float terrain_minutes(int mobility, int terrain) { return kTerrainCost[mobility][terrain]; }
 float road_minutes(int mobility) { return kRoadCost[mobility]; }
 float river_penalty_minutes(int mobility) { return kRiverPenalty[mobility]; }
+
+float slope_factor(int mobility, float grade, bool road) {
+    if (road) grade *= SLOPE_ROAD_SHARE;
+    if (mobility == M_FOOT) {
+        // Tobler's hiking function against level ground: fastest on a gentle descent (-5%).
+        float f = std::exp(3.5f * (std::fabs(grade + 0.05f) - 0.05f));
+        return std::min(f, kFootSlopeCap);
+    }
+    return vehicle_climb_factor(mobility, grade >= 0.0f ? grade : -grade * SLOPE_DESCENT_SHARE);
+}
+
+float slope_factor_min(int mobility) { return mobility == M_FOOT ? std::exp(-3.5f * 0.05f) : 1.0f; }
 
 const UnitTypeInfo &unit_type_info(int type) { return kTypes[type < 0 || type >= U_TYPE_COUNT ? 0 : type]; }
 
@@ -1446,9 +1480,8 @@ float World::step_minutes(int mob, int move_mode, int from_idx, int to_idx, bool
     if (b.terrain == T_WATER) return -1;
     float c = road ? kRoadCost[mob] : kTerrainCost[mob][b.terrain];
     if (road && (a.features & F_MAJOR_ROAD) && (b.features & F_MAJOR_ROAD)) c *= 0.8f;
+    c *= slope_factor(mob, (float)(b.elev - a.elev) / (float)HEX_WIDTH, road);
     if (!road && (b.features & F_RIVER)) c += kRiverPenalty[mob];
-    int dz = b.elev - a.elev;
-    c += (dz > 0 ? dz : 0) * (mob == M_FOOT ? 0.04f : 0.03f) + std::abs(dz) * 0.004f;
     switch (move_mode) {
         case MV_ROAD: c *= road ? 0.85f : (planning ? 1.8f : 1.0f); break;
         case MV_DELIBERATE: c *= 1.5f; break;
@@ -2136,6 +2169,10 @@ void World::start_path(Unit &u, HexCoord target, OrderKind kind, bool announce) 
         return;
     }
     const auto &ti = unit_type_info(u.type);
+    // The cheapest step is a main road. On foot a gentle descent (Tobler) can be up to 16%
+    // cheaper still (slope_factor_min); the search's 1.3 weight already gives up exact
+    // optimality, and scaling the heuristic down for it doubled foot search times for routes
+    // 0.15% shorter (MRK-04), so it is left out.
     float min_step = kRoadCost[ti.mobility] * 0.8f * (u.mode == MV_ROAD ? 0.85f : 1.0f);
     if (!reachable(u.pos, target)) {
         u.order = O_HOLD;
