@@ -321,6 +321,14 @@ void World::setup_scenario(int extra_groups) {
     sandbox = false;
     hostile_ai = true;
     clock_started_ = false;
+    civilians.clear();
+    civ_next_id_ = 0;
+    active_towns_.clear();
+    danger_.clear();
+    incidents_.clear();
+    town_country_.clear();
+    civ_hex_count_.clear();
+    civ_rng_.reseed(rng_.state() ^ 0x5EEDC1u); // read, not drawn: the military dice stay as they were
     rng_.reseed(seed * 31ull + 7);
     const auto &S = map.settlements;
     if (S.empty()) return;
@@ -1472,7 +1480,15 @@ bool World::road_step(int from_idx, int to_idx) const {
 
 float World::move_cost(const Unit &u, int from_idx, int to_idx, bool planning) const {
     if (map.at_index(to_idx).terrain == T_WATER) return -1;
-    return step_minutes(unit_type_info(u.type).mobility, u.mode, from_idx, to_idx, road_step(from_idx, to_idx), planning);
+    const bool road = road_step(from_idx, to_idx);
+    float c = step_minutes(unit_type_info(u.type).mobility, u.mode, from_idx, to_idx, road, planning);
+    // Civilian traffic on the road slows a column (MRK-34; first estimate: +25% a vehicle, at
+    // most double). Driving only: routes are planned on empty roads.
+    if (!planning && road && c > 0) {
+        const int n = civilians_at(to_idx);
+        if (n > 0) c *= std::min(2.0f, 1.0f + 0.25f * n);
+    }
+    return c;
 }
 
 float World::step_minutes(int mob, int move_mode, int from_idx, int to_idx, bool road, bool planning) const {
@@ -2475,6 +2491,7 @@ void World::tick() {
     update_movement();
     update_mounting();
     update_convoys();
+    update_civilians();
     if (time_min % 5 == 0) {
         rebuild_buckets();
         update_zones();
@@ -3172,6 +3189,10 @@ void World::update_combat() {
             if (th.terrain == T_FOREST || th.terrain == T_URBAN) S *= 0.6f;
             suppress(t, S, time_min + std::max(1, minutes(et.cycle)));
         }
+        // Civilians (MRK-34): the area is dangerous for a while. They are non-combatants and
+        // take no damage.
+        note_danger(u.pos, false);
+        note_danger(t.pos, hit || ti.indirect);
         if (hit) {
             const float per_element = 100.0f / t.elements_max;
             kills = std::min(kills, t.elements);
@@ -3745,7 +3766,7 @@ bool World::set_start_time(int day, int hour) {
 // ------------------------------------------------------------------------------------
 
 namespace {
-constexpr char kSaveMagic[8] = {'M', 'U', 'R', 'K', 'S', 'S', 'V', 'A'}; // v10
+constexpr char kSaveMagic[8] = {'M', 'U', 'R', 'K', 'S', 'S', 'V', 'B'}; // v11
 
 struct SaveWriter {
     std::vector<uint8_t> b;
@@ -3809,6 +3830,14 @@ template <typename A> void io_route(A &a, std::vector<Waypoint> &r) {
     for (auto &w : r) {
         a.pod(w.at); a.pod(w.mode); a.pod(w.halt_min); a.pod(w.shape);
     }
+}
+
+// v11: civilians (MRK-34).
+template <typename A> void io_civilian(A &a, Civilian &c) {
+    a.pod(c.id); a.pod(c.kind); a.pod(c.state); a.pod(c.country); a.pod(c.alive); a.pod(c.seen); a.pod(c.fleeing);
+    a.pod(c.pos); a.pod(c.prev_pos); a.pod(c.home); a.pod(c.dest); a.pod(c.target);
+    a.ints(c.path);
+    a.pod(c.path_i); a.pod(c.progress); a.pod(c.step_cost); a.pod(c.wait_until);
 }
 
 template <typename A, typename U> void io_unit(A &a, U &u) {
@@ -3917,6 +3946,14 @@ std::vector<uint8_t> World::save_state() const {
         w.ints(m.xy);
     }
     w.pod(sandbox); w.pod(hostile_ai); w.pod(clock_started_);
+    w.pod(civilians_on); w.pod(civ_rng_.state()); w.pod(civ_next_id_);
+    w.pod((uint32_t)civilians.size());
+    for (const auto &c : civilians) io_civilian(w, const_cast<Civilian &>(c));
+    w.ints(active_towns_);
+    w.pod((uint32_t)danger_.size());
+    for (const auto &d : danger_) { w.pod(d.at); w.pod(d.until); }
+    w.pod((uint32_t)incidents_.size());
+    for (const auto &in : incidents_) { w.pod(in.at); w.pod(in.last_shot); w.pod(in.served); }
     return w.b;
 }
 
@@ -3971,6 +4008,27 @@ bool World::load_state(const uint8_t *data, size_t size, std::string *error) {
     }
     bool sbx = false, hai = true, clk = false;
     r.pod(sbx); r.pod(hai); r.pod(clk);
+    bool civ_on = true;
+    uint64_t civ_rs = 0;
+    int civ_next = 0;
+    r.pod(civ_on); r.pod(civ_rs); r.pod(civ_next);
+    std::vector<Civilian> civs(r.count(100000));
+    for (auto &c : civs) io_civilian(r, c);
+    std::vector<int> act;
+    r.ints(act);
+    std::vector<DangerMark> dng(r.count(1u << 20));
+    for (auto &d : dng) { r.pod(d.at); r.pod(d.until); }
+    std::vector<Incident> inc(r.count(1u << 20));
+    for (auto &in : inc) { r.pod(in.at); r.pod(in.last_shot); r.pod(in.served); }
+    for (int s2 : act)
+        if (s2 < 0 || s2 >= (int)map.settlements.size()) r.ok = false;
+    for (const auto &c : civs)
+        if (c.kind >= CV_KIND_COUNT || c.state > CS_RETURNING || !map.in_bounds(c.pos) || c.home >= (int)map.settlements.size() ||
+            c.dest >= (int)map.settlements.size() || c.path_i < 0 || c.path_i > (int)c.path.size())
+            r.ok = false;
+    for (const auto &c : civs)
+        for (int idx : c.path)
+            if (idx < 0 || idx >= map.cols() * map.rows()) r.ok = false;
     if (!r.ok) return fail("save is truncated or corrupt");
     for (const auto &m : mks)
         if (!marking_ok(map, m)) return fail("save is corrupt");
@@ -4026,6 +4084,15 @@ bool World::load_state(const uint8_t *data, size_t size, std::string *error) {
     sandbox = sbx;
     hostile_ai = hai;
     clock_started_ = clk;
+    civilians_on = civ_on;
+    civ_rng_.set_state(civ_rs);
+    civ_next_id_ = civ_next;
+    civilians = std::move(civs);
+    active_towns_ = std::move(act);
+    danger_ = std::move(dng);
+    incidents_ = std::move(inc);
+    civ_rebuild_counts();
+    stats_.civilians = (int)civilians.size();
     used_diesel_l_ = used_l;
     used_ammo_t_ = used_t;
     formations = std::move(fs);

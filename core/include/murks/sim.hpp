@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace murks {
@@ -456,6 +457,55 @@ struct CompanyStock {
     double rate_diesel_lph = 0, rate_ammo_tph = 0;
 };
 
+// Civilians (work board MRK-34): traffic and services on the map. Not units and not a side:
+// nobody orders, targets, spots-for-combat or captures with them. They drive between towns,
+// get out of the way of fighting and slow military columns on the roads they share. They are
+// non-combatants and take no damage (user, 16 Nov 2026).
+enum CivKind : uint8_t { CV_CAR = 0, CV_BUS, CV_TRACTOR, CV_LORRY, CV_POLICE, CV_FIRE, CV_AMBULANCE, CV_KIND_COUNT };
+enum CivState : uint8_t {
+    CS_DRIVING = 0,  // on a trip between towns
+    CS_PARKED,       // a service waiting in its town
+    CS_PULLED_OVER,  // fighting close by: stopped at the roadside
+    CS_RESPONDING,   // a service on its way to a scene
+    CS_AT_SCENE,     // a service working a scene
+    CS_RETURNING,    // a service on its way home
+};
+enum CivCountry : uint8_t { CC_GDR = 0, CC_POLAND };
+const char *civ_kind_name(int kind);
+const char *civ_state_name(int state);
+inline bool civ_is_service(int kind) { return kind >= CV_POLICE; }
+
+struct Civilian {
+    int id = -1;
+    uint8_t kind = CV_CAR;
+    uint8_t state = CS_DRIVING;
+    uint8_t country = CC_GDR;
+    bool alive = true;
+    bool seen = false;        // the player sees it (own unit in range and line of sight; checked every 5 min)
+    bool fleeing = false;     // turned away from fighting
+    HexCoord pos, prev_pos;
+    int home = -1;            // settlement it belongs to
+    int dest = -1;            // settlement it drives to (-1: a scene, or home for a service)
+    HexCoord target;          // where the current path ends
+    std::vector<int> path;    // hex indices after pos
+    int path_i = 0;
+    float progress = 0, step_cost = 0;
+    int64_t wait_until = 0;
+    bool moving() const { return path_i < (int)path.size(); }
+};
+
+struct DangerMark {
+    HexCoord at;
+    int64_t until = 0;
+};
+
+// A place that was hit: services from the nearest town go there once it has been quiet.
+struct Incident {
+    HexCoord at;
+    int64_t last_shot = 0;
+    bool served = false;
+};
+
 struct SimStats {
     double avg_tick_us = 0, max_tick_us = 0;
     int hot = 0, warm = 0, cold = 0, alive = 0;
@@ -464,6 +514,7 @@ struct SimStats {
     int paths_last_tick = 0;
     int kills = 0;  // hostile units destroyed
     int losses = 0; // own units destroyed
+    int civilians = 0; // civilian vehicles on the map
 };
 
 class World {
@@ -669,6 +720,16 @@ public:
     int sandbox_hostile_formation() const; // -1 until a hostile is placed
 
     double days_of_food() const;
+
+    // Civilians (MRK-34).
+    std::vector<Civilian> civilians;
+    bool civilians_on = true;               // off: none are created (tests, harnesses)
+    const Civilian *civilian(int id) const; // by id, nullptr if gone
+    int civilians_at(int hex_idx) const;    // civilian vehicles in a hex (congestion)
+    // Sandbox: puts a civilian of this kind on the nearest land hex to `at`. Traffic heads for
+    // a town nearby, services park in the nearest town as their home. Returns the id or -1.
+    int sandbox_place_civilian(int kind, HexCoord at);
+    bool sandbox_remove_civilian(int id);
     // A unit the player may order: not militia, and not a column working a route.
     bool orderable(const Unit &u) const;
 
@@ -750,6 +811,31 @@ private:
     int paths_this_tick_ = 0;
     bool alert_ = false; // a pause-worthy event was raised this tick
     bool clock_started_ = false; // the clock has moved since setup (locks the sandbox start time)
+    // Civilians (MRK-34), in civilians.cpp.
+    Rng civ_rng_;                           // their own dice: spawning never shifts the military rolls
+    int civ_next_id_ = 0;
+    int civ_paths_this_tick_ = 0;
+    std::vector<int> active_towns_;         // settlements within reach of the fighting, hourly
+    std::vector<DangerMark> danger_;
+    std::vector<Incident> incidents_;
+    std::vector<uint8_t> town_country_;     // per settlement (derived from the map)
+    std::unordered_map<int, int> civ_hex_count_; // hex index -> civilian vehicles (derived each tick)
+    void update_civilians();
+    void civ_update_active_towns();
+    void civ_spawn_traffic();
+    void civ_station_services();
+    void civ_move();
+    void civ_react();
+    void civ_dispatch_services();
+    void civ_update_seen();
+    void civ_rebuild_counts();
+    bool civ_path(Civilian &c, HexCoord to);
+    int civ_pick_destination(int home, HexCoord from);
+    float civ_step_minutes(const Civilian &c, int from_idx, int to_idx) const;
+    int civ_new(uint8_t kind, int home, HexCoord at);
+    uint8_t town_country(int settlement);
+    int nearest_danger(HexCoord h, int64_t since) const; // hexes to the nearest danger mark, 999 none
+    void note_danger(HexCoord at, bool hit);
     Outcome outcome_ = OUT_ONGOING;
     std::string outcome_text_;
     // Who the company trains were last reported working for (-1 the HQ or no one). Only used

@@ -55,6 +55,9 @@ var briefing_text := ""
 var formation_names := {}          # formation id -> name (own companies)
 var selected: Array[int] = []
 var snapshot := PackedFloat32Array()
+var civ_snapshot := PackedFloat32Array() # civilians the player sees (MRK-34), MurksWorld.CIV_STRIDE floats each
+var show_civilians := true
+const CIV_STRIDE := 8
 var stride := 10
 var los_hexes := PackedVector2Array()
 # Planning map (MRK-25): the mode shown, and for line of sight the point and eye height.
@@ -190,6 +193,7 @@ func _start_world() -> void:
 	hud.set_toggle("Detail", map_view.show_detail)
 	hud.set_toggle("Edges", map_view.natural_edges)
 	hud.set_toggle("Vehicles", overlay.show_vehicles)
+	hud.set_toggle("Civilians", show_civilians)
 	hud.set_toggle("Topo", map_view.show_topo)
 	hud.set_toggle("KmGrid", tools.show_km_grid)
 	_show_plan_panel()   # fills the View > Planning map list
@@ -265,8 +269,9 @@ func _sandbox_set_tool(tool: String) -> void:
 		return
 	sbx_tool = "" if sbx_tool == tool else tool
 	if sbx_tool == "place":
+		var what: String = String(hud.SBX_CIV_KINDS[sbx_kind][0]).to_lower() if sbx_side == 2 else String(hud.SBX_KINDS[sbx_kind][0]).to_lower()
 		hud.show_toast("Place: left-click the map for a %s %s. Ins or Esc ends it." % [
-			"hostile" if sbx_side == 1 else "own", String(hud.SBX_KINDS[sbx_kind][0]).to_lower()], 3.0)
+			["own", "hostile", "civilian"][sbx_side], what], 3.0)
 	elif sbx_tool == "delete":
 		hud.show_toast("Click-delete: left-click a unit to take it off the map. Shift+Del or Esc ends it.", 3.0)
 	_refresh_sandbox_panel()
@@ -276,6 +281,11 @@ func _sandbox_set_tool(tool: String) -> void:
 func _sandbox_click(screen_pos: Vector2) -> void:
 	if sbx_tool == "place":
 		var hex: Vector2i = world.world_to_hex(_screen_to_world(screen_pos))
+		if sbx_side == 2:
+			if world.sandbox_place_civilian(sbx_kind, hex) < 0:
+				hud.show_toast("No civilian placed there (no land or town near the click).", 3.0)
+			_after_sandbox_change()
+			return
 		var id: int = world.sandbox_place(sbx_side, sbx_kind, hex)
 		if id < 0:
 			hud.show_toast("Nothing placed there (no free land near the click%s)." % (
@@ -285,6 +295,12 @@ func _sandbox_click(screen_pos: Vector2) -> void:
 				selected = [id]
 		_after_sandbox_change()
 	elif sbx_tool == "delete":
+		var civ := civilian_at(_screen_to_world(screen_pos))
+		if civ >= 0:
+			if world.sandbox_remove_civilian(civ):
+				hud.show_toast("Deleted a civilian %s." % world.get_civilian_info(civ).get("name", "vehicle"), 2.5)
+			_after_sandbox_change()
+			return
 		var keep := selected.duplicate()
 		_click_select(screen_pos, false)
 		var hit := selected.duplicate()
@@ -749,6 +765,7 @@ func _on_key(key: Key) -> void:
 		KEY_F4: hud.toggle_legend()
 		KEY_F6: _on_toggle("Detail")
 		KEY_F7: _on_toggle("Vehicles")
+		KEY_F12: _on_toggle("Civilians")
 		KEY_F8: _on_toggle("Topo")
 		KEY_F10: set_plan_mode((plan_mode + 1) % MapView.PLAN_COUNT)
 		KEY_F11: _on_toggle("OOB")
@@ -787,6 +804,10 @@ func _on_toggle(name: String) -> void:
 			overlay.show_vehicles = not overlay.show_vehicles
 			hud.set_toggle(name, overlay.show_vehicles)
 			hud.show_toast("Counters show each unit's main vehicle." if overlay.show_vehicles else "Counters show NATO symbols.")
+		"Civilians":
+			show_civilians = not show_civilians
+			hud.set_toggle(name, show_civilians)
+			hud.show_toast("Civilian traffic and services shown." if show_civilians else "Civilians hidden (they are still on the roads).")
 		"Sight":
 			show_los = not show_los
 			hud.set_toggle(name, show_los)
@@ -837,7 +858,7 @@ func _on_menu_action(name: String) -> void:
 		set_plan_mode(name.substr(5).to_int())
 		return
 	if name.begins_with("sbx_kind_"):
-		sbx_kind = clampi(name.substr(9).to_int(), 0, hud.SBX_KINDS.size() - 1)
+		sbx_kind = clampi(name.substr(9).to_int(), 0, (hud.SBX_CIV_KINDS if sbx_side == 2 else hud.SBX_KINDS).size() - 1)
 		_refresh_sandbox_panel()
 		return
 	if name.begins_with("sbx_day_") or name.begins_with("sbx_hour_"):
@@ -865,8 +886,11 @@ func _on_menu_action(name: String) -> void:
 		"sbx_place_tool": _sandbox_set_tool("place")
 		"sbx_delete_tool": _sandbox_set_tool("delete")
 		"sbx_delete": _sandbox_remove(selected.duplicate())
-		"sbx_side_0", "sbx_side_1":
+		"sbx_side_0", "sbx_side_1", "sbx_side_2":
+			var was_civ := sbx_side == 2
 			sbx_side = int(name.substr(9))
+			if was_civ != (sbx_side == 2):
+				sbx_kind = 0 # the type list changes between units and civilians
 			_refresh_sandbox_panel()
 		"sbx_ai_on", "sbx_ai_off":
 			world.set_hostile_ai(name == "sbx_ai_on")
@@ -1752,6 +1776,9 @@ func _update_status() -> void:
 	if info.get("rail", false): bits.append("railway")
 	if info.get("bridge", false): bits.append("bridge")
 	elif info.get("river", false): bits.append("river")
+	var civ := civilian_at(get_global_mouse_position())
+	if civ >= 0:
+		bits.insert(0, _civilian_text(civ))
 	if info.has("settlement"):
 		bits.append("%s (pop. %s)" % [info["settlement"], hud._thousands(int(info["population"]))])
 	else:
@@ -1765,6 +1792,33 @@ func _update_status() -> void:
 	hud.set_status("%s   %s" % [where, "  ·  ".join(bits)])
 
 
+## The civilian (MRK-34) under a map point, -1 none: within its counter, the top one of a stack.
+func civilian_at(wp: Vector2) -> int:
+	if not show_civilians:
+		return -1
+	var best := -1
+	var best_d := overlay.counter_size() * 0.62 * 0.6 / camera.zoom.x
+	for i in civ_snapshot.size() / CIV_STRIDE:
+		var o := i * CIV_STRIDE
+		var d := Vector2(civ_snapshot[o + 2], civ_snapshot[o + 3]).distance_to(wp)
+		if d < best_d:
+			best_d = d
+			best = int(civ_snapshot[o])
+	return best
+
+
+func _civilian_text(id: int) -> String:
+	var ci: Dictionary = world.get_civilian_info(id)
+	if ci.is_empty():
+		return ""
+	var t := "Civilian %s" % ci["name"]
+	if String(ci["home"]) != "":
+		t += " from " + String(ci["home"])
+	if String(ci["dest"]) != "" and String(ci["state"]) == "driving":
+		t += (", turned back to " if ci["fleeing"] else " to ") + String(ci["dest"])
+	return t + ", " + String(ci["state"])
+
+
 # --- Counter display: glide, fire effects, labels ---------------------------------------
 
 func _glide_at(g: Array, now: int) -> Vector2:
@@ -1775,6 +1829,7 @@ func _glide_at(g: Array, now: int) -> Vector2:
 
 func _refresh_snapshot() -> void:
 	snapshot = world.get_units_snapshot()
+	civ_snapshot = world.get_civilians_snapshot()
 	_update_display_positions()
 
 
@@ -2684,6 +2739,48 @@ func _run_uitest() -> void:
 		check.call(not bool(world.get_unit_info(hostile).get("alive", true)), "a click deletes the hostile")
 		_push_key(KEY_ESCAPE)
 		await _frames(1)
+	# Civilians (MRK-34): side Civilian, a bus placed by a click, drawn, named on hover, deleted by Shift+Del.
+	hud.sbx_side.select(2)
+	hud.sbx_side.item_selected.emit(2)
+	await _frames(1)
+	check.call(hud.sbx_kind.item_count == hud.SBX_CIV_KINDS.size() and hud.sbx_kind.get_item_text(1) == "Bus",
+		"sandbox side Civilian lists the civilian kinds")
+	hud.sbx_kind.select(1)
+	hud.sbx_kind.item_selected.emit(1)
+	_push_key(KEY_INSERT)
+	await _frames(1)
+	var n_civ := civ_snapshot.size() / CIV_STRIDE
+	_push_click(MOUSE_BUTTON_LEFT, vcs + Vector2(60, 120))
+	await _frames(2)
+	_refresh_snapshot()
+	var bus := -1
+	for i in civ_snapshot.size() / CIV_STRIDE:
+		if int(civ_snapshot[i * CIV_STRIDE + 1]) == 1:
+			bus = int(civ_snapshot[i * CIV_STRIDE])
+	check.call(bus >= 0 and civ_snapshot.size() / CIV_STRIDE == n_civ + 1, "a click puts a civilian bus on the map and it is drawn")
+	if bus >= 0:
+		var bw := Vector2.ZERO
+		for i in civ_snapshot.size() / CIV_STRIDE:
+			if int(civ_snapshot[i * CIV_STRIDE]) == bus:
+				bw = Vector2(civ_snapshot[i * CIV_STRIDE + 2], civ_snapshot[i * CIV_STRIDE + 3])
+		check.call(civilian_at(bw) == bus and _civilian_text(bus).begins_with("Civilian bus"), "hovering it names it (\"%s\")" % _civilian_text(bus))
+		_push_key(KEY_ESCAPE)
+		await _frames(1)
+		_push_shift_key(KEY_DELETE)
+		await _frames(1)
+		_push_click(MOUSE_BUTTON_LEFT, get_viewport().get_canvas_transform() * bw)
+		await _frames(2)
+		check.call(world.get_civilian_info(bus).is_empty(), "Shift+Del and a click delete the civilian")
+		_push_key(KEY_ESCAPE)
+		await _frames(1)
+	_push_key(KEY_F12)
+	await _frames(1)
+	check.call(not show_civilians, "F12 hides civilians")
+	_push_key(KEY_F12)
+	await _frames(1)
+	check.call(show_civilians, "and shows them again")
+	hud.sbx_side.select(0)
+	hud.sbx_side.item_selected.emit(0)
 	hud.sbx_ai.button_pressed = false
 	await _frames(1)
 	check.call(not world.get_hostile_ai() and hud.objective_label.text.contains("off"), "the Hostile AI box switches the AI off")
@@ -3075,6 +3172,15 @@ func _run_autotest() -> void:
 	hud.refresh(world.get_time_string(), world.is_night(), world.get_stats(), 60, "")
 	_refresh_selection_panel()
 	await _shot("46_sandbox", world.hex_to_world(sh + Vector2i(10, -1)), 0.05)
+	# Civilians (MRK-34): one of each kind near the HQ, close up, then NATO-symbol mode.
+	for k in 7:
+		world.sandbox_place_civilian(k, sh + Vector2i(2 + k, 2 + (k % 2)))
+	selected.clear()
+	_after_sandbox_change()
+	await _shot("47_civilians", world.hex_to_world(sh + Vector2i(5, 2)), 0.5)
+	overlay.show_vehicles = false
+	await _shot("48_civilians_nato", world.hex_to_world(sh + Vector2i(5, 2)), 0.5)
+	overlay.show_vehicles = true
 	world.load_state(sbx_blob)
 	world.set_reveal_hostiles(false)
 	sbx_tool = ""

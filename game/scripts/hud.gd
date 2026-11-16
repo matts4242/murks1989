@@ -55,6 +55,7 @@ const VIEW_TOGGLES := [["Group", "Company grouping on the theater map", KEY_O],
 	["Detail", "Painted terrain textures (off: flat colours)", KEY_F6],
 	["Edges", "Natural terrain edges (off: crisp hex borders)", 0],
 	["Vehicles", "Vehicles on counters (off: NATO symbols)", KEY_F7],
+	["Civilians", "Civilian traffic and services", KEY_F12],
 	["Topo", "Topographic map: contour lines and heights", KEY_F8], ["Sight", "Line of sight of the selected unit", KEY_V],
 	["Zones", "Simulation fidelity zones", KEY_Z]]
 const LEVY_TIPS := ["0.1 kg a head from the town's larders (a farm collective gives 0.5). Loyalty -10.",
@@ -1228,6 +1229,14 @@ const SBX_KINDS := [["Tank platoon", "Own 4x T-55A, hostile 3x T-72M"], ["Mech p
 	["Rifle platoon", "Own 35 men with RPG-7, hostile 30 men"], ["Recon section", "Own 2x BRDM-2, hostile BRDM-2"],
 	["Battery", "Own 4x 2S1, hostile 3x 2S1"], ["HQ", "Own UAZ-469 with R-145 radio, hostile BTR-60PU"],
 	["Supply column", "6x Ural-375D (own side only)"]]
+## Civilian kinds (MRK-34), in World CivKind order.
+const SBX_CIV_KINDS := [["Car", "Trabant, Wartburg or Polski Fiat: drives to a town nearby"],
+	["Bus", "Ikarus coach: drives to a town nearby"], ["Tractor", "Farm tractor: drives to a town nearby, slowly"],
+	["Lorry", "IFA W50 or Star flatbed: drives to a town nearby"],
+	["Police car", "Volkspolizei or Milicja Obywatelska: based in the nearest town"],
+	["Fire engine", "Based in the nearest town; goes out to places that were hit once it is quiet"],
+	["Ambulance", "Based in the nearest town; goes out with the fire brigade"]]
+var _sbx_kind_civ := false
 
 
 func _build_sandbox_panel() -> void:
@@ -1252,6 +1261,7 @@ func _build_sandbox_panel() -> void:
 	sbx_side.focus_mode = Control.FOCUS_NONE
 	sbx_side.add_item("Own", 0)
 	sbx_side.add_item("Hostile", 1)
+	sbx_side.add_item("Civilian", 2)
 	sbx_side.tooltip_text = "Which side the Place tool puts units down for"
 	sbx_side.item_selected.connect(func(i: int) -> void: menu_action.emit("sbx_side_%d" % i))
 	row.add_child(sbx_side)
@@ -1313,6 +1323,14 @@ func show_sandbox(d: Dictionary) -> void:
 	if not sandbox_panel.visible:
 		return
 	sbx_side.select(int(d.get("side", 0)))
+	var civ := int(d.get("side", 0)) == 2
+	if civ != _sbx_kind_civ:
+		_sbx_kind_civ = civ
+		sbx_kind.clear()
+		var kinds: Array = SBX_CIV_KINDS if civ else SBX_KINDS
+		for i in kinds.size():
+			sbx_kind.add_item(String(kinds[i][0]), i)
+			sbx_kind.set_item_tooltip(i, String(kinds[i][1]))
 	sbx_kind.select(int(d.get("kind", 0)))
 	sbx_place.set_pressed_no_signal(String(d.get("tool", "")) == "place")
 	sbx_delete_tool.set_pressed_no_signal(String(d.get("tool", "")) == "delete")
@@ -2683,6 +2701,7 @@ func set_objectives(obj: Dictionary) -> void:
 		"#7fe07f" if oe >= 3 else "#ff6050", oe, os, "#7fe07f" if hq_ok else "#ff6050",
 		hq_text, int(obj.get("kills", 0)), int(obj.get("losses", 0))]
 	objective_label.text = t
+
 
 
 func _build_end_screen() -> void:
