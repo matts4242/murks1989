@@ -190,6 +190,14 @@ public:
     bool is_clock_started() const;
     // Display only: draw every hostile where it is, seen or not (spotting is unchanged).
     void set_reveal_hostiles(bool on);
+    // Civilians (MRK-34). Snapshot: CIV_STRIDE floats per civilian the player sees (all of them
+    // with Show all hostiles in the sandbox): id, kind (murks::CivKind), x, y, heading x, heading y,
+    // state (murks::CivState), country (0 GDR, 1 Poland).
+    static constexpr int CIV_STRIDE = 8;
+    PackedFloat32Array get_civilians_snapshot() const;
+    Dictionary get_civilian_info(int id) const;
+    int sandbox_place_civilian(int kind, Vector2i hex);
+    bool sandbox_remove_civilian(int id);
     bool get_reveal_hostiles() const;
 
 protected:

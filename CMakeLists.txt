@@ -18,6 +18,7 @@ add_library(murks_core STATIC
     core/src/planning.cpp
     core/src/render_data.cpp
     core/src/sim.cpp
+    core/src/civilians.cpp
 )
 target_include_directories(murks_core PUBLIC core/include)
 
@@ -67,6 +68,10 @@ target_link_libraries(holdings_test PRIVATE murks_core)
 # Waypoint routes: legs, halts, adjustments, pause and resume, save/load. build/route_test
 add_executable(route_test tests/route_test.cpp)
 target_link_libraries(route_test PRIVATE murks_core)
+
+# Civilians: traffic, services, danger, congestion, collateral, save/load. build/civilians_test
+add_executable(civilians_test tests/civilians_test.cpp)
+target_link_libraries(civilians_test PRIVATE murks_core)
 
 # Sandbox mode: placing, removing, start time, hostile AI off, no outcome, save/load. build/sandbox_test
 add_executable(sandbox_test tests/sandbox_test.cpp)
