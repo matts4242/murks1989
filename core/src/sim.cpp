@@ -1676,6 +1676,11 @@ int World::hq_above(const Unit &u) const {
         int l = groups[u.group].leader;
         if (l >= 0 && units[l].alive) return l;
     }
+    // Put under another HQ in the order of battle (MRK-35); if that HQ is lost, back to the company's.
+    if (u.attached_hq >= 0 && u.attached_hq < (int)units.size() && u.attached_hq != u.id) {
+        const Unit &h = units[u.attached_hq];
+        if (h.alive && h.type == U_HQ && h.side == u.side) return h.id;
+    }
     if (u.type == U_HQ) return -1; // the company HQ answers to the client, not to an HQ on the map
     for (int id : formations[u.formation].members)
         if (units[id].alive && units[id].type == U_HQ) return id;
@@ -1690,7 +1695,7 @@ int World::command_delay(const Unit &u) const {
     float d = u.side == SIDE_PLAYER ? 6.0f : 14.0f;
     const bool member = u.group >= 0 && u.group < (int)groups.size() && groups[u.group].alive &&
                         groups[u.group].leader != u.id;
-    if (u.type != U_HQ || member) {
+    if (u.type != U_HQ || member || hq_above(u) >= 0) { // an HQ put under another HQ is a step down too
         d += member ? 7.0f : 4.0f; // one step down the chain; a team member is one step further
         int hq = hq_above(u);
         if (hq < 0) {
@@ -2575,25 +2580,7 @@ int World::create_group(const std::vector<int> &ids, int leader) {
         if (units[id].side != units[leader].side || units[id].formation != units[leader].formation) return -1;
     }
     // Units leave any team they were in; a team losing its leader this way is disbanded.
-    for (int id : ids) {
-        int og = units[id].group;
-        if (og < 0 || og >= (int)groups.size() || !groups[og].alive) continue;
-        Group &o = groups[og];
-        if (o.leader == id) {
-            disband_group(og);
-            continue;
-        }
-        for (size_t k = 0; k < o.members.size(); ++k) {
-            if (o.members[k] != id) continue;
-            o.members.erase(o.members.begin() + k);
-            o.keep_dx.erase(o.keep_dx.begin() + k);
-            o.keep_dy.erase(o.keep_dy.begin() + k);
-            break;
-        }
-        units[id].group = -1;
-        units[id].follow = false;
-        if (o.members.empty()) disband_group(og);
-    }
+    for (int id : ids) leave_team(id);
     int gid = -1;
     for (int i = 0; i < (int)groups.size(); ++i)
         if (!groups[i].alive) {
@@ -2631,7 +2618,214 @@ int World::create_group(const std::vector<int> &ids, int leader) {
         g.keep_dy.push_back((float)(mc.y - lc.y));
     }
     groups[gid] = g;
+    break_command_cycles();
     return gid;
+}
+
+void World::leave_team(int id) {
+    int og = units[id].group;
+    if (og < 0 || og >= (int)groups.size() || !groups[og].alive) return;
+    Group &o = groups[og];
+    if (o.leader == id) {
+        disband_group(og);
+        return;
+    }
+    for (size_t k = 0; k < o.members.size(); ++k) {
+        if (o.members[k] != id) continue;
+        o.members.erase(o.members.begin() + k);
+        o.keep_dx.erase(o.keep_dx.begin() + k);
+        o.keep_dy.erase(o.keep_dy.begin() + k);
+        break;
+    }
+    units[id].group = -1;
+    units[id].follow = false;
+    units[id].formation_wait = false;
+    if (o.members.empty()) disband_group(og);
+}
+
+bool World::is_above(int above, int id) const {
+    if (above < 0 || id < 0 || id >= (int)units.size()) return false;
+    int at = id;
+    for (int steps = 0; steps < 64; ++steps) {
+        at = hq_above(units[at]);
+        if (at < 0) return false;
+        if (at == above) return true;
+    }
+    return false;
+}
+
+void World::break_command_cycles() {
+    for (auto &u : units) {
+        if (u.attached_hq < 0) continue;
+        int at = u.id;
+        for (int steps = 0; steps < 64; ++steps) {
+            at = hq_above(units[at]);
+            if (at < 0) break;
+            if (at == u.id) {
+                u.attached_hq = -1; // this link closed a loop
+                break;
+            }
+        }
+    }
+}
+
+int World::oob_assign(const std::vector<int> &ids_in, int target, int how, std::string *why) {
+    auto refuse = [&](const std::string &m) {
+        if (why) *why = m;
+        return 0;
+    };
+    std::vector<int> ids;
+    for (int id : ids_in)
+        if (std::find(ids.begin(), ids.end(), id) == ids.end()) ids.push_back(id);
+    if (ids.empty()) return refuse("Nothing to move.");
+    const int n = (int)units.size();
+    for (int id : ids) {
+        if (id < 0 || id >= n) return refuse("No such unit.");
+        const Unit &u = units[id];
+        if (!u.alive || u.removed) return refuse(u.name + " is not on the map.");
+        if (u.militia) return refuse(u.name + " holds its town and takes no orders.");
+        if (u.side != units[ids[0]].side || u.formation != units[ids[0]].formation)
+            return refuse("Only units of one company can be moved together.");
+    }
+    const Unit &first = units[ids[0]];
+    auto same_company = [&](const Unit &t) { return t.side == first.side && t.formation == first.formation; };
+    auto first_hq = [&](int skip) {
+        for (int id : formations[first.formation].members)
+            if (id != skip && units[id].alive && units[id].type == U_HQ) return id;
+        return -1;
+    };
+    int changed = 0;
+    if (how == OA_HQ) {
+        if (target < 0 || target >= n) return refuse("No such HQ.");
+        const Unit &h = units[target];
+        if (!h.alive || h.removed || h.type != U_HQ) return refuse(h.name + " is not an HQ.");
+        if (!same_company(h)) return refuse(h.name + " belongs to another company.");
+        for (int id : ids) {
+            if (id == target) return refuse(h.name + " can't be put under itself.");
+            if (is_above(id, target)) return refuse(units[id].name + " is above " + h.name + " in the chain of command.");
+        }
+        for (int id : ids) {
+            Unit &u = units[id];
+            if (hq_above(u) == target) continue;
+            const bool member = u.group >= 0 && u.group < (int)groups.size() && groups[u.group].alive && groups[u.group].leader != id;
+            if (member) leave_team(id);
+            // Under the HQ that would command it anyway: no explicit link.
+            const int fallback = u.type == U_HQ ? -1 : first_hq(id);
+            u.attached_hq = target == fallback ? -1 : target;
+            ++changed;
+            if (u.side == SIDE_PLAYER) push_event(EV_INFO, id, false, fmt("%s now answers to %s.", u.name.c_str(), h.name.c_str()));
+        }
+    } else if (how == OA_TEAM) {
+        if (target < 0 || target >= n) return refuse("No such unit.");
+        const Unit &t = units[target];
+        if (!t.alive || t.removed) return refuse(t.name + " is not on the map.");
+        if (!same_company(t)) return refuse(t.name + " belongs to another company.");
+        if (t.militia || !orderable(t)) return refuse(t.name + " can't lead a team now.");
+        const int tg = (t.group >= 0 && t.group < (int)groups.size() && groups[t.group].alive) ? t.group : -1;
+        const int leader = tg >= 0 ? groups[tg].leader : target;
+        // Leaders bring their teams.
+        std::vector<int> moving;
+        for (int id : ids) {
+            if (id == leader) continue;
+            if (std::find(moving.begin(), moving.end(), id) == moving.end()) moving.push_back(id);
+            const Unit &u = units[id];
+            if (u.group >= 0 && u.group < (int)groups.size() && groups[u.group].alive && groups[u.group].leader == id && u.group != tg)
+                for (int m : groups[u.group].members)
+                    if (m != leader && std::find(moving.begin(), moving.end(), m) == moving.end()) moving.push_back(m);
+        }
+        if (tg >= 0) {
+            std::vector<int> keep;
+            for (int id : moving)
+                if (units[id].group != tg) keep.push_back(id);
+            moving = keep;
+        }
+        if (moving.empty()) return refuse("Already in that team.");
+        for (int id : moving) {
+            if (!orderable(units[id])) return refuse(units[id].name + " can't join a team now.");
+            if (is_above(id, leader)) return refuse(units[id].name + " is above " + units[leader].name + " in the chain of command.");
+        }
+        if (tg < 0) {
+            std::vector<int> all = moving;
+            all.push_back(target);
+            for (int id : moving) units[id].attached_hq = -1;
+            if (create_group(all, target) < 0) return refuse("The team could not be formed.");
+            changed = (int)moving.size();
+        } else {
+            for (int id : moving) leave_team(id);
+            Group &g = groups[tg];
+            if (!g.alive) return refuse("The team is gone.");
+            Vec2 lc = hex_center(units[g.leader].pos);
+            for (int id : moving) {
+                Unit &u = units[id];
+                u.attached_hq = -1;
+                u.group = tg;
+                u.follow = true;
+                u.formation_wait = false;
+                g.members.push_back(id);
+                Vec2 mc = hex_center(u.pos);
+                g.keep_dx.push_back((float)(mc.x - lc.x));
+                g.keep_dy.push_back((float)(mc.y - lc.y));
+                ++changed;
+            }
+            g.has_dest = false; // slots laid out again with the newcomers
+        }
+        const Unit &L = units[leader];
+        if (L.side == SIDE_PLAYER) {
+            const Group &g = groups[L.group];
+            push_event(EV_INFO, leader, false,
+                       changed == 1 ? fmt("%s joins %s under %s.", units[moving[0]].name.c_str(), g.name.c_str(), L.name.c_str())
+                                    : fmt("%d units join %s under %s.", changed, g.name.c_str(), L.name.c_str()));
+        }
+    } else if (how == OA_COMPANY) {
+        for (int id : ids) {
+            Unit &u = units[id];
+            const bool member = u.group >= 0 && u.group < (int)groups.size() && groups[u.group].alive && groups[u.group].leader != id;
+            if (!member && u.attached_hq < 0) continue;
+            if (member) leave_team(id);
+            u.attached_hq = -1;
+            ++changed;
+            const int hq = hq_above(u);
+            if (u.side == SIDE_PLAYER)
+                push_event(EV_INFO, id, false, hq >= 0 ? fmt("%s now answers to %s.", u.name.c_str(), units[hq].name.c_str())
+                                                       : fmt("%s now answers to no one on the map.", u.name.c_str()));
+        }
+        if (changed == 0) return refuse("Already under the company HQ.");
+    } else {
+        return refuse("Unknown move.");
+    }
+    break_command_cycles();
+    return changed;
+}
+
+bool World::oob_move(int id, int ref, bool after) {
+    const int n = (int)units.size();
+    if (id < 0 || id >= n || ref < 0 || ref >= n || id == ref) return false;
+    Unit &u = units[id];
+    const Unit &r = units[ref];
+    if (u.formation != r.formation || u.side != r.side) return false;
+    auto &m = formations[u.formation].members;
+    auto it = std::find(m.begin(), m.end(), id);
+    if (it == m.end() || std::find(m.begin(), m.end(), ref) == m.end()) return false;
+    m.erase(it);
+    auto at = std::find(m.begin(), m.end(), ref);
+    m.insert(after ? at + 1 : at, id);
+    // In the same team as members: the team's order too (who takes over if the leader is lost).
+    if (u.group >= 0 && u.group == r.group && u.group < (int)groups.size() && groups[u.group].alive) {
+        Group &g = groups[u.group];
+        auto gi = std::find(g.members.begin(), g.members.end(), id);
+        if (gi != g.members.end() && std::find(g.members.begin(), g.members.end(), ref) != g.members.end()) {
+            size_t k = (size_t)(gi - g.members.begin());
+            float dx = g.keep_dx[k], dy = g.keep_dy[k];
+            g.members.erase(gi);
+            g.keep_dx.erase(g.keep_dx.begin() + (long)k);
+            g.keep_dy.erase(g.keep_dy.begin() + (long)k);
+            size_t j = (size_t)(std::find(g.members.begin(), g.members.end(), ref) - g.members.begin()) + (after ? 1 : 0);
+            g.members.insert(g.members.begin() + (long)j, id);
+            g.keep_dx.insert(g.keep_dx.begin() + (long)j, dx);
+            g.keep_dy.insert(g.keep_dy.begin() + (long)j, dy);
+        }
+    }
+    return true;
 }
 
 bool World::disband_group(int gid) {
@@ -3916,7 +4110,7 @@ bool World::set_start_time(int day, int hour) {
 // ------------------------------------------------------------------------------------
 
 namespace {
-constexpr char kSaveMagic[8] = {'M', 'U', 'R', 'K', 'S', 'S', 'V', 'C'}; // v12: civilians (MRK-34), then the scenario kind (three-way)
+constexpr char kSaveMagic[8] = {'M', 'U', 'R', 'K', 'S', 'S', 'V', 'D'}; // v13: units' HQ links (MRK-35); v12: civilians, scenario kind
 
 struct SaveWriter {
     std::vector<uint8_t> b;
@@ -4025,6 +4219,8 @@ template <typename A, typename U> void io_unit(A &a, U &u) {
     a.pod(u.cargo_l); a.pod(u.cargo_t); a.pod(u.cargo_kg); a.pod(u.convoy_wait_until); a.pod(u.trip_started);
     // v10: sandbox.
     a.pod(u.removed);
+    // v13: put under another HQ in the order of battle (MRK-35).
+    a.pod(u.attached_hq);
 }
 
 template <typename A, typename H> void io_holding(A &a, H &h) {

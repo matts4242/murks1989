@@ -159,6 +159,7 @@ func _ready() -> void:
 	hud.save_path = SAVE_FILE
 	hud.event_clicked.connect(func(p: Vector2) -> void: camera.position = p)
 	hud.oob_pick.connect(_on_oob_pick)
+	hud.oob_drop.connect(_on_oob_drop)
 
 	# Let the loading text draw before the heavy work starts.
 	await get_tree().process_frame
@@ -2010,6 +2011,34 @@ func _collect_under(id: int, out: Dictionary) -> void:
 			_collect_under(int(c), out)
 
 
+## Units moved in the order of battle panel (MRK-35): under an HQ, into a team, back under the
+## company HQ, and/or to a place in the list. Takes effect at once, like forming a team.
+func _on_oob_drop(ids: Array, target: int, how: String, ref: int, after: bool) -> void:
+	if ids.is_empty():
+		return
+	var pids := PackedInt32Array()
+	for i in ids:
+		pids.append(int(i))
+	if how != "":
+		var code: int = {"hq": 0, "team": 1, "company": 2}.get(how, -1)
+		var res: Dictionary = world.oob_assign(pids, target, code)
+		var why := String(res["why"])
+		if int(res["changed"]) == 0 and why != "" and not why.begins_with("Already"):
+			hud.show_toast(why)
+			return
+	if ref >= 0:
+		# Keep the moved units in the order they had: the first next to ref, each next after it.
+		var prev := ref
+		for k in pids.size():
+			if pids[k] == ref:
+				continue
+			world.oob_move(pids[k], prev, after if prev == ref else true)
+			prev = pids[k]
+	_refresh_snapshot()
+	_refresh_oob()
+	_refresh_selection_panel()
+
+
 ## A row picked in the order of battle panel.
 func _on_oob_pick(id: int, how: String) -> void:
 	var row := {}
@@ -2768,6 +2797,62 @@ func _run_uitest() -> void:
 	_push_key(KEY_DELETE)
 	await _frames(2)
 	check.call(not bool(world.get_unit_info(placed).get("alive", true)) and world.get_oob().size() == n_units, "Del takes the selected unit off the map")
+	# Order of battle moves (MRK-35): a second HQ is placed; 2nd Tank dragged onto it in the panel
+	# (real mouse drag), back under the company HQ from the right-click menu, dropped on 1st Tank
+	# to form a team, the team leader put under the second HQ with its team, 2nd Mech dropped
+	# between rows (before 1st Tank, under the second HQ). Put back afterwards.
+	var u0hex: Vector2i = world.get_unit_info(0)["hex"]
+	var hq2 := int(world.sandbox_place(0, 5, u0hex + Vector2i(3, 1)))
+	var oob_parent := func(id: int) -> int:
+		for r in world.get_oob():
+			if int(r["id"]) == id:
+				return int(r["parent"])
+		return -99
+	selected = [0]
+	_refresh_oob()
+	hud._oob_fold_all(false)
+	await _frames(2)
+	var row_pos := func(id: int, dy := 0.5) -> Vector2:
+		var it: TreeItem = hud.oob_items.get(id, null)
+		if it == null:
+			return Vector2(-1, -1)
+		var rr := hud.oob_tree.get_item_area_rect(it)
+		return hud.oob_tree.get_global_transform() * (rr.position + Vector2(60, rr.size.y * dy))
+	var moves_ok := hq2 > 0 and bool(world.get_unit_info(2).get("alive", false))
+	if moves_ok:
+		await _push_drag(row_pos.call(2), row_pos.call(hq2))
+		await _frames(2)
+	check.call(moves_ok and oob_parent.call(2) == hq2 and (hud.oob_items[2] as TreeItem).get_parent() == hud.oob_items[hq2],
+		"OOB: 2nd Tank dragged onto the second HQ answers to it")
+	if moves_ok:
+		_push_click(MOUSE_BUTTON_RIGHT, row_pos.call(2))
+		await _frames(2)
+		var picked := hud.oob_menu.visible and _menu_pick(hud.oob_menu, "Back under the company HQ")
+		await _frames(2)
+		check.call(picked and oob_parent.call(2) == 0, "OOB: right-click > Back under the company HQ")
+		await _push_drag(row_pos.call(2), row_pos.call(1))
+		await _frames(2)
+		var g1 := int(world.get_unit_info(1).get("group_id", -1))
+		check.call(oob_parent.call(2) == 1 and g1 >= 0, "OOB: 2nd Tank dropped on 1st Tank forms a team under it")
+		hud.oob_drop.emit([1], hq2, "hq", -1, false)
+		await _frames(1)
+		check.call(oob_parent.call(1) == hq2 and oob_parent.call(2) == 1, "OOB: the team leader goes under the second HQ with its team")
+		await _push_drag(row_pos.call(4), row_pos.call(1, 0.08))
+		await _frames(2)
+		var order: Array = []
+		for r in world.get_oob():
+			order.append(int(r["id"]))
+		check.call(oob_parent.call(4) == hq2 and order.find(4) < order.find(1), "OOB: 2nd Mech dropped between rows: before 1st Tank, under the second HQ")
+		# Put back: everyone under the company HQ, team disbanded, 2nd Mech in its place, HQ removed.
+		world.oob_assign(PackedInt32Array([1, 2, 4]), -1, 2)
+		world.disband_group(int(world.get_unit_info(1).get("group_id", -1)))
+		world.oob_move(4, 3, true)
+	if hq2 > 0:
+		selected = [hq2]
+		_push_key(KEY_DELETE)
+		await _frames(2)
+	selected.clear()
+	_refresh_oob()
 	if hostile >= 0:
 		_push_shift_key(KEY_DELETE)
 		await _frames(1)
@@ -2871,6 +2956,36 @@ func _push_shift_key(k: Key) -> void:
 		ev.shift_pressed = true
 		ev.pressed = down
 		get_viewport().push_input(ev)
+
+
+## Left-button drag from a to b through the GUI (drag and drop between controls).
+func _push_drag(a: Vector2, b: Vector2) -> void:
+	Input.warp_mouse(a)
+	var press := InputEventMouseButton.new()
+	press.button_index = MOUSE_BUTTON_LEFT
+	press.pressed = true
+	press.position = a
+	press.global_position = a
+	get_viewport().push_input(press)
+	await get_tree().process_frame
+	var last := a
+	for t in [0.1, 0.25, 0.5, 0.75, 1.0]:
+		Input.warp_mouse(a.lerp(b, t)) # the drop target follows the real cursor, not only the event
+		var mv := InputEventMouseMotion.new()
+		mv.position = a.lerp(b, t)
+		mv.global_position = mv.position
+		mv.button_mask = MOUSE_BUTTON_MASK_LEFT
+		mv.relative = mv.position - last
+		last = mv.position
+		get_viewport().push_input(mv)
+		await get_tree().process_frame
+	var rel := InputEventMouseButton.new()
+	rel.button_index = MOUSE_BUTTON_LEFT
+	rel.pressed = false
+	rel.position = b
+	rel.global_position = b
+	get_viewport().push_input(rel)
+	await get_tree().process_frame
 
 
 ## Ctrl + left-button drag from a to b (the ruler).
@@ -3260,6 +3375,27 @@ func _run_autotest() -> void:
 	overlay.show_vehicles = false
 	await _shot("48_civilians_nato", world.hex_to_world(sh + Vector2i(5, 2)), 0.5)
 	overlay.show_vehicles = true
+	# Order of battle moves (MRK-35): a second HQ with 1st Tank's new team and 3rd Mech under it,
+	# the second HQ selected (everything under it marked), the move menu open on 2nd Mech.
+	var hq2 := int(world.sandbox_place(0, 5, sh + Vector2i(-6, 3)))
+	if hq2 > 0:
+		world.oob_assign(PackedInt32Array([2]), 1, 1)
+		world.oob_assign(PackedInt32Array([1, 5]), hq2, 0)
+		show_oob = true
+		hud.set_oob_visible(true)
+		selected = [hq2]
+		_after_sandbox_change()
+		_refresh_oob()
+		hud._oob_fold_all(false)
+		await _frames(2)
+		var it4: TreeItem = hud.oob_items.get(4, null)
+		if it4 != null:
+			var rr := hud.oob_tree.get_item_area_rect(it4)
+			hud._open_oob_menu(4, hud.oob_tree.get_screen_transform() * (rr.position + Vector2(120, rr.size.y)))
+		await _shot("52_oob_reassign", world.hex_to_world(sh + Vector2i(-6, 3)) + Vector2(-2500, 0), 0.05)
+		hud.oob_menu.hide()
+		show_oob = false
+		hud.set_oob_visible(false)
 	world.load_state(sbx_blob)
 	world.set_reveal_hostiles(false)
 	sbx_tool = ""

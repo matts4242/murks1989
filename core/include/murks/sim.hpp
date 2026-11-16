@@ -195,6 +195,7 @@ struct Unit {
     uint8_t standoff = STANDOFF_DEFAULT; // see STANDOFF_*
     int64_t standoff_next = 0;   // next stand-off check (every few minutes)
     int group = -1;              // team (Group index), -1 none
+    int attached_hq = -1;        // HQ it was put under in the order of battle (MRK-35); -1: the company HQ
     bool follow = false;         // team member keeping formation on its leader
     bool formation_wait = false; // this tick: hold position so the formation stays together
     float strength = 100, morale = 80, fuel = 100, ammo = 100, readiness = 100;
@@ -585,6 +586,19 @@ public:
     int order_group_route(int gid, const std::vector<Waypoint> &route, bool *adjust = nullptr); // leader's route, team follows
     void detach(int unit_id); // a member given its own order leaves the formation until the next team order
     int hq_above(const Unit &u) const;      // the HQ or team leader this unit takes orders from, -1 none
+    // Order of battle (MRK-35). oob_assign moves units in the chain of command at once and
+    // returns how many changed (0 and a reason in *why when refused):
+    //   OA_HQ: under the HQ `target` for command (a team leader brings its team; a team member
+    //          leaves its team); OA_TEAM: into the team of `target` (a team is formed with it as
+    //          leader if it has none; a leader brings its members); OA_COMPANY: back under the
+    //          company HQ, out of any team (a leader keeps its team).
+    // oob_move puts `id` just before (or after) `ref` in the company's order of battle (and in
+    // their team's, when both are in the same one): the first HQ is the company HQ, and the
+    // first platoon able to fight takes over the trains when the HQ is lost.
+    enum OobHow : int { OA_HQ = 0, OA_TEAM = 1, OA_COMPANY = 2 };
+    int oob_assign(const std::vector<int> &ids, int target, int how, std::string *why = nullptr);
+    bool oob_move(int id, int ref, bool after);
+    bool is_above(int above, int id) const; // `above` is up id's chain of command
     int command_zone(const Unit &hq) const; // zone of effective command in hexes
     std::vector<Group> groups;
 
@@ -767,6 +781,8 @@ private:
     void update_orders();
     void update_movement();
     void update_groups();
+    void leave_team(int id);           // out of its team as a member (a leader's team is disbanded)
+    void break_command_cycles();       // an HQ link that would loop back is dropped
     void update_standoff();
     HexCoord slot_for(const Group &g, int k, HexCoord center, float heading) const;
     void deploy_if_off_road(Unit &u);

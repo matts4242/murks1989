@@ -125,6 +125,8 @@ void MurksWorld::_bind_methods() {
     ClassDB::bind_method(D_METHOD("order_group_hold", "gid"), &MurksWorld::order_group_hold);
     ClassDB::bind_method(D_METHOD("get_groups"), &MurksWorld::get_groups);
     ClassDB::bind_method(D_METHOD("get_oob"), &MurksWorld::get_oob);
+    ClassDB::bind_method(D_METHOD("oob_assign", "ids", "target", "how"), &MurksWorld::oob_assign);
+    ClassDB::bind_method(D_METHOD("oob_move", "id", "ref", "after"), &MurksWorld::oob_move);
     ClassDB::bind_method(D_METHOD("set_standoff", "id", "standoff"), &MurksWorld::set_standoff);
     ClassDB::bind_method(D_METHOD("set_default_standoff", "standoff"), &MurksWorld::set_default_standoff);
     ClassDB::bind_method(D_METHOD("get_default_standoff"), &MurksWorld::get_default_standoff);
@@ -1220,9 +1222,12 @@ Array MurksWorld::get_oob() const {
             if (u.militia && u.holding >= 0 && u.holding < (int)world_.holdings.size())
                 d["holding_name"] = to_gd(world_.holdings[u.holding].name);
             int parent = -1;
-            if (u.carrier >= 0) parent = u.carrier;
+            const bool own_chain = (u.group >= 0 && grouped) || u.attached_hq >= 0; // put somewhere of its own
+            if (u.carrier >= 0 && (u.embarked || dead || !own_chain)) parent = u.carrier;
             else if (!dead && !u.militia) parent = world_.hq_above(u);
             d["parent"] = parent;
+            d["attached_hq"] = u.attached_hq;
+            d["orderable"] = !dead && !u.embarked && world_.orderable(u);
             const char *role = "";
             if (!dead && u.type == murks::U_HQ) role = "hq";
             else if (!dead && grouped && world_.groups[u.group].leader == u.id) role = "leader";
@@ -1252,6 +1257,21 @@ Array MurksWorld::get_oob() const {
     }
     return out;
 }
+
+// Order of battle panel (MRK-35): move units in the chain of command. how: 0 under the HQ
+// `target`, 1 into target's team, 2 back under the company HQ. Returns {changed, why}.
+Dictionary MurksWorld::oob_assign(const PackedInt32Array &ids, int target, int how) {
+    std::vector<int> v;
+    for (int64_t i = 0; i < ids.size(); ++i) v.push_back(ids[i]);
+    std::string why;
+    const int n = world_.oob_assign(v, target, how, &why);
+    Dictionary d;
+    d["changed"] = n;
+    d["why"] = to_gd(why);
+    return d;
+}
+
+bool MurksWorld::oob_move(int id, int ref, bool after) { return world_.oob_move(id, ref, after); }
 
 int MurksWorld::estimate_command_delay(int id) const {
     if (id < 0 || id >= (int)world_.units.size()) return -1;

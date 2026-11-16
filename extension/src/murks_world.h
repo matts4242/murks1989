@@ -161,6 +161,8 @@ public:
     int order_group_hold(int gid);
     Array get_groups() const;
     Array get_oob() const; // the player's order of battle by chain of command
+    Dictionary oob_assign(const PackedInt32Array &ids, int target, int how); // MRK-35: {changed, why}
+    bool oob_move(int id, int ref, bool after);
     int set_standoff(int id, int standoff);
     void set_default_standoff(int standoff);
     int get_default_standoff() const;
