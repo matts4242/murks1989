@@ -449,8 +449,8 @@ struct CompanyStock {
 
 // Civilians (work board MRK-34): traffic and services on the map. Not units and not a side:
 // nobody orders, targets, spots-for-combat or captures with them. They drive between towns,
-// get out of the way of fighting, slow military columns on the roads they share, can be
-// hit by fire aimed at a unit in their hex, and their losses cost nearby holdings loyalty.
+// get out of the way of fighting and slow military columns on the roads they share. They are
+// non-combatants and take no damage (user, 16 Nov 2026).
 enum CivKind : uint8_t { CV_CAR = 0, CV_BUS, CV_TRACTOR, CV_LORRY, CV_POLICE, CV_FIRE, CV_AMBULANCE, CV_KIND_COUNT };
 enum CivState : uint8_t {
     CS_DRIVING = 0,  // on a trip between towns
@@ -505,7 +505,6 @@ struct SimStats {
     int kills = 0;  // hostile units destroyed
     int losses = 0; // own units destroyed
     int civilians = 0; // civilian vehicles on the map
-    int civ_lost_player = 0, civ_lost_hostile = 0; // civilian vehicles destroyed by each side's fire
 };
 
 class World {
@@ -827,7 +826,6 @@ private:
     uint8_t town_country(int settlement);
     int nearest_danger(HexCoord h, int64_t since) const; // hexes to the nearest danger mark, 999 none
     void note_danger(HexCoord at, bool hit);
-    void civ_collateral(HexCoord at, bool indirect, bool hit, int shooter_side);
     Outcome outcome_ = OUT_ONGOING;
     std::string outcome_text_;
     // Who the company trains were last reported working for (-1 the HQ or no one). Only used

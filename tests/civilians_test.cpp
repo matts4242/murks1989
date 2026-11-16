@@ -134,34 +134,41 @@ int main() {
         }
     }
 
-    std::printf("Collateral and loyalty:\n");
+    std::printf("Non-combatants (no damage):\n");
     {
         World k = w;
         k.sandbox = true;
-        // A civilian car in the home town, a hostile tank platoon in the same hex, our battery firing on it.
+        // 12 cars in the home town, a hostile platoon in the same hex, our tanks next door
+        // (adjacent hexes always see each other). The fire aimed at the platoon passes the cars by.
         int home = -1;
         for (int i = 0; i < (int)k.holdings.size(); ++i)
             if (k.holdings[i].owner == SIDE_PLAYER && k.holdings[i].kind == HK_TOWN) home = i;
         const HexCoord at = k.holdings[home].pos;
-        const float loyalty0 = k.holdings[home].loyalty;
-        const int lost0 = k.stats().civ_lost_player;
-        int placed = 0;
-        for (int i = 0; i < 12; ++i)
-            if (k.sandbox_place_civilian(CV_CAR, at) >= 0) ++placed;
+        std::vector<int> cars;
+        for (int i = 0; i < 12; ++i) {
+            const int id = k.sandbox_place_civilian(CV_CAR, at);
+            if (id >= 0) cars.push_back(id);
+        }
         for (auto &c : k.civilians)
             if (c.pos == at) c.state = CS_PULLED_OVER, c.wait_until = k.time_min + 600; // keep them there
-        // The hostile platoon goes into the cars' hex itself, our tanks next door (adjacent hexes
-        // always see each other).
         const int h = k.sandbox_place(SIDE_HOSTILE, World::SB_RIFLE, at);
         k.units[h].pos = at;
         const int o = k.sandbox_place(SIDE_PLAYER, World::SB_TANK, {at.col + 1, at.row});
+        const float hostile0 = k.units[h].strength;
         k.sandbox = false; // the fight runs under the normal rules
-        for (int t = 0; t < 240 && k.stats().civ_lost_player == lost0; ++t) k.tick();
+        for (int t = 0; t < 240; ++t) {
+            for (auto &c : k.civilians)
+                if (c.pos == at) c.wait_until = k.time_min + 600;
+            k.tick();
+        }
         k.sandbox = true;
-        check(placed == 12 && h >= 0 && o >= 0 && hex_distance(k.units[o].pos, at) <= 1,
+        check(cars.size() == 12 && h >= 0 && o >= 0 && hex_distance(k.units[o].pos, at) <= 1,
               "12 cars and a hostile platoon in our home town, our tanks next door");
-        check(k.stats().civ_lost_player > lost0, "our fire on the town destroys civilian vehicles");
-        check(k.holdings[home].loyalty < loyalty0, "and the town holds it against us");
+        check(k.units[h].strength < hostile0, "the fight in their hex happened");
+        int still = 0;
+        for (int id : cars)
+            if (k.civilian(id)) ++still;
+        check(still == 12, "all 12 cars are still there: civilians take no damage");
         // Removing a civilian in the sandbox.
         int id = -1;
         for (const auto &c : k.civilians)

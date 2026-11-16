@@ -96,11 +96,11 @@ int main(int argc, char **argv) {
         const int sf = w.strike_formation();
         std::printf("seed %u %s: %s | own alive %d (avg str %.0f), 7G fighting %d/%d, kills %d losses %d, "
                     "contact %d min, ammo %.1f t, displacements %d, deployments %d, 7G squads out %d min (max %d), "
-                    "civilians %d, civ lost ours %d / hostile %d, tick avg %.0f us max %.0f us\n",
+                    "civilians %d, tick avg %.0f us max %.0f us\n",
                     w.seed, mode.c_str(), outcome.substr(0, 60).c_str(), alive, alive ? str / alive : 0.0f,
                     sf >= 0 ? w.effective_combat_units(sf) : -1, sf >= 0 ? w.formations[sf].start_combat : -1,
                     w.stats().kills, w.stats().losses, contact, w.stock.ammo_t, displaced, deployed, squad_min,
-                    squads_max, w.stats().civilians, w.stats().civ_lost_player, w.stats().civ_lost_hostile,
+                    squads_max, w.stats().civilians,
                     w.stats().avg_tick_us, w.stats().max_tick_us);
         std::fflush(stdout);
     }

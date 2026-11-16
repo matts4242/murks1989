@@ -634,8 +634,6 @@ Dictionary MurksWorld::get_objectives() const {
     d["hq_alive"] = world_.hq_of(murks::SIDE_PLAYER) >= 0;
     d["sandbox"] = world_.sandbox;
     d["civilians"] = world_.stats().civilians;
-    d["civ_lost_player"] = world_.stats().civ_lost_player;
-    d["civ_lost_hostile"] = world_.stats().civ_lost_hostile;
     d["hostile_ai"] = world_.hostile_ai;
     // Who runs the trains once the HQ is lost: "" while the HQ lives or during the handover.
     const int acting = world_.acting_hq(0);

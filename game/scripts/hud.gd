@@ -2688,7 +2688,7 @@ func set_objectives(obj: Dictionary) -> void:
 	if obj.get("sandbox", false):
 		objective_label.text = "[b]Sandbox:[/b] no victory or defeat · hostile AI %s\nHQ [color=%s]%s[/color]   ·   kills %d, lost %d" % [
 			"on" if obj.get("hostile_ai", true) else "[color=#ffc040]off[/color]", "#7fe07f" if hq_ok else "#ff6050", hq_text,
-			int(obj.get("kills", 0)), int(obj.get("losses", 0))] + _civ_losses_text(obj)
+			int(obj.get("kills", 0)), int(obj.get("losses", 0))]
 		return
 	var t := ""
 	match int(obj.get("outcome", 0)):
@@ -2700,16 +2700,8 @@ func set_objectives(obj: Dictionary) -> void:
 	t += "Keep 3+ units fighting [color=%s](%d of %d)[/color]   ·   HQ [color=%s]%s[/color]   ·   kills %d, lost %d" % [
 		"#7fe07f" if oe >= 3 else "#ff6050", oe, os, "#7fe07f" if hq_ok else "#ff6050",
 		hq_text, int(obj.get("kills", 0)), int(obj.get("losses", 0))]
-	objective_label.text = t + _civ_losses_text(obj)
+	objective_label.text = t
 
-
-## Civilian vehicles destroyed (MRK-34), once there are any.
-func _civ_losses_text(obj: Dictionary) -> String:
-	var ours := int(obj.get("civ_lost_player", 0))
-	var theirs := int(obj.get("civ_lost_hostile", 0))
-	if ours + theirs == 0:
-		return ""
-	return "   ·   civilians hit: [color=%s]%d by us[/color], %d by them" % ["#ffc040" if ours > 0 else "#d0d0d0", ours, theirs]
 
 
 func _build_end_screen() -> void:

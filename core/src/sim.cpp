@@ -3152,11 +3152,10 @@ void World::update_combat() {
             if (th.terrain == T_FOREST || th.terrain == T_URBAN) S *= 0.6f;
             suppress(t, S, time_min + std::max(1, minutes(et.cycle)));
         }
-        // Civilians (MRK-34): the area is dangerous for a while; vehicles in the target hex
-        // can be caught by the fire.
+        // Civilians (MRK-34): the area is dangerous for a while. They are non-combatants and
+        // take no damage.
         note_danger(u.pos, false);
         note_danger(t.pos, hit || ti.indirect);
-        civ_collateral(t.pos, ti.indirect, hit, u.side);
         if (hit) {
             const float per_element = 100.0f / t.elements_max;
             kills = std::min(kills, t.elements);
@@ -3911,7 +3910,6 @@ std::vector<uint8_t> World::save_state() const {
     }
     w.pod(sandbox); w.pod(hostile_ai); w.pod(clock_started_);
     w.pod(civilians_on); w.pod(civ_rng_.state()); w.pod(civ_next_id_);
-    w.pod(stats_.civ_lost_player); w.pod(stats_.civ_lost_hostile);
     w.pod((uint32_t)civilians.size());
     for (const auto &c : civilians) io_civilian(w, const_cast<Civilian &>(c));
     w.ints(active_towns_);
@@ -3975,8 +3973,8 @@ bool World::load_state(const uint8_t *data, size_t size, std::string *error) {
     r.pod(sbx); r.pod(hai); r.pod(clk);
     bool civ_on = true;
     uint64_t civ_rs = 0;
-    int civ_next = 0, civ_lp = 0, civ_lh = 0;
-    r.pod(civ_on); r.pod(civ_rs); r.pod(civ_next); r.pod(civ_lp); r.pod(civ_lh);
+    int civ_next = 0;
+    r.pod(civ_on); r.pod(civ_rs); r.pod(civ_next);
     std::vector<Civilian> civs(r.count(100000));
     for (auto &c : civs) io_civilian(r, c);
     std::vector<int> act;
@@ -4052,8 +4050,6 @@ bool World::load_state(const uint8_t *data, size_t size, std::string *error) {
     civilians_on = civ_on;
     civ_rng_.set_state(civ_rs);
     civ_next_id_ = civ_next;
-    stats_.civ_lost_player = civ_lp;
-    stats_.civ_lost_hostile = civ_lh;
     civilians = std::move(civs);
     active_towns_ = std::move(act);
     danger_ = std::move(dng);

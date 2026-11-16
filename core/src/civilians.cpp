@@ -1,13 +1,14 @@
 // Civilians (work board MRK-34): traffic between towns and the towns' services (police, fire
 // brigade, ambulance). They are not units and not a side: nobody orders them, targets them or
-// captures with them. They get out of the way of fighting, slow military columns on the roads
-// they share, can be destroyed by fire aimed at a unit in their hex, and their losses cost the
-// holdings nearby loyalty. Services come out to a place that was hit once it has gone quiet.
+// captures with them. They are non-combatants and take no damage (user, 16 Nov 2026): fire
+// aimed at a unit in their hex passes them by. They get out of the way of fighting and slow
+// military columns on the roads they share. Services come out to a place that was hit once it
+// has gone quiet.
 //
 // All numbers here are first estimates (marked), to be replaced by sourced values.
 //
 // Civilians roll their own dice (civ_rng_), so creating them never shifts the military rolls.
-// Only congestion and collateral damage reach back into the fight.
+// Only congestion reaches back into the fight.
 #include "murks/geo.hpp"
 #include "murks/planning.hpp"
 #include "murks/sim.hpp"
@@ -47,9 +48,6 @@ constexpr int kQuietMinutes = 30;      // services go out once no shot within 2 
 constexpr int kQuietRadius = 4;
 constexpr int kServiceRadius = 30;     // hexes (15 km): how far a town's services go
 constexpr int kSceneMinutes = 60;
-constexpr int kLoyaltyRadius = 10;     // hexes (5 km): a holding feels civilian losses this close
-constexpr float kLoyaltyLossPlayer = 3, kLoyaltyLossHostile = 1;
-constexpr double kHitIndirect = 0.35, kHitDirect = 0.05;
 constexpr int kPoliceTown = 5000, kFireTown = 10000;
 
 // Speed on a road against a military wheeled vehicle's road time (0.9 min a hex, ~33 km/h):
@@ -192,30 +190,6 @@ void World::note_danger(HexCoord at, bool hit) {
     for (const auto &in : incidents_)
         if (!in.served && hex_distance(in.at, at) <= 2) return;
     if (incidents_.size() < 64) incidents_.push_back({at, time_min, false});
-}
-
-void World::civ_collateral(HexCoord at, bool indirect, bool hit, int shooter_side) {
-    if (!indirect && !hit) return;
-    const double p = indirect ? kHitIndirect : kHitDirect;
-    for (auto &c : civilians) {
-        if (!c.alive || c.pos != at || c.state == CS_PARKED || !civ_rng_.chance(p)) continue;
-        c.alive = false;
-        if (shooter_side == SIDE_PLAYER) ++stats_.civ_lost_player;
-        else ++stats_.civ_lost_hostile;
-        const float loss = shooter_side == SIDE_PLAYER ? kLoyaltyLossPlayer : kLoyaltyLossHostile;
-        std::string felt;
-        for (auto &h : holdings) {
-            if (h.owner < 0 || hex_distance(h.pos, at) > kLoyaltyRadius) continue;
-            h.loyalty = std::max(0.0f, h.loyalty - loss);
-            if (h.owner == SIDE_PLAYER && felt.empty()) felt = h.name;
-        }
-        if (shooter_side == SIDE_PLAYER || c.seen || !felt.empty())
-            push_event(EV_INFO, -1, false,
-                       cfmt("A civilian %s was destroyed %s by %s fire.%s", civ_kind_name(c.kind), place_name(at).c_str(),
-                            shooter_side == SIDE_PLAYER ? "our" : "hostile",
-                            felt.empty() ? "" : cfmt(" %s holds it against %s.", felt.c_str(),
-                                                     shooter_side == SIDE_PLAYER ? "us" : "the fighting").c_str()));
-    }
 }
 
 void World::civ_update_active_towns() {
