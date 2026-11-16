@@ -274,7 +274,7 @@ int main() {
         }
         std::vector<uint8_t> a = v.save_state(), b = plain.save_state();
         // The same run with and without markings: everything up to the markings is identical, and
-        // so is everything saved after them (sandbox flags v10, civilians v11).
+        // so is everything saved after them (sandbox flags v10, civilians and the scenario kind v12).
         size_t marks_bytes = 4;
         for (const Marking &mk : v.markings) marks_bytes += 1 + 4 + mk.name.size() + 4 + 4 * mk.xy.size();
         size_t L = 0;

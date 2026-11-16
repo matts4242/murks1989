@@ -46,6 +46,7 @@ var route_team := -1          # the team, when the plan is for a team
 var route_preview := {}       # {hex, path, minutes}: from the last waypoint to the cursor
 static var skip_title := false     # New game from the menus: reload straight into play, past the title screen
 static var sandbox_mode := false   # Sandbox (MRK-31): New game from its pause menu starts a fresh sandbox
+static var scenario_kind := 0      # 0 the contract, 1 the three-way (1v1v1); New game keeps it
 var sbx_side := 0                  # sandbox Place tool: 0 own, 1 hostile
 var sbx_kind := 0                  # World::SandboxKind
 var sbx_tool := ""                 # "", "place" or "delete": what a left-click on the map does
@@ -121,6 +122,8 @@ func _ready() -> void:
 			uitest = true
 		elif a.begins_with("--views="):
 			views_dir = a.substr(8)
+		elif a == "--three-way":
+			scenario_kind = 1
 
 	camera = Camera2D.new()
 	add_child(camera)
@@ -174,7 +177,7 @@ func _start_world() -> void:
 		gen_info = _load_baked_map(MAP_FILE)
 	if not gen_info.get("ok", false):
 		gen_info = world.generate(SEED, CHUNKS.x, CHUNKS.y)
-	world.setup_scenario(hostile_groups)
+	world.setup_scenario(hostile_groups, scenario_kind)
 	stride = world.get_unit_stride()
 	map_view.setup(world)
 	overlay.set_towns(world.get_settlements(0))
@@ -203,12 +206,20 @@ func _start_world() -> void:
 	_refresh_oob()
 	set_speed(0)
 	var obj: Dictionary = world.get_objectives()
-	briefing_text = "Company Murks is billeted at %s. The %s is coming for you from the east.\nBreak it before it breaks you, and guard the HQ: without it orders crawl and supplies slow to half." % [
-		obj.get("home", _home_name()), obj.get("enemy_name", "enemy")]
+	if obj.get("three_way", false):
+		briefing_text = ("Three-way. Company Murks is billeted at %s. The %s is coming from the east and %s from %s, " +
+			"and they are at war with each other as much as with you.\nOutlast them both, and guard the HQ: without it " +
+			"orders crawl and supplies slow to half.") % [obj.get("home", _home_name()), obj.get("enemy_name", "enemy"),
+			obj.get("rival_name", "the rival"), obj.get("rival_from", "the south")]
+	else:
+		briefing_text = "Company Murks is billeted at %s. The %s is coming for you from the east.\nBreak it before it breaks you, and guard the HQ: without it orders crawl and supplies slow to half." % [
+			obj.get("home", _home_name()), obj.get("enemy_name", "enemy")]
 	_poll_events()
 	ready_to_play = true
 	if views_dir != "":
 		_run_views()
+	elif autotest_dir != "" and scenario_kind == 1:
+		_run_three_way_shots()
 	elif autotest_dir != "":
 		_run_autotest()
 	elif uitest:
@@ -882,7 +893,25 @@ func _on_menu_action(name: String) -> void:
 		"start":
 			sandbox_mode = false
 			_begin_campaign()
-		"sandbox": _begin_sandbox()
+		"sandbox":
+			if world.get_scenario() != 0:
+				# The sandbox is built on the contract: back to it first.
+				scenario_kind = 0
+				skip_title = true
+				sandbox_mode = true
+				get_tree().reload_current_scene()
+			else:
+				_begin_sandbox()
+		"three_way":
+			if world.get_scenario() == 1:
+				sandbox_mode = false
+				_begin_campaign()
+			else:
+				# A fresh world set up for the three-way, straight into play.
+				scenario_kind = 1
+				skip_title = true
+				sandbox_mode = false
+				get_tree().reload_current_scene()
 		"sbx_place_tool": _sandbox_set_tool("place")
 		"sbx_delete_tool": _sandbox_set_tool("delete")
 		"sbx_delete": _sandbox_remove(selected.duplicate())
@@ -907,10 +936,12 @@ func _on_menu_action(name: String) -> void:
 		"new_game":
 			skip_title = true
 			sandbox_mode = world != null and world.is_sandbox()
+			scenario_kind = world.get_scenario() if world != null else 0
 			get_tree().reload_current_scene()
 		"title":
 			skip_title = false
 			sandbox_mode = false
+			scenario_kind = 0
 			get_tree().reload_current_scene()
 		"quit": get_tree().quit()
 		"save": quick_save()
@@ -2034,7 +2065,12 @@ func _check_outcome() -> void:
 func _on_end_choice(choice: String) -> void:
 	hud.end_panel.visible = false
 	match choice:
-		"restart": get_tree().reload_current_scene()
+		"restart":
+			# The contract goes back to the title screen; the three-way starts again at once.
+			scenario_kind = world.get_scenario()
+			skip_title = scenario_kind != 0
+			sandbox_mode = false
+			get_tree().reload_current_scene()
 		"load": quick_load()
 		"quit": get_tree().quit()
 
@@ -2081,6 +2117,7 @@ func quick_load() -> void:
 		selected = [0]
 		camera.position = world.hex_to_world(hq["hex"])
 	sandbox_mode = world.is_sandbox()
+	scenario_kind = world.get_scenario()
 	_refresh_sandbox_panel()
 	_refresh_oob()
 	_check_outcome()
@@ -2677,6 +2714,8 @@ func _run_uitest() -> void:
 	check.call(hud.title_new_game.disabled and hud.title_campaign.disabled and not hud.title_sandbox.disabled,
 		"title screen: New game and Campaign greyed out, Sandbox available")
 	check.call(not hud.sandbox_panel.visible, "no sandbox panel in the contract")
+	check.call(not hud.title_three_way.disabled and world.get_scenario() == 0 and
+		not bool(world.get_objectives().get("three_way", true)), "title screen: Three-way available; this game is the contract")
 	_push_key(KEY_INSERT)
 	await _frames(1)
 	check.call(sbx_tool == "", "Ins does nothing outside the sandbox")
@@ -3009,6 +3048,46 @@ func _run_views() -> void:
 				n += 1
 		sum = sum / n * 255.0
 		print("Views: average of terrain %d = %d, %d, %d" % [code, roundi(sum.x), roundi(sum.y), roundi(sum.z)])
+	get_tree().quit()
+
+
+## --three-way --autotest=DIR: the three-way's briefing, then the clock runs (the company holds
+## at home) until it has both the 7th Guards and the Free Corps in sight at once, or three days
+## pass, and the theater view is shot centred on what it sees.
+func _run_three_way_shots() -> void:
+	print("Autotest (three-way): writing screenshots to ", autotest_dir)
+	DirAccess.make_dir_recursive_absolute(autotest_dir)
+	auto_pause = false
+	show_oob = false
+	hud.set_oob_visible(false)
+	var hq: Vector2 = world.hex_to_world(world.get_unit_info(0)["hex"])
+	_begin_campaign()
+	await _shot("49_three_way_start", hq, 0.02)
+	var centre := hq
+	var found := false
+	var until := int(world.get_objectives()["time_minutes"]) + 72 * 60
+	while int(world.get_objectives()["time_minutes"]) < until:
+		world.advance(10, 5000.0) # stops early on a pause-worthy event; the loop goes on
+		_refresh_snapshot()
+		var sum := Vector2.ZERO
+		var n := 0
+		var sides := {}
+		for i in snapshot.size() / stride:
+			var o := i * stride
+			var side := int(snapshot[o + 1])
+			if side != 0 and (int(snapshot[o + 7]) & 1) != 0:
+				sides[side] = true
+				sum += disp[i]
+				n += 1
+		if sides.has(1) and sides.has(2):
+			centre = sum / n
+			found = true
+			print("Autotest (three-way): both in sight at %s" % world.get_time_string())
+			break
+	_poll_events()
+	await _shot("50_three_way_contact", centre if found else hq, 0.06)
+	await _shot("51_three_way_theater", centre if found else hq, 0.025)
+	print("Autotest (three-way): done (%s)" % ("both in sight" if found else "never both in sight"))
 	get_tree().quit()
 
 

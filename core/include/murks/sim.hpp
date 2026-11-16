@@ -25,7 +25,14 @@ namespace murks {
 // never counts as a fighting unit.
 enum UnitType : uint8_t { U_HQ = 0, U_TANK, U_MECH, U_INFANTRY, U_RECON, U_ARTILLERY, U_TRUCK, U_TYPE_COUNT };
 enum Mobility : uint8_t { M_TRACKED = 0, M_WHEELED, M_FOOT };
-enum Side : int8_t { SIDE_PLAYER = 0, SIDE_HOSTILE = 1, SIDE_COUNT = 2 };
+// SIDE_RIVAL only takes the field in the three-way scenario (SC_THREE_WAY): a third force at war
+// with both the company and the hostiles. Every side treats every other side as the enemy.
+enum Side : int8_t { SIDE_PLAYER = 0, SIDE_HOSTILE = 1, SIDE_RIVAL = 2, SIDE_COUNT = 3 };
+// The scenario a game was set up with (saved with it).
+//   SC_CONTRACT  - the contract: Company Murks against the 7th Guards Remnant.
+//   SC_THREE_WAY - 1v1v1: the company, the 7th Guards Remnant and Kessler's Free Corps, each at
+//                  war with the other two. The company wins once both of the others are broken.
+enum ScenarioKind : uint8_t { SC_CONTRACT = 0, SC_THREE_WAY, SC_COUNT };
 // O_DISMOUNT and O_MOUNT only travel as pending orders; they never become a unit's current order.
 enum OrderKind : uint8_t { O_HOLD = 0, O_MOVE, O_RETREAT, O_REGROUP, O_REST, O_DISMOUNT, O_MOUNT, O_REJOIN };
 // How a unit moves (Flashpoint-style move orders).
@@ -232,8 +239,8 @@ struct Unit {
     int64_t convoy_wait_until = -1; // loading / unloading finishes then; or earliest resume after a halt
     int64_t trip_started = -1;      // when the column left the source with this load
 
-    int64_t seen_until[SIDE_COUNT] = {-1, -1};
-    int64_t last_seen[SIDE_COUNT] = {-100000, -100000};
+    int64_t seen_until[SIDE_COUNT] = {-1, -1, -1};
+    int64_t last_seen[SIDE_COUNT] = {-100000, -100000, -100000};
     HexCoord last_seen_pos[SIDE_COUNT];
     int64_t ai_next = 0;
 
@@ -261,7 +268,7 @@ struct Holding {
     HexCoord pos;
     int radius = 1;             // hexes: the place's footprint (units inside count as present)
     uint8_t kind = HK_TOWN;
-    int8_t owner = -1;          // SIDE_PLAYER, SIDE_HOSTILE or -1 independent
+    int8_t owner = -1;          // a Side, or -1 independent
     int8_t known_owner = -1;    // the owner as far as the player knows (fog of war)
     float loyalty = 30;         // 0-100 towards the owner; income and militia scale with it
     int population = 0;
@@ -424,6 +431,7 @@ struct Formation {
     int64_t target_time = -100000; // when that position was true
     int64_t intel_next = 0;        // next intelligence report on the company's whereabouts
     int start_combat = 0;          // combat units at the start, for the victory check
+    bool broken = false;           // hunters: announced as broken (three-way: one down, one to go)
 };
 
 enum Outcome : uint8_t { OUT_ONGOING = 0, OUT_VICTORY, OUT_DEFEAT };
@@ -524,7 +532,7 @@ public:
     GenStats generate(uint32_t seed, int chunks_x, int chunks_y);
     // Loads a baked map (MURKSMAP bytes). Returns false if the data is invalid.
     bool load_map(const uint8_t *data, size_t size);
-    void setup_scenario(int extra_hostile_groups);
+    void setup_scenario(int extra_hostile_groups, int kind = SC_CONTRACT);
 
     // Runs up to `ticks` minutes, stopping early once `budget_ms` is spent or right after a
     // tick that raised a pause-worthy event (so fast-forward never runs past a contact).
@@ -588,7 +596,11 @@ public:
     bool player_in_contact() const;
     Outcome outcome() const { return outcome_; }
     std::string outcome_text() const { return outcome_text_; }
-    int strike_formation() const; // the hunting formation (the scenario's victory target), or -1
+    int strike_formation() const; // the (first) hunting formation (the scenario's victory target), or -1
+    // Every hunting formation: the contract's one, or the three-way's two (hostile, then rival).
+    std::vector<int> hunter_formations() const;
+    // How event texts name a side's units: "hostile", or in the three-way "rival" for SIDE_RIVAL.
+    const char *side_word(int side) const;
     // Effective (alive, strength >= 30%) combat units of a formation; HQ and guns don't count.
     int effective_combat_units(int formation) const;
 
@@ -705,7 +717,8 @@ public:
     // but still fire by their rules of engagement and rearm). All saved with the game.
     enum SandboxKind { SB_TANK = 0, SB_MECH, SB_RIFLE, SB_RECON, SB_BATTERY, SB_HQ, SB_SUPPLY, SB_KIND_COUNT };
     bool sandbox = false;
-    bool hostile_ai = true;
+    bool hostile_ai = true; // also drives the rival side in the three-way
+    uint8_t scenario = SC_CONTRACT; // ScenarioKind
     bool clock_started() const { return clock_started_; }
     // Puts a unit of this kind for this side on the nearest free land hex to `at`. Own units join
     // the company; hostile ones a "Sandbox Hostiles" formation with no objective (they react to

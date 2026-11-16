@@ -3,7 +3,7 @@
 //   passive  never gives orders
 //   active   recon forward at 07:00 day 1 (deliberate, return fire), company road-marches after it
 //            at 09:00, regroup on the HQ at 18:00 daily, rest & resupply at 06:30 from day 2
-// Usage: playtest [map.murkz] [days] [mode] [first_seed] [seeds]
+// Usage: playtest [map.murkz] [days] [mode] [first_seed] [seeds] [contract|three-way]
 #include "murks/sim.hpp"
 
 #include <zlib.h>
@@ -36,6 +36,7 @@ int main(int argc, char **argv) {
     const std::string mode = argc > 3 ? argv[3] : "active";
     const uint32_t first = argc > 4 ? (uint32_t)std::atoi(argv[4]) : 1989;
     const int seeds = argc > 5 ? std::atoi(argv[5]) : 1;
+    const int kind = argc > 6 && std::strcmp(argv[6], "three-way") == 0 ? SC_THREE_WAY : SC_CONTRACT;
     std::vector<uint8_t> raw;
     if (!load_murkz(path, raw)) {
         std::fprintf(stderr, "cannot read %s\n", path);
@@ -46,7 +47,7 @@ int main(int argc, char **argv) {
         World w;
         if (!w.load_map(raw.data(), raw.size())) return 2;
         w.seed = first + si;
-        w.setup_scenario(24);
+        w.setup_scenario(24, kind);
         if (std::getenv("MURKS_NO_CIVILIANS")) w.civilians_on = false; // compare runs without civilians (MRK-34)
         std::vector<int> own;
         for (auto &u : w.units)
@@ -102,6 +103,15 @@ int main(int argc, char **argv) {
                     w.stats().kills, w.stats().losses, contact, w.stock.ammo_t, displaced, deployed, squad_min,
                     squads_max, w.stats().civilians,
                     w.stats().avg_tick_us, w.stats().max_tick_us);
+        if (kind == SC_THREE_WAY) {
+            const std::vector<int> hs = w.hunter_formations();
+            const int rf = hs.size() > 1 ? hs[1] : -1;
+            int hostile_dead = 0;
+            for (const auto &u : w.units)
+                if (!u.alive && !u.embarked && !u.removed && u.formation == sf) ++hostile_dead;
+            std::printf("    three-way: FK fighting %d/%d, 7G units gone %d\n", rf >= 0 ? w.effective_combat_units(rf) : -1,
+                        rf >= 0 ? w.formations[rf].start_combat : -1, hostile_dead);
+        }
         std::fflush(stdout);
     }
     std::printf("%s over %d seeds: %d victories, %d defeats, %d undecided after %d days\n", mode.c_str(), seeds, wins,

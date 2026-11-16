@@ -97,6 +97,7 @@ var sbx_ai: CheckBox
 var sbx_reveal: CheckBox
 var title_new_game: Button
 var title_campaign: Button
+var title_three_way: Button
 var title_sandbox: Button
 var oob_tree: Tree
 var oob_foot: Label
@@ -873,7 +874,7 @@ func show_holding(hd: Dictionary, routes: Array, own_holdings: Array) -> void:
 	var own: bool = hd.get("own", false)
 	var t := "[b]%s[/b]   %s\n" % [hd["name"], hd["kind_name"]]
 	t += "[color=#b8c0a8]%s · %s people[/color]\n" % [hd["location"], _thousands(int(hd["population"]))]
-	var oc := "#9fc8ff" if own else ("#ff8c7a" if int(hd["owner"]) == 1 else "#c8c8c0")
+	var oc := "#9fc8ff" if own else ("#ff8c7a" if int(hd["owner"]) == 1 else ("#a8e090" if int(hd["owner"]) == 2 else "#c8c8c0"))
 	t += "Held by [color=%s]%s[/color]" % [oc, hd["owner_name"]]
 	if hd.get("fighting", false):
 		t += "   [color=#ff6b4a]fighting in the place[/color]"
@@ -2121,6 +2122,9 @@ func _build_title_screen() -> void:
 	title_sandbox = _menu_button("Sandbox", "sandbox",
 		"The map and the contract scenario with tools on top: place and delete units for either side,\nset the start time, switch the hostile AI off. No victory or defeat.")
 	buttons.add_child(title_sandbox)
+	title_three_way = _menu_button("Three-way (1v1v1)", "three_way",
+		"Company Murks, the 7th Guards Remnant and Kessler's Free Corps on one map, each at war with\nthe other two. You win once both of them are broken, by your hand or each other's.")
+	buttons.add_child(title_three_way)
 	title_continue = _menu_button("Continue from quick save", "continue", "Load the quick save (F5 saves during play).")
 	buttons.add_child(title_continue)
 	buttons.add_child(_menu_button("Controls", "help"))
@@ -2691,12 +2695,20 @@ func set_objectives(obj: Dictionary) -> void:
 			int(obj.get("kills", 0)), int(obj.get("losses", 0))]
 		return
 	var t := ""
+	var three: bool = obj.get("three_way", false)
 	match int(obj.get("outcome", 0)):
 		1: t += "[color=#7fe07f][b]Victory.[/b][/color]  "
 		2: t += "[color=#ff6050][b]Defeat.[/b][/color]  "
-		_: t += "[b]Contract:[/b] "
-	t += "break the %s: [color=%s]%d of %d[/color] fighting units left\n" % [obj.get("enemy_name", "enemy"),
-		"#7fe07f" if ee == 0 else "#ffc040", ee, es]
+		_: t += "[b]Three-way:[/b] " if three else "[b]Contract:[/b] "
+	if three:
+		var rs := int(obj.get("rival_start", 0))
+		var re := int(obj.get("rival_effective", 0))
+		t += "break the [color=#ff9a80]%s[/color] [color=%s]%d/%d[/color] and [color=#a8e090]%s[/color] [color=%s]%d/%d[/color]\n" % [
+			obj.get("enemy_name", "enemy"), "#7fe07f" if ee == 0 else "#ffc040", ee, es,
+			obj.get("rival_name", "rival"), "#7fe07f" if re == 0 else "#ffc040", re, rs]
+	else:
+		t += "break the %s: [color=%s]%d of %d[/color] fighting units left\n" % [obj.get("enemy_name", "enemy"),
+			"#7fe07f" if ee == 0 else "#ffc040", ee, es]
 	t += "Keep 3+ units fighting [color=%s](%d of %d)[/color]   ·   HQ [color=%s]%s[/color]   ·   kills %d, lost %d" % [
 		"#7fe07f" if oe >= 3 else "#ff6050", oe, os, "#7fe07f" if hq_ok else "#ff6050",
 		hq_text, int(obj.get("kills", 0)), int(obj.get("losses", 0))]
@@ -2738,7 +2750,8 @@ func _build_end_screen() -> void:
 
 func show_end_screen(obj: Dictionary, has_save: bool) -> void:
 	var victory := int(obj["outcome"]) == 1
-	end_title.text = "Contract fulfilled" if victory else "Company Murks is finished"
+	var three: bool = obj.get("three_way", false)
+	end_title.text = ("Last one standing" if three else "Contract fulfilled") if victory else "Company Murks is finished"
 	end_title.add_theme_color_override("font_color", Color(0.6, 1.0, 0.6) if victory else Color(1.0, 0.5, 0.4))
 	var mins := int(obj.get("time_minutes", 0)) - 6 * 60
 	var t := "%s\n\n" % obj.get("outcome_text", "")
@@ -2750,6 +2763,9 @@ func show_end_screen(obj: Dictionary, has_save: bool) -> void:
 		int(obj.get("own_effective", 0)), int(obj.get("own_start", 0))]
 	t += "%s: %d of %d units still fighting" % [obj.get("enemy_name", ""), int(obj.get("enemy_effective", 0)),
 		int(obj.get("enemy_start", 0))]
+	if three:
+		t += "\n%s: %d of %d units still fighting" % [obj.get("rival_name", ""), int(obj.get("rival_effective", 0)),
+			int(obj.get("rival_start", 0))]
 	end_text.text = t
 	end_load_button.disabled = not has_save
 	end_panel.visible = true

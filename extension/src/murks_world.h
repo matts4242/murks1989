@@ -85,7 +85,9 @@ public:
     Dictionary load_map_bytes(const PackedByteArray &bytes);
     Dictionary get_map_info() const;
     Vector2 world_to_lonlat(Vector2 pos) const; // (lon, lat) in degrees; (NAN, NAN) if not georeferenced
-    void setup_scenario(int hostile_groups);
+    // kind: murks::ScenarioKind (0 the contract, 1 the three-way).
+    void setup_scenario(int hostile_groups, int kind = 0);
+    int get_scenario() const;
 
     Vector2i get_map_size() const;
     Vector2i get_chunk_count() const;

@@ -180,7 +180,8 @@ func _draw_towns(xf: Transform2D, zoom: float, view: Rect2) -> void:
 # shaken, hatching when broken or falling back), an under-fire bar along the top, and a
 # signal-yellow selection ring. Last-seen markers are faded with a dashed outline and "?".
 
-const SIDE_COL := [Color("#2c5ea8"), Color("#b0342b")]
+# Company blue, hostile red, and (three-way only) the rival Free Corps in purple (civilians keep APP-6 neutral green).
+const SIDE_COL := [Color("#2c5ea8"), Color("#b0342b"), Color("#6e3f96")]
 const BOX_PAPER := Color("#f4f2ea")
 const SYMBOL_INK := Color("#141712")
 const SIGNAL := Color("#d39a17")
@@ -188,7 +189,7 @@ const MIN_COUNTER := 10.0
 const THEATER_COUNTER := 22.0
 const COMPANY_COUNTER := 28.0
 const ECHELONS := ["coy", "plt", "plt", "plt", "sec", "btty", "col"] # by unit type (col: a supply column)
-const HOLDING_COL := [Color("#2c5ea8"), Color("#b0342b"), Color("#7a7f74")] # owner: company, hostile, independent
+const HOLDING_COL := [Color("#2c5ea8"), Color("#b0342b"), Color("#7a7f74"), Color("#6e3f96")] # company, hostile, independent, rival
 const HOLDING_GLYPH := ["T", "F", "D", "A"]  # town, farm collective, fuel depot, ammo dump
 const SF_MILITIA := 35              # own or seen units: 1 for a town's militia
 const SF_CONVOY := 36               # own supply columns: convoy state, else -1
@@ -355,7 +356,7 @@ func _draw_counter(c: Vector2, s: float, it: Dictionary) -> void:
 	var rad := maxf(1.5, s * 0.11)
 	var ghost: bool = it["ghost"]
 	var side: int = it["side"]
-	var fill: Color = SIDE_COL[clampi(side, 0, 1)]
+	var fill: Color = SIDE_COL[clampi(side, 0, 2)]
 	var shape := _rrect(c, s, rad)
 	if ghost:
 		fill.a = 0.5
@@ -378,7 +379,7 @@ func _draw_counter(c: Vector2, s: float, it: Dictionary) -> void:
 		draw_rect(box, Color(0.85, 0.78, 0.55, 0.45 if ghost else 0.7))
 		draw_rect(box, ink, false, lw)
 	if show_vehicles and String(it.get("veh", "")) != "":
-		_draw_vehicle(box, String(it["veh"]), ink, paper, side == 1, int(it["type"]) == 0)
+		_draw_vehicle(box, String(it["veh"]), ink, paper, side != 0, int(it["type"]) == 0)
 	else:
 		_draw_symbol(box, int(it["type"]), ink, lw)
 	if it.get("militia", false) and s >= 22.0:
@@ -928,7 +929,7 @@ func _draw_holdings(xf: Transform2D, zoom: float, view: Rect2) -> void:
 		# Independent places only show up once the hexes are big enough to matter.
 		if owner < 0 and px < 4.0 and int(hd["id"]) != main.selected_holding:
 			continue
-		var col: Color = HOLDING_COL[2 if owner < 0 else clampi(owner, 0, 1)]
+		var col: Color = HOLDING_COL[2 if owner < 0 else (3 if owner == 2 else clampi(owner, 0, 1))]
 		var base := p + Vector2(px * 0.55, -px * 0.2)
 		var top := base + Vector2(0, -s * 1.35)
 		var sel: bool = int(hd["id"]) == main.selected_holding
@@ -1029,7 +1030,8 @@ func _draw_grouped(xf: Transform2D, view: Rect2) -> void:
 		var flags := int(snap[o + 7])
 		var ghost := (flags & 2) != 0
 		var team := int(snap[o + 20])
-		var key := "g" if ghost else ("h" if side != 0 else ("t%d" % team if team >= 0 else "f%d" % int(snap[o + 10])))
+		# Spotted hostiles group by proximity only; hostiles and rivals never share a counter.
+		var key := ("g%d" % side) if ghost else ("h%d" % side if side != 0 else ("t%d" % team if team >= 0 else "f%d" % int(snap[o + 10])))
 		var list: Array = by_key.get(key, [])
 		var cl: Dictionary = {}
 		for c in list:
@@ -1169,7 +1171,7 @@ func _draw_company(c: Vector2, it: Dictionary, count: int, label: String) -> voi
 	var s := COMPANY_COUNTER
 	var side: int = it["side"]
 	var ghost: bool = it["ghost"]
-	var back: Color = (SIDE_COL[clampi(side, 0, 1)] as Color).darkened(0.25)
+	var back: Color = (SIDE_COL[clampi(side, 0, 2)] as Color).darkened(0.25)
 	if ghost:
 		back.a = 0.4
 	for k in [2, 1]:
@@ -1183,7 +1185,7 @@ func _draw_company(c: Vector2, it: Dictionary, count: int, label: String) -> voi
 	_text_center(badge, str(count), 11, Color.WHITE)
 	var lp := Vector2(c.x - s * 0.5 - 6, c.y + s * 0.5 + 16)
 	draw_string_outline(font, lp, label, HORIZONTAL_ALIGNMENT_LEFT, -1, 12, 4, Color(0, 0, 0, 0.8))
-	draw_string(font, lp, label, HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color(0.92, 0.96, 1.0) if side == 0 else Color(1.0, 0.82, 0.78))
+	draw_string(font, lp, label, HORIZONTAL_ALIGNMENT_LEFT, -1, 12, [Color(0.92, 0.96, 1.0), Color(1.0, 0.82, 0.78), Color(0.84, 1.0, 0.8)][clampi(side, 0, 2)])
 
 
 # --- Orders, routes and command links -------------------------------------------------
@@ -1629,7 +1631,7 @@ func _draw_fx(xf: Transform2D) -> void:
 			"shot":
 				var t := minf(1.0, age / 260.0)
 				var alpha := maxf(0.0, 1.0 - age / 800.0)
-				var tc := Color("#9cc4ff") if int(f["side"]) == 0 else Color("#ffb19c")
+				var tc: Color = [Color("#9cc4ff"), Color("#ffb19c"), Color("#b4e8a0")][clampi(int(f["side"]), 0, 2)]
 				tc.a = alpha
 				draw_line(a, a.lerp(b, t), tc, maxf(1.2, k * 0.06))
 				var head := Color("#fff6c8")
