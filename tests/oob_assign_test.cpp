@@ -1,4 +1,4 @@
-// Headless check of MRK-35: moving units in the order of battle. A unit put under a second HQ
+// Headless check of MRK-36: moving units in the order of battle. A unit put under a second HQ
 // takes its orders through that HQ (command delay from it); a team leader brings its team; a
 // unit dropped on a platoon joins (or forms) its team; back under the company HQ; no loops in
 // the chain; a lost HQ hands its units back to the company HQ; the order of battle order picks

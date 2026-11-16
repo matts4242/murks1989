@@ -1676,7 +1676,7 @@ int World::hq_above(const Unit &u) const {
         int l = groups[u.group].leader;
         if (l >= 0 && units[l].alive) return l;
     }
-    // Put under another HQ in the order of battle (MRK-35); if that HQ is lost, back to the company's.
+    // Put under another HQ in the order of battle (MRK-36); if that HQ is lost, back to the company's.
     if (u.attached_hq >= 0 && u.attached_hq < (int)units.size() && u.attached_hq != u.id) {
         const Unit &h = units[u.attached_hq];
         if (h.alive && h.type == U_HQ && h.side == u.side) return h.id;
@@ -4110,7 +4110,7 @@ bool World::set_start_time(int day, int hour) {
 // ------------------------------------------------------------------------------------
 
 namespace {
-constexpr char kSaveMagic[8] = {'M', 'U', 'R', 'K', 'S', 'S', 'V', 'D'}; // v13: units' HQ links (MRK-35); v12: civilians, scenario kind
+constexpr char kSaveMagic[8] = {'M', 'U', 'R', 'K', 'S', 'S', 'V', 'D'}; // v13: units' HQ links (MRK-36); v12: civilians, scenario kind
 
 struct SaveWriter {
     std::vector<uint8_t> b;
@@ -4219,7 +4219,7 @@ template <typename A, typename U> void io_unit(A &a, U &u) {
     a.pod(u.cargo_l); a.pod(u.cargo_t); a.pod(u.cargo_kg); a.pod(u.convoy_wait_until); a.pod(u.trip_started);
     // v10: sandbox.
     a.pod(u.removed);
-    // v13: put under another HQ in the order of battle (MRK-35).
+    // v13: put under another HQ in the order of battle (MRK-36).
     a.pod(u.attached_hq);
 }
 

@@ -19,7 +19,7 @@ signal menu_action(name: String)    # game level: start, continue, new_game, tit
 signal event_clicked(pos: Vector2)
 signal end_choice(choice: String)    # end screen: continue / load / restart / quit
 signal oob_pick(id: int, how: String) # order of battle row: "select", "add", "command" (double-click), "company"
-## Order of battle: move units in the chain of command (MRK-35). how: "hq" (under the HQ `target`),
+## Order of battle: move units in the chain of command (MRK-36). how: "hq" (under the HQ `target`),
 ## "team" (into target's team), "company" (back under the company HQ) or "" (order only); then,
 ## with ref >= 0, put them just before (or after) ref in the order of battle.
 signal oob_drop(ids: Array, target: int, how: String, ref: int, after: bool)
@@ -1430,7 +1430,7 @@ func _build_oob_panel() -> void:
 	oob_tree.add_theme_font_size_override("font_size", 13)
 	oob_tree.allow_rmb_select = true
 	oob_tree.item_mouse_selected.connect(_on_oob_click)
-	# Drag rows to move units in the chain of command or in the list (MRK-35).
+	# Drag rows to move units in the chain of command or in the list (MRK-36).
 	oob_tree.set_drag_forwarding(_oob_get_drag, _oob_can_drop, _oob_drop)
 	oob_tree.gui_input.connect(func(ev: InputEvent) -> void:
 		if ev is InputEventMouseButton and not ev.pressed and ev.button_index == MOUSE_BUTTON_LEFT:
@@ -1482,7 +1482,7 @@ func _on_oob_click(pos: Vector2, button: int) -> void:
 			oob_pick.emit(int(md["id"]), "company")
 
 
-# --- Moving units in the order of battle (MRK-35) ---
+# --- Moving units in the order of battle (MRK-36) ---
 
 func _oob_row_movable(r: Dictionary) -> bool:
 	return not r.is_empty() and r["alive"] and not r["embarked"] and not r["militia"]

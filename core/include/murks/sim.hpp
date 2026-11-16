@@ -195,7 +195,7 @@ struct Unit {
     uint8_t standoff = STANDOFF_DEFAULT; // see STANDOFF_*
     int64_t standoff_next = 0;   // next stand-off check (every few minutes)
     int group = -1;              // team (Group index), -1 none
-    int attached_hq = -1;        // HQ it was put under in the order of battle (MRK-35); -1: the company HQ
+    int attached_hq = -1;        // HQ it was put under in the order of battle (MRK-36); -1: the company HQ
     bool follow = false;         // team member keeping formation on its leader
     bool formation_wait = false; // this tick: hold position so the formation stays together
     float strength = 100, morale = 80, fuel = 100, ammo = 100, readiness = 100;
@@ -586,7 +586,7 @@ public:
     int order_group_route(int gid, const std::vector<Waypoint> &route, bool *adjust = nullptr); // leader's route, team follows
     void detach(int unit_id); // a member given its own order leaves the formation until the next team order
     int hq_above(const Unit &u) const;      // the HQ or team leader this unit takes orders from, -1 none
-    // Order of battle (MRK-35). oob_assign moves units in the chain of command at once and
+    // Order of battle (MRK-36). oob_assign moves units in the chain of command at once and
     // returns how many changed (0 and a reason in *why when refused):
     //   OA_HQ: under the HQ `target` for command (a team leader brings its team; a team member
     //          leaves its team); OA_TEAM: into the team of `target` (a team is formed with it as

@@ -2011,7 +2011,7 @@ func _collect_under(id: int, out: Dictionary) -> void:
 			_collect_under(int(c), out)
 
 
-## Units moved in the order of battle panel (MRK-35): under an HQ, into a team, back under the
+## Units moved in the order of battle panel (MRK-36): under an HQ, into a team, back under the
 ## company HQ, and/or to a place in the list. Takes effect at once, like forming a team.
 func _on_oob_drop(ids: Array, target: int, how: String, ref: int, after: bool) -> void:
 	if ids.is_empty():
@@ -2797,7 +2797,7 @@ func _run_uitest() -> void:
 	_push_key(KEY_DELETE)
 	await _frames(2)
 	check.call(not bool(world.get_unit_info(placed).get("alive", true)) and world.get_oob().size() == n_units, "Del takes the selected unit off the map")
-	# Order of battle moves (MRK-35): a second HQ is placed; 2nd Tank dragged onto it in the panel
+	# Order of battle moves (MRK-36): a second HQ is placed; 2nd Tank dragged onto it in the panel
 	# (real mouse drag), back under the company HQ from the right-click menu, dropped on 1st Tank
 	# to form a team, the team leader put under the second HQ with its team, 2nd Mech dropped
 	# between rows (before 1st Tank, under the second HQ). Put back afterwards.
@@ -3375,7 +3375,7 @@ func _run_autotest() -> void:
 	overlay.show_vehicles = false
 	await _shot("48_civilians_nato", world.hex_to_world(sh + Vector2i(5, 2)), 0.5)
 	overlay.show_vehicles = true
-	# Order of battle moves (MRK-35): a second HQ with 1st Tank's new team and 3rd Mech under it,
+	# Order of battle moves (MRK-36): a second HQ with 1st Tank's new team and 3rd Mech under it,
 	# the second HQ selected (everything under it marked), the move menu open on 2nd Mech.
 	var hq2 := int(world.sandbox_place(0, 5, sh + Vector2i(-6, 3)))
 	if hq2 > 0:

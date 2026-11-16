@@ -1258,7 +1258,7 @@ Array MurksWorld::get_oob() const {
     return out;
 }
 
-// Order of battle panel (MRK-35): move units in the chain of command. how: 0 under the HQ
+// Order of battle panel (MRK-36): move units in the chain of command. how: 0 under the HQ
 // `target`, 1 into target's team, 2 back under the company HQ. Returns {changed, why}.
 Dictionary MurksWorld::oob_assign(const PackedInt32Array &ids, int target, int how) {
     std::vector<int> v;

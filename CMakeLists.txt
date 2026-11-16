@@ -56,7 +56,7 @@ target_link_libraries(suppression_test PRIVATE murks_core)
 # Team members on their own orders: detach on arrival, Rejoin team (MRK-22). build/team_detach_test
 add_executable(team_detach_test tests/team_detach_test.cpp)
 target_link_libraries(team_detach_test PRIVATE murks_core)
-# Moving units in the order of battle: under another HQ, into a team, back to the company (MRK-35). build/oob_assign_test
+# Moving units in the order of battle: under another HQ, into a team, back to the company (MRK-36). build/oob_assign_test
 add_executable(oob_assign_test tests/oob_assign_test.cpp)
 target_link_libraries(oob_assign_test PRIVATE murks_core)
 
