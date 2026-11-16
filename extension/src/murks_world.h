@@ -69,6 +69,8 @@ public:
         SF_MILITIA,    // own or seen units: 1 for a town's militia (garrison, takes no orders), else 0
         SF_CONVOY,     // own supply columns: ConvoyState (0 with the trains .. 5 returning), else -1
         SF_CARGO_T,    // own supply columns: tonnes aboard, else -1
+        // Counter tags (MRK-35): only what differs from the company's standing orders is tagged.
+        SF_STANDOFF_SET, // own units: the unit's own stand-off setting (255 = company default), else -1
         UNIT_STRIDE
     };
     enum SnapshotFlag {

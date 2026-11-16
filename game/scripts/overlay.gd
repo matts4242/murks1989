@@ -194,6 +194,7 @@ const HOLDING_GLYPH := ["T", "F", "D", "A"]  # town, farm collective, fuel depot
 const SF_MILITIA := 35              # own or seen units: 1 for a town's militia
 const SF_CONVOY := 36               # own supply columns: convoy state, else -1
 const SF_CARGO_T := 37              # own supply columns: tonnes aboard, else -1
+const SF_STANDOFF_SET := 38         # own units: own stand-off setting (255 = company default), else -1
 const CONVOY_COL := [Color("#9fb7a0"), Color("#8bd450"), Color("#f4f2ea"), Color("#5ab0ff"), Color("#f4f2ea"), Color("#c8c8c8")]
 const TEAM_COLORS := [Color("#f2c14e"), Color("#39c0b0"), Color("#c77dff"), Color("#8bd450"),
 	Color("#ff8c42"), Color("#5ab0ff"), Color("#ff6f91"), Color("#d9d9d9")]
@@ -247,7 +248,7 @@ func _row_item(o: int, i: int) -> Dictionary:
 		"under": main.oob_under.has(id),
 		"echelon": ECHELONS[clampi(int(snap[o + 2]), 0, 6)], "row": i,
 		"engage": snap[o + 17], "elem": int(snap[o + 18]), "elem_max": int(snap[o + 19]),
-		"team": int(snap[o + 20]), "role": int(snap[o + 21]), "tcol": int(snap[o + 22]), "standoff": int(snap[o + 24]),
+		"team": int(snap[o + 20]), "role": int(snap[o + 21]), "tcol": int(snap[o + 22]), "standoff": int(snap[o + 24]), "so_set": int(snap[o + SF_STANDOFF_SET]) if main.stride > SF_STANDOFF_SET else -1,
 		"carry": int(snap[o + SF_CARRY]), "supp": snap[o + SF_SUPP],
 		"militia": snap[o + SF_MILITIA] > 0.5, "convoy": int(snap[o + SF_CONVOY]), "cargo": snap[o + SF_CARGO_T]}
 	item["veh"] = vehicle_of(id, int(snap[o + 2]))
@@ -484,8 +485,13 @@ func _draw_counter(c: Vector2, s: float, it: Dictionary) -> void:
 		var tr := Rect2(Vector2(c.x - tw * 0.5 - 4, c.y - h - 17), Vector2(tw + 8, 14))
 		draw_rect(tr, SIGNAL)
 		draw_string(font, Vector2(tr.position.x + 4, tr.end.y - 3), t, HORIZONTAL_ALIGNMENT_LEFT, -1, fs, Color("#221800"))
+	# Standing-order tags (MRK-35): only what differs from the company's standing orders
+	# (fire at will, the company default stand-off), and everything for a selection of a few units.
 	var roe: int = it["roe"]
 	var so: int = it.get("standoff", -1)
+	var sel_tag: bool = it.get("sel", false) and main.selected.size() <= 4 # a whole company selected stays uncluttered
+	if not sel_tag and int(it.get("so_set", -1)) == 255:
+		so = 0
 	if (roe > 0 or so > 0) and not ghost:
 		var tag := ""
 		if roe > 0:

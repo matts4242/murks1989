@@ -764,6 +764,7 @@ PackedFloat32Array MurksWorld::get_units_snapshot() const {
         q[SF_ROLE] = !grouped ? -1.0f : world_.groups[u.group].leader == u.id ? 2.0f : (u.follow ? 1.0f : 0.0f);
         q[SF_GROUP_COLOR] = grouped ? (float)world_.groups[u.group].color : -1.0f;
         q[SF_STANDOFF] = own ? (float)world_.standoff_hexes(u) : -1.0f;
+        q[SF_STANDOFF_SET] = own ? (float)u.standoff : -1.0f;
         q[SF_CMD_ZONE] = own && (u.type == murks::U_HQ || (grouped && world_.groups[u.group].leader == u.id))
                              ? (float)world_.command_zone(u) : 0.0f;
         q[SF_CMD_BOSS] = -1.0f;

@@ -199,7 +199,7 @@ func _start_world() -> void:
 	hud.set_toggle("Civilians", show_civilians)
 	hud.set_toggle("Topo", map_view.show_topo)
 	hud.set_toggle("KmGrid", tools.show_km_grid)
-	_show_plan_panel()   # fills the View > Planning map list
+	_show_plan_panel()   # fills the Tools > Planning map list
 	hud.set_toggle("Auto-pause", auto_pause)
 	hud.set_toggle("Group", group_companies)
 	hud.set_oob_visible(show_oob)
@@ -624,7 +624,7 @@ func _poll_events() -> void:
 				pause_reason = e["text"]
 				if is_contact:
 					last_contact_pause = int(e["time"])
-	while event_log.size() > 9:
+	while event_log.size() > 60:
 		event_log.pop_back()
 	hud.set_events(event_log)
 	if pings.size() > 40:
@@ -754,14 +754,14 @@ func _on_key(key: Key) -> void:
 		KEY_I: _on_toggle("Fire support")
 		KEY_J:
 			_on_command("team_disband" if Input.is_key_pressed(KEY_SHIFT) else "team_form")
-		KEY_L: _on_command("team_select")
+		KEY_L:
+			_on_command("rejoin" if Input.is_key_pressed(KEY_SHIFT) else "team_select")
 		KEY_F: _on_command("mode_0")
 		KEY_Q: _on_command("mode_1")
 		KEY_E: _on_command("mode_2")
 		KEY_R: _on_command("mode_3")
 		KEY_B: _on_command("fall_back")
 		KEY_Y: _on_command("regroup")
-		KEY_U: _on_command("rejoin")
 		KEY_N: _on_command("rest")
 		KEY_COMMA: _on_command("mount_toggle")
 		KEY_X: _cycle_roe()
@@ -2447,7 +2447,7 @@ func _run_uitest() -> void:
 	camera.zoom = zoom_was
 	await _frames(2)
 
-	# Planning map (MRK-25): modes from the View menu, F10 and the panel; each tints the
+	# Planning map (MRK-25): modes from the Tools menu, F10 and the panel; each tints the
 	# ground; the status bar gives the mode's figure; Look from here sets the line-of-sight
 	# point and a higher eye sees at least as much.
 	var cam_keep := camera.position
@@ -2457,11 +2457,12 @@ func _run_uitest() -> void:
 		await get_tree().process_frame
 	await RenderingServer.frame_post_draw
 	var no_plan := get_viewport().get_texture().get_image()
-	view.show_popup()
+	var tools_menu := hud.menu_buttons["Tools"] as MenuButton
+	tools_menu.show_popup()
 	await _frames(2)
-	var plan_menu := _submenu_of(view.get_popup(), "Planning map")
-	check.call(plan_menu != null and _menu_pick(plan_menu, "Going: tracked"), "View > Planning map > Going: tracked")
-	view.get_popup().hide()
+	var plan_menu := _submenu_of(tools_menu.get_popup(), "Planning map")
+	check.call(plan_menu != null and _menu_pick(plan_menu, "Going: tracked"), "Tools > Planning map > Going: tracked")
+	tools_menu.get_popup().hide()
 	await _frames(3)
 	var ptm: ShaderMaterial = map_view.terrain_mat
 	check.call(plan_mode == 1 and int(ptm.get_shader_parameter("plan_mode")) == 1 and hud.plan_panel.visible,
@@ -2845,6 +2846,59 @@ func _run_uitest() -> void:
 			if int(snapshot[i * stride + 2]) == 3 and String(di.get("equipment", "")).contains("(BMP-1)"):
 				dismount_ok = overlay.vehicle_of(uid, 3) == "" and overlay.vehicle_of(3, 2) == "ifv"
 	check.call(dismount_ok, "dismounted squads show the NATO symbol while their BMPs keep the vehicle (units %d -> %d)" % [units_before, snapshot.size() / stride])
+	# UI cleanup (MRK-35): docked panels that don't overlap, a short order menu with the rest
+	# in submenus, folded sections with summaries, filtered reports.
+	_select_company_of(0)
+	if not hud.oob_panel.visible:
+		_on_toggle("OOB")
+	await _frames(4)
+	var r_unit := hud.unit_panel.get_global_rect()
+	var r_oob := hud.oob_panel.get_global_rect()
+	var r_log := hud.log_panel.get_global_rect()
+	var r_obj := hud.objective_panel.get_global_rect()
+	var screen := Rect2(Vector2.ZERO, get_viewport_rect().size)
+	check.call(hud.unit_panel.visible and screen.encloses(r_unit) and screen.encloses(r_oob) and screen.encloses(r_log),
+		"docks: unit panel, order of battle and reports lie inside the screen")
+	check.call(not r_unit.intersects(r_oob) and not r_unit.intersects(r_log) and not r_oob.intersects(r_log)
+		and not r_obj.intersects(r_unit) and not r_obj.intersects(r_oob),
+		"docks: no two of contract line, order of battle, unit panel and reports overlap")
+	_push_click(MOUSE_BUTTON_RIGHT, vs * Vector2(0.45, 0.5))
+	await _frames(3)
+	var top_items := 0
+	for i in hud.order_popup.item_count:
+		if not hud.order_popup.is_item_separator(i):
+			top_items += 1
+	check.call(hud.order_popup.visible and top_items <= 14 and _submenu_of(hud.order_popup, "More orders") != null
+		and _submenu_of(hud.order_popup, "Standing orders") != null and _submenu_of(hud.order_popup, "Map here") != null,
+		"right-click menu is short (%d items) with More orders, Standing orders and Map here" % top_items)
+	var more_sub := _submenu_of(hud.order_popup, "More orders")
+	check.call(more_sub != null and _menu_pick(more_sub, "Regroup on the HQ"), "More orders > Regroup on the HQ")
+	hud.order_popup.hide()
+	check.call(not hud.standing_body.visible and hud.standing_toggle.text.contains("S/O"),
+		"standing orders fold to a summary: %s" % hud.standing_toggle.text)
+	hud.standing_toggle.pressed.emit()
+	await _frames(2)
+	check.call(hud.standing_body.visible and hud.roe_opt.is_visible_in_tree(), "unfolding shows the standing-order dropdowns")
+	hud.standing_toggle.pressed.emit()
+	var r_unit2 := hud.unit_panel.get_global_rect()
+	check.call(screen.encloses(r_unit2), "the unit panel stays on screen with every section unfolded and folded again")
+	hud.log_filter_buttons[1].pressed.emit()
+	await _frames(2)
+	var only_combat := true
+	for b in hud.log_box.get_children():
+		if b is Button:
+			var c: Color = (b as Button).get_theme_color("font_color")
+			only_combat = only_combat and (c.r > 0.95 and c.g < 0.9)
+	check.call(only_combat, "the Combat filter lists only contacts, fire, losses and withdrawals")
+	hud.log_filter_buttons[0].pressed.emit()
+	var help := hud.menu_buttons["Help"] as MenuButton
+	help.show_popup()
+	await _frames(2)
+	var zones_was := show_zones
+	check.call(_menu_pick(help.get_popup(), "Simulation fidelity zones") and show_zones != zones_was, "Help > Debug > Simulation fidelity zones")
+	help.get_popup().hide()
+	if show_zones != zones_was:
+		_on_toggle("Zones")
 	print("UITEST done: %d passed, %d failed" % [res[0], res[1]])
 	get_tree().quit(1 if res[1] > 0 else 0)
 
@@ -2908,10 +2962,16 @@ func _push_click(button: MouseButton, pos: Vector2) -> void:
 
 
 ## Picks the menu item labelled `text` as a click would; false if there is none or it is disabled.
+## Picks the item with this text in a menu or any of its submenus (MRK-35 moved many items
+## into submenus; the checks name the item, not the path to it).
 func _menu_pick(pm: PopupMenu, text: String) -> bool:
 	for i in pm.item_count:
 		if pm.get_item_text(i) == text and not pm.is_item_disabled(i):
 			pm.id_pressed.emit(pm.get_item_id(i))
+			return true
+	for i in pm.item_count:
+		var sub := pm.get_item_submenu_node(i)
+		if sub != null and _menu_pick(sub, text):
 			return true
 	return false
 
@@ -2920,6 +2980,12 @@ func _submenu_of(pm: PopupMenu, prefix: String) -> PopupMenu:
 	for i in pm.item_count:
 		if pm.get_item_text(i).begins_with(prefix) and pm.get_item_submenu_node(i) != null:
 			return pm.get_item_submenu_node(i)
+	for i in pm.item_count:
+		var sub := pm.get_item_submenu_node(i)
+		if sub != null:
+			var found := _submenu_of(sub, prefix)
+			if found != null:
+				return found
 	return null
 
 

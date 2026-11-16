@@ -47,17 +47,19 @@ const SHAPES := [["Keep", "Hold the team's present layout around its leader."],
 	["Line", "Abreast of the leader, across the line of march."],
 	["Wedge", "A V behind the leader: the leader at the point."]]
 # Overlay toggles in the View and Time menus: [toggle name, menu label, key].
-const VIEW_TOGGLES := [["Group", "Company grouping on the theater map", KEY_O],
-	["Direct command", "Direct command: who takes orders from whom", KEY_T],
-	["Fire support", "Fire support net and gun ranges", KEY_I],
-	["Supply", "Supply routes and convoys", KEY_F3],
-	["Grid", "Hex grid", KEY_G], ["KmGrid", "1 km map grid and grid references", KEY_G | KEY_MASK_SHIFT],
-	["Detail", "Painted terrain textures (off: flat colours)", KEY_F6],
-	["Edges", "Natural terrain edges (off: crisp hex borders)", 0],
-	["Vehicles", "Vehicles on counters (off: NATO symbols)", KEY_F7],
-	["Civilians", "Civilian traffic and services", KEY_F12],
-	["Topo", "Topographic map: contour lines and heights", KEY_F8], ["Sight", "Line of sight of the selected unit", KEY_V],
-	["Zones", "Simulation fidelity zones", KEY_Z]]
+# View menu (MRK-35): [submenu, [toggle, label, key], ...]. Simulation fidelity zones are in Help > Debug.
+const VIEW_GROUPS := [
+	["Map", [["Grid", "Hex grid", KEY_G], ["KmGrid", "1 km map grid and grid references", KEY_G | KEY_MASK_SHIFT],
+		["Topo", "Topographic map: contour lines and heights", KEY_F8],
+		["Detail", "Painted terrain textures (off: flat colours)", KEY_F6],
+		["Edges", "Natural terrain edges (off: crisp hex borders)", 0]]],
+	["Units", [["Group", "Company grouping on the theater map", KEY_O],
+		["Vehicles", "Vehicles on counters (off: NATO symbols)", KEY_F7],
+		["Civilians", "Civilian traffic and services", KEY_F12]]],
+	["Command overlays", [["Direct command", "Direct command: who takes orders from whom", KEY_T],
+		["Fire support", "Fire support net and gun ranges", KEY_I],
+		["Supply", "Supply routes and convoys", KEY_F3],
+		["Sight", "Line of sight of the selected unit", KEY_V]]]]
 const LEVY_TIPS := ["0.1 kg a head from the town's larders (a farm collective gives 0.5). Loyalty -10.",
 	"0.5 L a head from garages and stations. Loyalty -10.",
 	"2 DM a head in taxes taken at once. Loyalty -15.",
@@ -128,13 +130,39 @@ var ask_edit: LineEdit
 var ask_cb: Callable
 var ask_has_text := false
 var speed_index := 0
+var top_bar: PanelContainer
+var objective_panel: PanelContainer
+var status_panel: PanelContainer
+var log_panel: PanelContainer
+var log_fold: Button
+var log_filter_buttons: Array[Button] = []
+var log_filter := 0                 # index into LOG_FILTERS
+var log_open := false               # folded: the latest 3 reports; open: 10
+var log_events: Array = []
+var show_perf := false              # Help > Debug: frame and simulation timings in the top bar
+# Docked layout (MRK-35): order of battle left, the selection right with the tool panels
+# (sandbox, planning key, ruler) stacked under it, reports along the bottom.
+const DOCK_PAD := 8.0
+const RIGHT_W := 384.0
+const LEFT_W := 300.0
+const LOG_FILTERS := [["All", []], ["Combat", ["contact", "under_fire", "destroyed", "retreat"]],
+	["Supply", ["supply", "holding"]], ["Orders", ["order", "arrived"]]]
 
 # Unit panel
 var unit_panel: PanelContainer
 var unit_text: RichTextLabel
 var orders_box: VBoxContainer
 var orders_body: VBoxContainer
-var orders_toggle: Button
+var unit_scroll: ScrollContainer     # MRK-35: the unit panel scrolls when the dock is short
+var unit_col: VBoxContainer
+var details_toggle: Button          # folds: details, standing orders, team (state kept across selections)
+var details_text: RichTextLabel
+var standing_toggle: Button
+var standing_body: GridContainer
+var team_toggle: Button
+var team_body: VBoxContainer
+var extra_row: HBoxContainer        # Dismount / Mount up and Rejoin, only when they apply
+var fold_open := {"details": false, "standing": false, "team": false}
 var delay_label: Label
 var mode_buttons: Array[Button] = []
 var mount_button: Button
@@ -213,6 +241,8 @@ func _ready() -> void:
 	add_child(order_popup)
 	_build_ask()
 	_build_loading()
+	resized.connect(_layout)
+	_layout.call_deferred()
 
 
 # --- Look ----------------------------------------------------------------------------
@@ -323,6 +353,57 @@ func _small_button(text: String, toggle: bool, tip: String) -> Button:
 	return b
 
 
+## Rich text sized to its content, for the docked panels.
+func _rich(size: int) -> RichTextLabel:
+	var r := RichTextLabel.new()
+	r.bbcode_enabled = true
+	r.fit_content = true
+	r.scroll_active = false
+	r.custom_minimum_size = Vector2(RIGHT_W - 34, 0)
+	r.add_theme_font_size_override("normal_font_size", size)
+	r.add_theme_font_size_override("bold_font_size", size + 2)
+	r.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	return r
+
+
+## A section header that folds what follows it; `key` names the fold in fold_open.
+func _fold_button(key: String, title: String, tip: String) -> Button:
+	var b := _button("", false)
+	b.flat = true
+	b.alignment = HORIZONTAL_ALIGNMENT_LEFT
+	b.clip_text = true
+	b.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
+	b.add_theme_font_size_override("font_size", 13)
+	b.add_theme_color_override("font_color", AMBER)
+	b.tooltip_text = tip
+	b.set_meta("title", title)
+	b.set_meta("summary", "")
+	b.pressed.connect(func() -> void:
+		fold_open[key] = not fold_open[key]
+		_apply_folds())
+	_fold_label(b, false)
+	return b
+
+
+func _fold_label(b: Button, open: bool) -> void:
+	var sm := String(b.get_meta("summary", ""))
+	b.text = ("▾ " if open else "▸ ") + String(b.get_meta("title")) + (("  ·  " + sm) if sm != "" and not open else "")
+
+
+func _set_fold_summary(b: Button, summary: String) -> void:
+	b.set_meta("summary", summary)
+	_fold_label(b, b.get_meta("open", false))
+
+
+func _apply_folds() -> void:
+	for pair in [[details_toggle, "details", details_text], [standing_toggle, "standing", standing_body], [team_toggle, "team", team_body]]:
+		var b: Button = pair[0]
+		var open: bool = fold_open[pair[1]]
+		b.set_meta("open", open)
+		_fold_label(b, open)
+		(pair[2] as Control).visible = open and b.visible
+
+
 ## A dropdown: `items` are [label, tooltip]; picking one emits command `cmd_fmt % values[i]`.
 func _dropdown(items: Array, values: Array, cmd_fmt: String, tip: String) -> OptionButton:
 	var o := OptionButton.new()
@@ -409,6 +490,16 @@ func _on_menu_id(id: int, pm: PopupMenu) -> void:
 		"menu": menu_action.emit(String(a[1]))
 		"toggle": toggle_pressed.emit(String(a[1]))
 		"speed": speed_pressed.emit(int(a[1]))
+		"local": _local_action(String(a[1]))
+		"local_log": log_fold.pressed.emit()
+
+
+## Menu items the HUD handles itself.
+func _local_action(name: String) -> void:
+	match name:
+		"perf":
+			show_perf = not show_perf
+			perf_label.visible = show_perf
 
 
 func _fill_game(pm: PopupMenu) -> void:
@@ -426,22 +517,18 @@ func _fill_game(pm: PopupMenu) -> void:
 
 func _fill_view(pm: PopupMenu) -> void:
 	_reset(pm)
-	pm.add_separator("Overlays")
-	for t in VIEW_TOGGLES:
-		_add(pm, String(t[1]), "toggle", t[0], int(t[2]), true, 1 if toggle_state.get(t[0], false) else 0)
+	for g in VIEW_GROUPS:
+		var sub := _submenu(pm, String(g[0]))
+		for t in g[1]:
+			_add(sub, String(t[1]), "toggle", t[0], int(t[2]), true, 1 if toggle_state.get(t[0], false) else 0)
+	_add(pm, "Map legend", "menu", "legend", KEY_F4)
 	pm.add_separator("Panels")
 	_add(pm, "Order of battle", "toggle", "OOB", KEY_F11, true, 1 if toggle_state.get("OOB", false) else 0)
-	var plan := _submenu(pm, "Planning map")
-	_add(plan, "Next planning mode", "menu", "plan_next", KEY_F10)
-	plan.add_separator()
-	for i in plan_names.size():
-		_add(plan, String(plan_names[i]), "menu", "plan_%d" % i, 0, true, 3 if plan_mode_state == i else 2)
+	_add(pm, "More reports (10 instead of 3)", "local_log", "", 0, true, 1 if log_open else 0)
 	pm.add_separator("Camera")
 	_add(pm, "Centre on the selection", "menu", "centre", KEY_C)
 	_add(pm, "Next unit", "menu", "next_unit", KEY_TAB)
 	_add(pm, "Whole map", "menu", "whole_map", KEY_M)
-	pm.add_separator()
-	_add(pm, "Map legend", "menu", "legend", KEY_F4)
 
 
 func _fill_time(pm: PopupMenu) -> void:
@@ -460,6 +547,11 @@ func _fill_time(pm: PopupMenu) -> void:
 func _fill_tools(pm: PopupMenu) -> void:
 	_reset(pm)
 	var t: Node = main.tools
+	var plan := _submenu(pm, "Planning map")
+	_add(plan, "Next planning mode", "menu", "plan_next", KEY_F10)
+	plan.add_separator()
+	for i in plan_names.size():
+		_add(plan, String(plan_names[i]), "menu", "plan_%d" % i, 0, true, 3 if plan_mode_state == i else 2)
 	pm.add_separator("Measure")
 	_add(pm, "Ruler", "menu", "tool_ruler", KEY_R | KEY_MASK_SHIFT, true, -1,
 		"Click the start and the end, or Ctrl+drag: distance, grid bearing, travel time, elevation profile.")
@@ -484,6 +576,9 @@ func _fill_help(pm: PopupMenu) -> void:
 	_add(pm, "Map legend", "menu", "legend", KEY_F4)
 	_add(pm, "Contract briefing", "menu", "briefing")
 	_add(pm, "Map data credits", "menu", "credits", KEY_F2)
+	var dbg := _submenu(pm, "Debug")
+	_add(dbg, "Simulation fidelity zones", "toggle", "Zones", KEY_Z, true, 1 if toggle_state.get("Zones", false) else 0)
+	_add(dbg, "Performance readout", "local", "perf", 0, true, 1 if show_perf else 0)
 
 
 func _fill_orders_bar(pm: PopupMenu) -> void:
@@ -509,10 +604,7 @@ func fill_orders(pm: PopupMenu, at_hex: bool, ctx: Dictionary) -> void:
 			pm.add_separator()
 		_note(pm, "Select one of your units to give orders")
 		return
-	if at_hex:
-		_fill_marking(pm, ctx)
-	if at_hex and ctx.has("holding"):
-		_fill_place(pm, ctx)
+	# Short menu (MRK-35): the moves, Hold and Fall back up top; the rest in submenus.
 	if at_hex:
 		pm.add_separator(String(ctx.get("title", "Orders")))
 		if ctx.has("info"):
@@ -533,26 +625,27 @@ func fill_orders(pm: PopupMenu, at_hex: bool, ctx: Dictionary) -> void:
 		pm.add_separator()
 	_add(pm, "Hold position", "cmd", "hold", KEY_H, true, -1, "Stop and hold. A team leader halts its team.")
 	_add(pm, "Fall back", "cmd", "fall_back", KEY_B, true, -1, "Withdraw about 6 km away from known enemies, or back to the HQ.")
-	_add(pm, "Regroup on the HQ", "cmd", "regroup", KEY_Y, true, -1, "Form up around the company HQ (or whoever took over from it).")
-	_add(pm, "Rest & resupply", "cmd", "rest", KEY_N, true, -1, "At the HQ (or whoever took over from it): double refill rate, faster recovery.")
+	var more := _submenu(pm, "More orders")
+	_add(more, "Regroup on the HQ", "cmd", "regroup", KEY_Y, true, -1, "Form up around the company HQ (or whoever took over from it).")
+	_add(more, "Rest & resupply", "cmd", "rest", KEY_N, true, -1, "At the HQ (or whoever took over from it): double refill rate, faster recovery.")
 	if ord["can_dismount"]:
-		_add(pm, "Dismount the squads", "cmd", "dismount", KEY_COMMA, true, -1, "The vehicles halt and the squads get out to move and fight on foot.")
+		_add(more, "Dismount the squads", "cmd", "dismount", KEY_COMMA, true, -1, "The vehicles halt and the squads get out to move and fight on foot.")
 	if ord["can_mount"]:
-		_add(pm, "Mount up", "cmd", "mount", KEY_COMMA, true, -1, "The squads walk back to their vehicles and climb aboard (2 min once together).")
+		_add(more, "Mount up", "cmd", "mount", KEY_COMMA, true, -1, "The squads walk back to their vehicles and climb aboard (2 min once together).")
 	if ord["detached"]:
-		_add(pm, "Rejoin team", "cmd", "rejoin", KEY_U, true, -1, "A member that left its formation on its own orders takes its place by the leader again.")
-	pm.add_separator("Standing orders")
-	var fire := _submenu(pm, "Fire: " + _choice_name(ROES, int(ord["roe"])))
+		_add(more, "Rejoin team", "cmd", "rejoin", KEY_L | KEY_MASK_SHIFT, true, -1, "A member that left its formation on its own orders takes its place by the leader again.")
+	var st := _submenu(pm, "Standing orders")
+	var fire := _submenu(st, "Fire: " + _choice_name(ROES, int(ord["roe"])))
 	for i in ROES.size():
 		_add(fire, String(ROES[i][0]), "cmd", "roe_%d" % i, KEY_X if i == 0 else 0, true, 3 if int(ord["roe"]) == i else 2, String(ROES[i][1]))
-	var brk := _submenu(pm, "Break contact: " + _choice_name(BREAKS, int(ord["brk"])).to_lower())
+	var brk := _submenu(st, "Break contact: " + _choice_name(BREAKS, int(ord["brk"])).to_lower())
 	for i in BREAKS.size():
 		_add(brk, String(BREAKS[i][0]), "cmd", "brk_%d" % i, 0, true, 3 if int(ord["brk"]) == i else 2, String(BREAKS[i][1]))
-	var so := _submenu(pm, "Stand-off: " + _standoff_label(int(ord["standoff"])))
-	for s in STANDOFFS:
-		var v: int = s[1]
-		_add(so, String(s[0]), "cmd", "standoff_%d" % v, 0, true, 3 if int(ord["standoff"]) == v else 2, _standoff_tip(v))
-	var dso := _submenu(pm, "Company default stand-off: " + _standoff_label(int(ord["default_standoff"])))
+	var so := _submenu(st, "Stand-off: " + _standoff_label(int(ord["standoff"])))
+	for s2 in STANDOFFS:
+		var v: int = s2[1]
+		_add(so, String(s2[0]), "cmd", "standoff_%d" % v, 0, true, 3 if int(ord["standoff"]) == v else 2, _standoff_tip(v))
+	var dso := _submenu(st, "Company default stand-off: " + _standoff_label(int(ord["default_standoff"])))
 	for i in range(1, STANDOFFS.size()):
 		var v: int = STANDOFFS[i][1]
 		_add(dso, String(STANDOFFS[i][0]), "cmd", "default_standoff_%d" % v, 0, true, 3 if int(ord["default_standoff"]) == v else 2,
@@ -560,22 +653,30 @@ func fill_orders(pm: PopupMenu, at_hex: bool, ctx: Dictionary) -> void:
 	var team := _submenu(pm, "Team" + ((": " + String(ord["team"])) if String(ord["team"]) != "" else ""))
 	_fill_team(team)
 	if at_hex:
-		pm.add_separator()
-		_add(pm, "Centre the map here", "cmd", "centre_here")
-		_add(pm, "Look from here (line of sight)", "cmd", "look_here")
-		_fill_map_tools(pm)
+		var here := _submenu(pm, "Map here")
+		_add(here, "Centre the map here", "cmd", "centre_here")
+		_add(here, "Look from here (line of sight)", "cmd", "look_here")
+		_fill_map_tools(here)
+		if ctx.has("holding") or ctx.has("marking"):
+			pm.add_separator()
+		_fill_place(pm, ctx, true)
+		_fill_marking(pm, ctx, true)
 	if String(ord["delay"]) != "":
 		pm.add_separator()
 		_note(pm, "Orders arrive in %s (command delay)" % ord["delay"])
 
 
 ## The marking under the cursor (MRK-26): rename or delete it.
-func _fill_marking(pm: PopupMenu, ctx: Dictionary) -> void:
+func _fill_marking(pm: PopupMenu, ctx: Dictionary, nested := false) -> void:
 	if not ctx.has("marking"):
 		return
 	var mk: Dictionary = ctx["marking"]
 	var i := int(mk["i"])
-	pm.add_separator("%s: %s" % [MapTools.MARK_NAMES[int(mk["kind"])], String(mk["name"])])
+	var head := "%s: %s" % [MapTools.MARK_NAMES[int(mk["kind"])], String(mk["name"])]
+	if nested:
+		pm = _submenu(pm, head)
+	else:
+		pm.add_separator(head)
 	_add(pm, "Rename", "menu", "mark_rename_%d" % i)
 	_add(pm, "Delete", "menu", "mark_delete_%d" % i)
 
@@ -593,12 +694,16 @@ func _fill_map_tools(pm: PopupMenu) -> void:
 
 ## The place under the cursor: select it, and for the company's own places raise militia,
 ## requisition, and set a supply route from its stores.
-func _fill_place(pm: PopupMenu, ctx: Dictionary) -> void:
+func _fill_place(pm: PopupMenu, ctx: Dictionary, nested := false) -> void:
 	if not ctx.has("holding"):
 		return
 	var hd: Dictionary = ctx["holding"]
 	var own: bool = hd.get("own", false)
-	pm.add_separator("%s · %s" % [String(hd["name"]), String(hd["kind_name"])])
+	var head := "%s · %s" % [String(hd["name"]), String(hd["kind_name"])]
+	if nested:
+		pm = _submenu(pm, head)
+	else:
+		pm.add_separator(head)
 	var line := String(hd["owner_name"])
 	if own:
 		line += " · loyalty %d%%" % int(hd.get("loyalty", 0.0))
@@ -701,6 +806,7 @@ func is_menu_open() -> bool:
 
 func _build_top_bar() -> void:
 	var bar := PanelContainer.new()
+	top_bar = bar
 	bar.add_theme_stylebox_override("panel", _box(Color(0.07, 0.08, 0.07, 0.94), Color(0.45, 0.5, 0.4, 0.6), 0, Vector4(6, 4, 10, 4)))
 	bar.set_anchors_preset(Control.PRESET_TOP_WIDE)
 	add_child(bar)
@@ -738,7 +844,6 @@ func _build_top_bar() -> void:
 		row.add_child(b)
 		speed_buttons.append(b)
 	cap_label = _label("", 13, Color(1, 0.55, 0.4))
-	cap_label.custom_minimum_size.x = 120
 	row.add_child(cap_label)
 	row.add_child(VSeparator.new())
 	stock_label = _label("", 14)
@@ -752,6 +857,7 @@ func _build_top_bar() -> void:
 	perf_label = _label("", 11, Color(0.6, 0.65, 0.6))
 	perf_label.custom_minimum_size.x = 200
 	perf_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	perf_label.visible = false # Help > Debug > Performance readout
 	row.add_child(perf_label)
 
 
@@ -759,22 +865,25 @@ func _build_top_bar() -> void:
 
 func _build_unit_panel() -> void:
 	unit_panel = PanelContainer.new()
-	unit_panel.set_anchors_preset(Control.PRESET_TOP_RIGHT)
-	_offsets(unit_panel, -392, 52, -8, 52)
-	unit_panel.custom_minimum_size = Vector2(384, 0)
+	unit_panel.set_anchors_preset(Control.PRESET_TOP_LEFT)
+	unit_panel.custom_minimum_size = Vector2(RIGHT_W, 0)
 	unit_panel.visible = false
 	add_child(unit_panel)
+	unit_scroll = ScrollContainer.new()
+	unit_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	unit_panel.add_child(unit_scroll)
 	var col := VBoxContainer.new()
-	unit_panel.add_child(col)
-	unit_text = RichTextLabel.new()
-	unit_text.bbcode_enabled = true
-	unit_text.fit_content = true
-	unit_text.scroll_active = false
-	unit_text.custom_minimum_size = Vector2(340, 0)
-	unit_text.add_theme_font_size_override("normal_font_size", 14)
-	unit_text.add_theme_font_size_override("bold_font_size", 16)
-	unit_text.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	col.add_theme_constant_override("separation", 4)
+	col.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	unit_scroll.add_child(col)
+	unit_col = col
+	unit_text = _rich(14)
 	col.add_child(unit_text)
+	details_toggle = _fold_button("details", "Details", "Engagement times and what slows them, sight and weapon ranges, fire support, stand-off, chain of command.")
+	col.add_child(details_toggle)
+	details_text = _rich(13)
+	details_text.visible = false
+	col.add_child(details_text)
 	_build_orders(col)
 
 
@@ -927,19 +1036,15 @@ func hide_holding() -> void:
 ## down the chain of command and arrives after the command delay.
 func _build_orders(parent: Control) -> void:
 	orders_box = VBoxContainer.new()
-	orders_box.add_theme_constant_override("separation", 5)
+	orders_box.add_theme_constant_override("separation", 4)
 	parent.add_child(orders_box)
 	orders_box.add_child(HSeparator.new())
 	var head := HBoxContainer.new()
 	orders_box.add_child(head)
-	orders_toggle = _button("▾ Orders", false)
-	orders_toggle.flat = true
-	orders_toggle.add_theme_color_override("font_color", AMBER)
-	orders_toggle.tooltip_text = "Show or hide the orders. Right-click the map for the order menu at any time."
-	orders_toggle.pressed.connect(func() -> void:
-		orders_body.visible = not orders_body.visible
-		orders_toggle.text = ("▾ Orders" if orders_body.visible else "▸ Orders"))
-	head.add_child(orders_toggle)
+	var ol := _label("Orders", 13, AMBER)
+	ol.tooltip_text = "Right-click the map for the order menu at any time."
+	ol.mouse_filter = Control.MOUSE_FILTER_PASS
+	head.add_child(ol)
 	var sp := Control.new()
 	sp.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	head.add_child(sp)
@@ -947,7 +1052,7 @@ func _build_orders(parent: Control) -> void:
 	head.add_child(delay_label)
 
 	orders_body = VBoxContainer.new()
-	orders_body.add_theme_constant_override("separation", 5)
+	orders_body.add_theme_constant_override("separation", 4)
 	orders_box.add_child(orders_body)
 
 	# Arm the next right-click with a move (none armed: right-click opens the order menu).
@@ -973,19 +1078,32 @@ func _build_orders(parent: Control) -> void:
 		var b := _small_button(d[0], false, d[2])
 		b.pressed.connect(func() -> void: command.emit(name))
 		acts.add_child(b)
+	# Only when they apply: squads in and out of their vehicles, and a member back to its team.
+	extra_row = HBoxContainer.new()
+	extra_row.add_theme_constant_override("separation", 4)
+	orders_body.add_child(extra_row)
 	mount_button = _small_button("Dismount", false, "APC/IFV platoons: dismount the squads, or mount them up again. Key , (comma)")
 	mount_button.pressed.connect(func() -> void: command.emit("mount_toggle"))
-	rejoin_button = _small_button("Rejoin", false, "A team member that left its formation on its own orders takes its place by the leader again. Key U")
+	rejoin_button = _small_button("Rejoin team", false, "A team member that left its formation on its own orders takes its place by the leader again. Key Shift+L")
 	rejoin_button.pressed.connect(func() -> void: command.emit("rejoin"))
 	rejoin_button.visible = false
-	acts.add_child(rejoin_button)
-	acts.add_child(mount_button)
+	extra_row.add_child(mount_button)
+	extra_row.add_child(rejoin_button)
 
-	var grid := GridContainer.new()
-	grid.columns = 4
-	grid.add_theme_constant_override("h_separation", 6)
-	grid.add_theme_constant_override("v_separation", 4)
-	orders_body.add_child(grid)
+	orders_hint = _label("", 12, HINT)
+	orders_hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	orders_hint.custom_minimum_size.x = RIGHT_W - 34
+	orders_hint.visible = false
+	orders_body.add_child(orders_hint)
+
+	# Standing orders: folded to a one-line summary.
+	standing_toggle = _fold_button("standing", "Standing orders", "When the selection may fire, when it falls back on its own, how far it keeps from known enemies; and the company default stand-off.")
+	orders_box.add_child(standing_toggle)
+	standing_body = GridContainer.new()
+	standing_body.columns = 4
+	standing_body.add_theme_constant_override("h_separation", 6)
+	standing_body.add_theme_constant_override("v_separation", 4)
+	orders_box.add_child(standing_body)
 	roe_opt = _dropdown(ROES, [0, 1, 2], "roe_%d", "When the unit may open fire. Key X cycles.")
 	brk_opt = _dropdown(BREAKS, [0, 1, 2], "brk_%d", "When the unit falls back on its own.")
 	var so_items: Array = []
@@ -995,23 +1113,32 @@ func _build_orders(parent: Control) -> void:
 		so_vals.append(s[1])
 	standoff_opt = _dropdown(so_items, so_vals, "standoff_%d", "Stay and fight, or keep known enemies at a distance: halt short of it and pull back out to it.")
 	default_opt = _dropdown(so_items.slice(1), so_vals.slice(1), "default_standoff_%d", "Company standing order for every unit set to Default. Applies at once.")
+	for pair in [["Fire", roe_opt], ["Break off", brk_opt], ["Stand-off", standoff_opt], ["Co. default", default_opt]]:
+		var l := _label(pair[0], 12, MUTED)
+		l.custom_minimum_size.x = 60
+		standing_body.add_child(l)
+		standing_body.add_child(pair[1])
+
+	# Team: folded to its name, formation and spread.
+	team_toggle = _fold_button("team", "Team", "Lock units under one leader: formation, spread, form, disband, select. Keys J, Shift+J, L, K.")
+	orders_box.add_child(team_toggle)
+	team_body = VBoxContainer.new()
+	team_body.add_theme_constant_override("separation", 4)
+	orders_box.add_child(team_body)
+	var tgrid := GridContainer.new()
+	tgrid.columns = 4
+	tgrid.add_theme_constant_override("h_separation", 6)
+	team_body.add_child(tgrid)
 	shape_opt = _dropdown(SHAPES, [0, 1, 2, 3], "shape_%d", "The team's formation around its leader.")
 	var sp_items: Array = []
 	for i in SPREADS.size():
 		sp_items.append([SPREAD_NAMES[i], "Distance between formation places. 500 m is the doctrinal platoon spacing (300–600 m)."])
 	spread_opt = _dropdown(sp_items, SPREADS, "spread_%d", "Distance between the team's formation places.")
-	for pair in [["Fire", roe_opt], ["Break off", brk_opt], ["Stand-off", standoff_opt], ["Co. default", default_opt],
-			["Formation", shape_opt], ["Spread", spread_opt]]:
+	for pair in [["Formation", shape_opt], ["Spread", spread_opt]]:
 		var l := _label(pair[0], 12, MUTED)
-		l.custom_minimum_size.x = 64
-		grid.add_child(l)
-		grid.add_child(pair[1])
-
-	var team_row := HBoxContainer.new()
-	orders_body.add_child(team_row)
-	var tl := _label("Team", 12, MUTED)
-	tl.custom_minimum_size.x = 64
-	team_row.add_child(tl)
+		l.custom_minimum_size.x = 60
+		tgrid.add_child(l)
+		tgrid.add_child(pair[1])
 	team_menu = MenuButton.new()
 	team_menu.text = "No team  ▾"
 	team_menu.flat = false
@@ -1026,12 +1153,26 @@ func _build_orders(parent: Control) -> void:
 	tpm.set_meta("acts", [])
 	tpm.id_pressed.connect(_on_menu_id.bind(tpm))
 	tpm.about_to_popup.connect(_fill_team.bind(tpm))
-	team_row.add_child(team_menu)
+	team_body.add_child(team_menu)
+	_apply_folds()
 
-	orders_hint = _label("", 12, HINT)
-	orders_hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	orders_hint.custom_minimum_size.x = 340
-	orders_box.add_child(orders_hint)
+
+## One-line summaries on the folded sections.
+func _update_fold_summaries() -> void:
+	var roe := int(ord["roe"])
+	var brk := int(ord["brk"])
+	var fire := (_choice_name(ROES, roe).to_lower() if roe >= 0 else "mixed fire")
+	var brk_t := (_choice_name(BREAKS, brk).to_lower() if brk >= 0 else "mixed")
+	var so := int(ord["standoff"])
+	var so_t := "S/O " + ((_standoff_label(int(ord["default_standoff"])) + " (co.)") if so == 255 else _standoff_label(so))
+	_set_fold_summary(standing_toggle, "%s · %s · %s" % [fire, brk_t, so_t])
+	if ord["in_team"]:
+		var sh := int(ord["shape"])
+		var spc := SPREADS.find(int(ord["spacing"]))
+		_set_fold_summary(team_toggle, "%s · %s · %s" % [String(ord["team"]) if String(ord["team"]) != "" else "several teams",
+			String(SHAPES[sh][0]).to_lower() if sh >= 0 and sh < SHAPES.size() else "mixed", SPREAD_NAMES[spc] if spc >= 0 else "mixed"])
+	else:
+		_set_fold_summary(team_toggle, "form one (J)" if ord["can_form"] else "none")
 
 
 ## Highlights the armed move mode and the selection's fire / break-contact settings
@@ -1049,8 +1190,12 @@ func set_orders_state(mode: int, roe: int, brk: int, pending: bool, delay_text: 
 	_show_choice(brk_opt, brk)
 	delay_label.text = "arrive in %s" % delay_text
 	var names := ["a hasty move", "a road march", "a deliberate move", "an assault"]
-	var t := ("Next right-click sends %s (Esc cancels)." % names[mode]) if mode >= 0 else "Right-click the map for the order menu."
-	orders_hint.text = t + ("  Fire / break-contact change on its way." if pending else "")
+	var t := ("Next right-click sends %s (Esc cancels)." % names[mode]) if mode >= 0 else ""
+	if pending:
+		t += (" " if t != "" else "") + "Fire / break-contact change on its way."
+	orders_hint.text = t
+	orders_hint.visible = t != ""
+	_update_fold_summaries()
 
 
 func set_has_own(has: bool) -> void:
@@ -1077,6 +1222,7 @@ func set_team_state(in_team: bool, can_form: bool, shape: int, spacing: int, tea
 		spread_opt.select(-1)
 		spread_opt.text = "—"
 	team_menu.text = ((team_name if team_name != "" else "Several teams") if in_team else ("No team: form one" if can_form else "No team")) + "  ▾"
+	_update_fold_summaries()
 
 
 ## Stand-off dropdowns: the selection's own setting (-1 mixed) and the company default.
@@ -1093,12 +1239,14 @@ func set_standoff_state(setting: int, default_value: int) -> void:
 		if int(STANDOFFS[i][1]) == default_value:
 			di = i - 1
 	_show_choice(default_opt, di)
+	_update_fold_summaries()
 
 
 ## Teams: whether the selection holds a detached member (shows Rejoin team).
 func set_rejoin_state(detached: bool) -> void:
 	ord["detached"] = detached
 	rejoin_button.visible = detached
+	extra_row.visible = mount_button.visible or rejoin_button.visible
 
 
 ## Mounted infantry: what the comma key / Dismount button would do for the selection.
@@ -1106,7 +1254,8 @@ func set_mount_state(can_dismount: bool, can_mount: bool) -> void:
 	ord["can_dismount"] = can_dismount
 	ord["can_mount"] = can_mount
 	mount_button.text = "Mount up" if can_mount and not can_dismount else "Dismount"
-	mount_button.disabled = not (can_dismount or can_mount)
+	mount_button.visible = can_dismount or can_mount
+	extra_row.visible = mount_button.visible or rejoin_button.visible
 
 
 func _standoff_text(info: Dictionary) -> String:
@@ -1220,7 +1369,7 @@ func _build_plan_panel() -> void:
 	plan_eye_row.add_child(plan_eye_pick)
 	plan_info = _label("", 13, TEXT)
 	plan_info.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	plan_info.custom_minimum_size = Vector2(360, 0)
+	plan_info.custom_minimum_size = Vector2(RIGHT_W - 34, 0)
 	col.add_child(plan_info)
 
 
@@ -1852,7 +2001,7 @@ func _build_ruler_panel() -> void:
 	col.add_child(ruler_chart)
 	ruler_summary = _label("", 12)
 	ruler_summary.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	ruler_summary.custom_minimum_size = Vector2(420, 0)
+	ruler_summary.custom_minimum_size = Vector2(RIGHT_W - 34, 0)
 	col.add_child(ruler_summary)
 
 
@@ -1887,9 +2036,9 @@ func show_ruler(d: Dictionary) -> void:
 	_fit_ruler.call_deferred()
 
 
-## Bottom-anchored: fit the panel to its content upwards from the bottom edge.
+## The ruler sits in the tool slot of the right dock (MRK-35).
 func _fit_ruler() -> void:
-	ruler_panel.offset_top = ruler_panel.offset_bottom - ruler_panel.get_combined_minimum_size().y
+	_layout()
 
 
 # --- Name and confirm dialog (markings) -------------------------------------------------
@@ -1966,15 +2115,45 @@ func _ask_done(ok: bool) -> void:
 # --- Log, status line, banners ---------------------------------------------------------
 
 func _build_log() -> void:
-	var panel := PanelContainer.new()
-	panel.add_theme_stylebox_override("panel", _panel_style(0.8))
-	panel.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
-	_offsets(panel, 8, -8, 640, -8) # grows upward with the reports it holds
-	panel.grow_vertical = Control.GROW_DIRECTION_BEGIN
-	add_child(panel)
+	log_panel = PanelContainer.new()
+	log_panel.add_theme_stylebox_override("panel", _panel_style(0.82))
+	log_panel.set_anchors_preset(Control.PRESET_TOP_LEFT)
+	add_child(log_panel)
 	var col := VBoxContainer.new()
-	panel.add_child(col)
-	col.add_child(_label("Reports  (click one to centre the map on it)", 13, MUTED))
+	col.add_theme_constant_override("separation", 0)
+	log_panel.add_child(col)
+	var head := HBoxContainer.new()
+	head.add_theme_constant_override("separation", 4)
+	col.add_child(head)
+	var title := _label("Reports", 13, AMBER)
+	title.tooltip_text = "Click a report to centre the map on it."
+	title.mouse_filter = Control.MOUSE_FILTER_PASS
+	head.add_child(title)
+	head.add_child(VSeparator.new())
+	for i in LOG_FILTERS.size():
+		var fb := _button(String(LOG_FILTERS[i][0]), true)
+		fb.flat = true
+		fb.add_theme_font_size_override("font_size", 12)
+		fb.set_pressed_no_signal(i == 0)
+		fb.pressed.connect(func() -> void:
+			log_filter = i
+			for k in log_filter_buttons.size():
+				log_filter_buttons[k].set_pressed_no_signal(k == i)
+			_render_log())
+		head.add_child(fb)
+		log_filter_buttons.append(fb)
+	var sp := Control.new()
+	sp.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	head.add_child(sp)
+	log_fold = _button("▴ More", false)
+	log_fold.flat = true
+	log_fold.add_theme_font_size_override("font_size", 12)
+	log_fold.tooltip_text = "Show the latest 10 reports, or only the latest 3."
+	log_fold.pressed.connect(func() -> void:
+		log_open = not log_open
+		log_fold.text = "▾ Less" if log_open else "▴ More"
+		_render_log())
+	head.add_child(log_fold)
 	log_box = VBoxContainer.new()
 	log_box.add_theme_constant_override("separation", 0)
 	col.add_child(log_box)
@@ -1984,19 +2163,19 @@ func _build_status() -> void:
 	var sp := PanelContainer.new()
 	sp.add_theme_stylebox_override("panel", _panel_style(0.75))
 	sp.set_anchors_preset(Control.PRESET_TOP_LEFT)
-	_offsets(sp, 8, 104, 8, 104)
 	sp.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	add_child(sp)
+	status_panel = sp
 	var op := PanelContainer.new()
 	op.add_theme_stylebox_override("panel", _panel_style(0.8))
 	op.set_anchors_preset(Control.PRESET_TOP_LEFT)
-	_offsets(op, 8, 52, 8, 52)
 	op.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	add_child(op)
+	objective_panel = op
 	objective_label = RichTextLabel.new()
 	objective_label.bbcode_enabled = true
 	objective_label.fit_content = true
-	objective_label.autowrap_mode = TextServer.AUTOWRAP_OFF
+	objective_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	objective_label.scroll_active = false
 	objective_label.custom_minimum_size = Vector2(560, 0)
 	objective_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -2222,7 +2401,7 @@ func _controls_body() -> Control:
 			["Drag, WASD, arrows", "Pan the map"], ["Wheel", "Zoom"]]],
 		["Orders", [["F  Q  E  R", "Arm the next right-click: move, road march,\ndeliberate move, assault"],
 			["Esc", "Disarm; with nothing armed, the pause menu"],
-			["H", "Hold position"], ["B  Y  N", "Fall back, regroup on the HQ, rest & resupply"], ["U", "Rejoin team (a detached member)"],
+			["H", "Hold position"], ["B  Y  N", "Fall back, regroup on the HQ, rest & resupply"], ["Shift+L", "Rejoin team (a detached member)"],
 			[", (comma)", "Dismount or mount up"], ["X", "Cycle fire: at will, return fire, hold fire"],
 			["J / Shift+J", "Form a team / disband it"], ["L / K", "Select the whole team / company"],
 			["Tab / C", "Next unit / centre on the selection"]]],
@@ -2469,22 +2648,80 @@ func set_toggle(name: String, on: bool) -> void:
 	toggle_state[name] = on
 
 
+## Docks every panel (MRK-35): the selection on the right with the tool panels (sandbox,
+## planning key, ruler) stacked under it from the bottom up; the contract line, the order
+## of battle and the reports on the left; the hover readout, banners and toasts over the map
+## between them. Panels keep their size from their content; the unit panel scrolls when the
+## right column is too short for it.
+func _layout() -> void:
+	if top_bar == null or unit_panel == null or log_panel == null or oob_panel == null:
+		return
+	var vs := size
+	if vs.x < 400.0 or vs.y < 300.0:
+		return
+	var top := top_bar.size.y + 6.0
+	var rx := vs.x - DOCK_PAD - RIGHT_W
+	var bottom := vs.y - DOCK_PAD
+	for p in [ruler_panel, plan_panel, sandbox_panel]:
+		var pc := p as Control
+		if pc.visible:
+			var h := pc.get_combined_minimum_size().y
+			_dock(pc, rx, bottom - h, RIGHT_W, h)
+			bottom -= h + 6.0
+	var avail := bottom - top - 14.0
+	var content := unit_col.get_combined_minimum_size().y
+	unit_scroll.custom_minimum_size = Vector2(RIGHT_W - 20.0, clampf(content, 40.0, maxf(40.0, avail)))
+	_dock(unit_panel, rx, top, RIGHT_W, 0.0)
+	_dock(holding_panel, rx, top, RIGHT_W, 0.0)
+	var map_r := rx - DOCK_PAD
+	objective_label.custom_minimum_size.x = maxf(200.0, map_r - DOCK_PAD - 22.0)
+	_dock(objective_panel, DOCK_PAD, top, map_r - DOCK_PAD, 0.0)
+	var below := top + objective_panel.get_combined_minimum_size().y + 6.0
+	var lh := log_panel.get_combined_minimum_size().y
+	_dock(log_panel, DOCK_PAD, vs.y - DOCK_PAD - lh, map_r - DOCK_PAD, lh)
+	var left_r := DOCK_PAD
+	if oob_panel.visible:
+		_dock(oob_panel, DOCK_PAD, below, LEFT_W, maxf(120.0, vs.y - DOCK_PAD - lh - 6.0 - below))
+		left_r = DOCK_PAD + LEFT_W + 6.0
+	_dock(status_panel, left_r, below, 0.0, 0.0)
+	var cx := (left_r + map_r) * 0.5
+	var half := minf(390.0, (map_r - left_r) * 0.5 - 10.0)
+	_dock(banner, cx - half, below + 46.0, half * 2.0, 30.0)
+	_dock(toast, cx - half, below + 132.0, half * 2.0, 26.0)
+
+
+func _dock(c: Control, x: float, y: float, w: float, h: float) -> void:
+	c.anchor_left = 0.0
+	c.anchor_top = 0.0
+	c.anchor_right = 0.0
+	c.anchor_bottom = 0.0
+	c.grow_horizontal = Control.GROW_DIRECTION_END
+	c.grow_vertical = Control.GROW_DIRECTION_END
+	c.offset_left = x
+	c.offset_top = y
+	c.offset_right = x + w
+	c.offset_bottom = y + h
+
+
 func refresh(time_text: String, night: bool, stats: Dictionary, fps: float, map_stats: String) -> void:
 	time_label.text = time_text + ("  night" if night else "")
-	stock_label.text = "Diesel %s L%s   Ammo %.1f t%s   Food %s kg%s   Men %d%s   Cash %s DM" % [
+	stock_label.text = "Diesel %s L%s   Ammo %.1f t%s   Food %s kg%s   Men %d%s   %s DM" % [
 		_thousands(int(stats["diesel_l"])), _days(float(stats.get("days_diesel", 1e9))),
 		float(stats["ammo_t"]), _days(float(stats.get("days_ammo", 1e9))),
 		_thousands(int(stats["food_kg"])), _days(float(stats.get("days_food", 1e9))),
 		int(stats["personnel"]), (" (+%d)" % int(stats["replacements"])) if int(stats.get("replacements", 0)) > 0 else "",
 		_thousands(int(stats.get("cash", 0.0)))]
-	stock_label.tooltip_text = "Company stocks and days of supply at the recent rate of use; men on the rolls (+ replacements waiting); cash. %d holding%s, %d trucks, %d route%s running." % [
+	stock_label.tooltip_text = "Company stocks; days of supply at the recent rate of use (shown on the bar under 30 days): diesel %s, ammunition %s, food %s. Men on the rolls (+ replacements waiting); cash. %d holding%s, %d trucks, %d route%s running." % [
+		_days_tip(float(stats.get("days_diesel", 1e9))), _days_tip(float(stats.get("days_ammo", 1e9))), _days_tip(float(stats.get("days_food", 1e9))),
 		int(stats.get("holdings_owned", 0)), "" if int(stats.get("holdings_owned", 0)) == 1 else "s", int(stats.get("trucks", 0)),
 		int(stats.get("routes_active", 0)), "" if int(stats.get("routes_active", 0)) == 1 else "s"]
+	perf_label.visible = show_perf
 	perf_label.text = "%d fps · sim %.0f us/min · %d units\nhot %d / warm %d / cold %d · %s" % [
 		int(fps), float(stats["avg_tick_us"]), int(stats["alive"]), int(stats["hot"]), int(stats["warm"]), int(stats["cold"]), map_stats]
 	var now := Time.get_ticks_msec()
 	if now > banner_until: banner.text = ""
 	if now > toast_until: toast.text = ""
+	_layout()
 
 
 func set_status(text: String) -> void:
@@ -2493,16 +2730,30 @@ func set_status(text: String) -> void:
 
 
 func set_events(events: Array) -> void:
+	log_events = events
+	_render_log()
+
+
+## The reports that pass the filter, newest first: 3 folded, 10 open.
+func _render_log() -> void:
 	for c in log_box.get_children():
 		c.queue_free()
-	for e in events:
+	var kinds: Array = LOG_FILTERS[log_filter][1]
+	var limit := 10 if log_open else 3
+	var shown := 0
+	for e in log_events:
+		if shown >= limit:
+			break
+		var kind: String = e["kind"]
+		if not kinds.is_empty() and not kinds.has(kind):
+			continue
+		shown += 1
 		var b := _button("%s   %s" % [String(e["time_string"]).substr(11), e["text"]])
 		b.flat = true
 		b.alignment = HORIZONTAL_ALIGNMENT_LEFT
 		b.clip_text = true # long reports end at the panel edge; the full text is in the tooltip
 		b.tooltip_text = String(e["text"])
 		b.add_theme_font_size_override("font_size", 13)
-		var kind: String = e["kind"]
 		var col := Color(0.88, 0.9, 0.84)
 		if kind == "contact" or kind == "under_fire": col = Color(1.0, 0.7, 0.45)
 		elif kind == "destroyed": col = Color(1.0, 0.45, 0.4)
@@ -2514,6 +2765,9 @@ func set_events(events: Array) -> void:
 			var p: Vector2 = e["pos"]
 			b.pressed.connect(func() -> void: event_clicked.emit(p))
 		log_box.add_child(b)
+	if shown == 0:
+		log_box.add_child(_label("   nothing yet" if kinds.is_empty() else "   none of these yet", 12, MUTED))
+	_layout.call_deferred()
 
 
 func show_unit(info: Dictionary, count: int) -> void:
@@ -2524,6 +2778,8 @@ func show_unit(info: Dictionary, count: int) -> void:
 	var t := ""
 	if int(info["side"]) != 0:
 		orders_box.visible = false
+		details_toggle.visible = false
+		details_text.visible = false
 		t += "[b]%s[/b]\n" % info["name"]
 		if info.get("seen", false):
 			t += "In sight now\n"
@@ -2533,61 +2789,75 @@ func show_unit(info: Dictionary, count: int) -> void:
 		unit_text.text = t
 		return
 	orders_box.visible = true
-	t += "[b]%s[/b]   %s\n" % [info["name"], info["type_name"]]
+	details_toggle.visible = true
+	t += "[b]%s[/b]   %s" % [info["name"], info["type_name"]]
 	if count > 1:
-		t += "[color=#9fc8ff](+%d more selected)[/color]\n" % (count - 1)
-	t += "[color=#b8c0a8]%s · %s[/color]\n" % [info["formation"], info["equipment"]]
-	t += "%s\n\n" % info["location"]
+		t += "   [color=#9fc8ff]+%d more selected[/color]" % (count - 1)
+	t += "\n[color=#b8c0a8]%s · %s · %s[/color]\n" % [info["formation"], info["equipment"], info["location"]]
 	if info.has("elements_max"):
 		# Combat effectiveness: each element is in the fight or knocked out.
 		var em := int(info["elements_max"])
 		var ea := int(info["elements_active"])
 		var pc := "#5fd35f" if ea >= em else ("#ffc040" if ea * 2 >= em else "#ff5040")
-		t += "In the fight  [color=%s]%s[/color][color=#666]%s[/color]  %d of %d %s%s\n" % [pc, "■".repeat(ea),
-			"□".repeat(em - ea), ea, em, info["element_noun"], ("  (%d knocked out)" % (em - ea)) if em > ea else ""]
-		var ef := float(info["engage_factor"])
-		var ec := "#9fc8ff" if ef < 1.25 else ("#ffc040" if ef < 1.8 else "#ff5040")
-		t += "Engagement   [color=%s]acquire %.1f min · fire every %.1f min[/color]\n" % [ec, float(info["acquire_min"]), float(info["cycle_min"])]
-		t += "[color=#b8c0a8]  readiness ×%.2f · morale ×%.2f · ammo ×%.2f · suppressed ×%.2f · night ×%.2f[/color]\n" % [
-			float(info["engage_readiness"]), float(info["engage_morale"]), float(info["engage_ammo"]), float(info.get("engage_supp", 1.0)),
-			float(info.get("engage_night", 1.0))]
+		t += "[color=%s]%s[/color][color=#666]%s[/color]  %d of %d %s in the fight\n" % [pc, "■".repeat(ea),
+			"□".repeat(em - ea), ea, em, info["element_noun"]]
 		var sp := float(info.get("suppression", 0.0))
 		if sp >= 1.0:
 			var scol := "#ff5040" if info.get("pinned", false) else ("#ffc040" if sp >= 30.0 else "#b8c0a8")
 			t += "Suppression  [color=%s]%d%s[/color]\n" % [scol, int(sp),
 				"  PINNED: gone to ground, won't move forward, spots at half range" if info.get("pinned", false) else ""]
 	else:
-		t += _bar("Strength", float(info["strength"]))
-	t += _bar("Morale", float(info["morale"]))
-	t += _bar("Fuel", float(info["fuel"]))
-	t += _bar("Ammo", float(info["ammo"]))
-	t += _bar("Readiness", float(info["readiness"]))
-	t += "\n%s   Order: %s\n" % [_situation(info), info["order"]]
-	if info.has("gun_name"):
-		t += "%s · range %.1f km\n" % [info["gun_name"], float(info["gun_range_km"])]
-	t += "Sight %.1f km · weapons %.1f km\n" % [float(info["spot_range_km"]), float(info["weapon_range_km"])]
-	t += _fire_support_line(info)
-	t += _mounted_line(info)
-	t += _standoff_text(info)
-	t += _team_line(info)
-	t += "%s · breaks contact: %s\n" % [info["roe_name"], String(info["break_contact_name"]).to_lower()]
-	t += "New orders take [b]%d min[/b] to arrive\n" % int(info["command_delay"])
+		t += _stat("Strength", float(info["strength"])) + "\n"
+	t += _stats_line(float(info["morale"]), float(info["fuel"]), float(info["ammo"]), float(info["readiness"]))
+	t += "%s · %s\n" % [_situation(info), info["order"]]
 	if info.get("pending", false):
 		t += "[color=#ffd84a]%s order arrives in %d min[/color]\n" % [info["pending_kind"], int(info["pending_in"])]
 	if info.has("eta_minutes"):
 		var eta := int(info["eta_minutes"])
 		t += "Route %.1f km, about %dh%02d left\n" % [float(info["route_km"]), eta / 60, eta % 60]
-	unit_text.text = t
+	t += _mounted_line(info)
+	unit_text.text = t.strip_edges()
+
+	var d := ""
+	if info.has("elements_max"):
+		var ef := float(info["engage_factor"])
+		var ec := "#9fc8ff" if ef < 1.25 else ("#ffc040" if ef < 1.8 else "#ff5040")
+		d += "Engagement   [color=%s]acquire %.1f min · fire every %.1f min[/color]\n" % [ec, float(info["acquire_min"]), float(info["cycle_min"])]
+		d += "[color=#b8c0a8]  readiness ×%.2f · morale ×%.2f · ammo ×%.2f · suppressed ×%.2f · night ×%.2f[/color]\n" % [
+			float(info["engage_readiness"]), float(info["engage_morale"]), float(info["engage_ammo"]), float(info.get("engage_supp", 1.0)),
+			float(info.get("engage_night", 1.0))]
+	if info.has("gun_name"):
+		d += "%s · range %.1f km\n" % [info["gun_name"], float(info["gun_range_km"])]
+	d += "Sight %.1f km · weapons %.1f km\n" % [float(info["spot_range_km"]), float(info["weapon_range_km"])]
+	d += _fire_support_line(info)
+	d += _standoff_text(info)
+	d += _team_line(info)
+	d += "%s · breaks contact: %s\n" % [info["roe_name"], String(info["break_contact_name"]).to_lower()]
+	d += "New orders take [b]%d min[/b] to arrive" % int(info["command_delay"])
+	details_text.text = d
+	_set_fold_summary(details_toggle, "")
+	_apply_folds()
 
 
-## Several own units: averages and a roster. `company` is the company name when
-## the selection is exactly one whole company, else "".
+## Morale, fuel, ammo, readiness on one line, each number coloured by how low it is.
+func _stats_line(mor: float, fuel: float, ammo: float, ready: float) -> String:
+	return "%s   %s   %s   %s\n" % [_stat("Morale", mor), _stat("Fuel", fuel), _stat("Ammo", ammo), _stat("Ready", ready)]
+
+
+func _stat(name: String, v: float) -> String:
+	var c := "#5fd35f" if v >= 60.0 else ("#ffc040" if v >= 30.0 else "#ff5040")
+	return "[color=#b8c0a8]%s[/color] [color=%s]%d[/color]" % [name, c, int(round(v))]
+
+
+## Several own units: totals and averages; the order of battle panel lists them. `company`
+## is the company (or team) name when the selection is exactly one, else "".
 func show_group(infos: Array, company: String) -> void:
 	if infos.is_empty():
 		unit_panel.visible = false
 		return
 	unit_panel.visible = true
 	orders_box.visible = true
+	details_toggle.visible = true
 	var n := infos.size()
 	var sums := {"strength": 0.0, "morale": 0.0, "fuel": 0.0, "ammo": 0.0, "readiness": 0.0}
 	var men := 0
@@ -2618,49 +2888,33 @@ func show_group(infos: Array, company: String) -> void:
 	var t := ""
 	if company.begins_with("Team "):
 		t += "[b]%s[/b]   whole team, led by %s\n" % [company, infos[0]["name"]]
-		t += _team_line(infos[0])
 	elif company != "":
 		t += "[b]%s[/b]   whole company\n" % company
 	else:
 		t += "[b]%d units selected[/b]\n" % n
-	t += "[color=#b8c0a8]%d platoons and sections · %d men[/color]\n\n" % [n, men]
+	t += "[color=#b8c0a8]%d platoons and sections · %d men[/color]\n" % [n, men]
 	var pc := "#5fd35f" if el_act >= el_max else ("#ffc040" if el_act * 2 >= el_max else "#ff5040")
-	t += "In the fight  [color=%s]%d of %d[/color] vehicles, guns and squads%s\n" % [pc, el_act, el_max,
-		("  (%d knocked out)" % (el_max - el_act)) if el_max > el_act else ""]
-	t += "Engagement   [color=#b8c0a8]average ×%.2f the time of fresh crews[/color]\n" % (ef_sum / n)
-	t += _bar("Morale", sums["morale"] / n)
-	t += _bar("Fuel", sums["fuel"] / n)
-	t += _bar("Ammo", sums["ammo"] / n)
-	t += _bar("Readiness", sums["readiness"] / n)
-	t += "\n"
+	t += "[color=%s]%d of %d[/color] vehicles, guns and squads in the fight\n" % [pc, el_act, el_max]
+	t += _stats_line(sums["morale"] / n, sums["fuel"] / n, sums["ammo"] / n, sums["readiness"] / n)
+	var bits: Array[String] = []
 	if engaged > 0:
-		t += "[color=#ff6a50]%d in combat[/color]   " % engaged
+		bits.append("[color=#ff6a50]%d in combat[/color]" % engaged)
 	if hot > 0:
-		t += "[color=#ff9a50]%d near enemies[/color]   " % hot
+		bits.append("[color=#ff9a50]%d near enemies[/color]" % hot)
 	if warm > 0:
-		t += "[color=#ffc040]%d within 40 km of enemies[/color]" % warm
-	if engaged > 0 or hot > 0 or warm > 0:
-		t += "\n"
-	t += "%d moving, %d holding" % [moving, n - moving]
+		bits.append("[color=#ffc040]%d within 40 km[/color]" % warm)
+	bits.append("%d moving, %d holding" % [moving, n - moving])
 	if pending > 0:
-		t += ", [color=#ffd84a]%d with orders on the way[/color]" % pending
-	t += "\nNew orders take [b]%s[/b] to arrive\n\n" % (("%d min" % delay_lo) if delay_lo == delay_hi else ("%d-%d min" % [delay_lo, delay_hi]))
-	var shown := 0
-	for info in infos:
-		if shown >= 12:
-			t += "[color=#9fa89a]... and %d more[/color]\n" % (n - shown)
-			break
-		var em := int(info.get("elements_max", 1))
-		var ea := int(info.get("elements_active", em))
-		var col := "#5fd35f" if ea >= em else ("#ffc040" if ea * 2 >= em else "#ff5040")
-		var state: String = info["order"]
-		if info.get("pending", false):
-			state = "orders in %d min" % int(info["pending_in"])
-		var pips := "■".repeat(ea) + "□".repeat(em - ea)
-		t += "%s [color=#9fa89a]%s[/color]  [color=%s]%s %d/%d[/color]  [color=#9fa89a]%s[/color]\n" % [
-			info["name"], info["type_name"], col, pips, ea, em, state]
-		shown += 1
+		bits.append("[color=#ffd84a]%d with orders on the way[/color]" % pending)
+	t += " · ".join(bits)
 	unit_text.text = t
+	var d := ""
+	if company.begins_with("Team "):
+		d += _team_line(infos[0])
+	d += "Engagement   [color=#b8c0a8]average ×%.2f the time of fresh crews[/color]\n" % (ef_sum / n)
+	d += "New orders take [b]%s[/b] to arrive" % (("%d min" % delay_lo) if delay_lo == delay_hi else ("%d-%d min" % [delay_lo, delay_hi]))
+	details_text.text = d
+	_apply_folds()
 
 
 ## One line on how close the fighting is, in plain words.
@@ -2690,7 +2944,7 @@ func set_objectives(obj: Dictionary) -> void:
 		else:
 			hq_text = "lost: orders slow, no resupply"
 	if obj.get("sandbox", false):
-		objective_label.text = "[b]Sandbox:[/b] no victory or defeat · hostile AI %s\nHQ [color=%s]%s[/color]   ·   kills %d, lost %d" % [
+		objective_label.text = "[b]Sandbox:[/b] no victory or defeat · hostile AI %s   ·   HQ [color=%s]%s[/color]   ·   kills %d, lost %d" % [
 			"on" if obj.get("hostile_ai", true) else "[color=#ffc040]off[/color]", "#7fe07f" if hq_ok else "#ff6050", hq_text,
 			int(obj.get("kills", 0)), int(obj.get("losses", 0))]
 		return
@@ -2703,11 +2957,11 @@ func set_objectives(obj: Dictionary) -> void:
 	if three:
 		var rs := int(obj.get("rival_start", 0))
 		var re := int(obj.get("rival_effective", 0))
-		t += "break the [color=#ff9a80]%s[/color] [color=%s]%d/%d[/color] and [color=#a8e090]%s[/color] [color=%s]%d/%d[/color]\n" % [
+		t += "break the [color=#ff9a80]%s[/color] [color=%s]%d/%d[/color] and [color=#c9a6e8]%s[/color] [color=%s]%d/%d[/color]   ·   " % [
 			obj.get("enemy_name", "enemy"), "#7fe07f" if ee == 0 else "#ffc040", ee, es,
 			obj.get("rival_name", "rival"), "#7fe07f" if re == 0 else "#ffc040", re, rs]
 	else:
-		t += "break the %s: [color=%s]%d of %d[/color] fighting units left\n" % [obj.get("enemy_name", "enemy"),
+		t += "break the %s: [color=%s]%d of %d[/color] fighting units left   ·   " % [obj.get("enemy_name", "enemy"),
 			"#7fe07f" if ee == 0 else "#ffc040", ee, es]
 	t += "Keep 3+ units fighting [color=%s](%d of %d)[/color]   ·   HQ [color=%s]%s[/color]   ·   kills %d, lost %d" % [
 		"#7fe07f" if oe >= 3 else "#ff6050", oe, os, "#7fe07f" if hq_ok else "#ff6050",
@@ -2778,9 +3032,13 @@ func _bar(name: String, v: float) -> String:
 
 
 ## " (12 d)" for a finite days-of-supply figure, "" when nothing is being used.
+func _days_tip(d: float) -> String:
+	return "not being used" if d >= 999.0 else ("%.1f d" % d if d < 10.0 else "%d d" % int(d))
+
+
 func _days(d: float) -> String:
-	if d >= 999.0:
-		return ""
+	if d >= 30.0:
+		return "" # only short supplies are shown; the tooltip has every figure
 	return " (%.1f d)" % d if d < 10.0 else " (%d d)" % int(d)
 
 
