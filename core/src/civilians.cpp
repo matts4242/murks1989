@@ -361,6 +361,18 @@ void World::civ_react() {
     }
 }
 
+bool World::player_hears_of(HexCoord at, int town) const {
+    for (const auto &u : units)
+        if (u.alive && !u.removed && u.side == SIDE_PLAYER && hex_distance(u.pos, at) <= (int)effective_spot_range(u))
+            return true;
+    for (const auto &h : holdings) {
+        if (h.owner != SIDE_PLAYER) continue;
+        if (hex_distance(h.pos, at) <= h.radius + 2) return true;
+        if (town >= 0 && hex_distance(h.pos, map.settlements[town].pos) <= h.radius) return true;
+    }
+    return false;
+}
+
 void World::civ_dispatch_services() {
     for (auto &in : incidents_) {
         if (in.served || time_min - in.last_shot < kQuietMinutes) continue;
@@ -382,9 +394,13 @@ void World::civ_dispatch_services() {
             }
         if (sent == 0) continue; // no route this tick: try again in 5 min
         in.served = true;
-        push_event(EV_INFO, -1, false,
-                   cfmt("Fire brigade and ambulance from %s on their way to %s.", map.settlements[town].name.c_str(),
-                        place_name(in.at).c_str()));
+        // The player hears of it only through someone of their own: a unit that could see the place,
+        // or an own holding there or at the town the services came from. Fights between the other
+        // sides far away (three-way bands) stay unknown, as their shooting does.
+        if (player_hears_of(in.at, town))
+            push_event(EV_INFO, -1, false,
+                       cfmt("Fire brigade and ambulance from %s on their way to %s.", map.settlements[town].name.c_str(),
+                            place_name(in.at).c_str()));
     }
     incidents_.erase(std::remove_if(incidents_.begin(), incidents_.end(),
                                     [&](const Incident &in) { return time_min - in.last_shot > 6 * 60; }),

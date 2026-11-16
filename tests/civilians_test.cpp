@@ -216,6 +216,23 @@ int main() {
             check(responded && scene_worked, "after it goes quiet the fire engine drives out and works the scene");
             check(home_again, "and goes home");
         }
+        // The dispatch report reaches the player only through their own units or holdings: a fight
+        // between the other sides far away (three-way bands) must not show up in the reports.
+        int own = -1;
+        for (const auto &u : s.units)
+            if (u.alive && u.side == SIDE_PLAYER) { own = u.id; break; }
+        int far_town = -1, far_d = -1;
+        for (int t = 0; t < (int)s.map.settlements.size(); ++t) {
+            int d = 1 << 30;
+            for (const auto &u : s.units)
+                if (u.alive && u.side == SIDE_PLAYER) d = std::min(d, hex_distance(u.pos, s.map.settlements[t].pos));
+            for (const auto &hd : s.holdings)
+                if (hd.owner == SIDE_PLAYER) d = std::min(d, hex_distance(hd.pos, s.map.settlements[t].pos));
+            if (d > far_d) far_d = d, far_town = t;
+        }
+        check(own >= 0 && s.player_hears_of(s.units[own].pos, -1), "a report from where an own unit is reaches the player");
+        check(far_town >= 0 && far_d > 100 && !s.player_hears_of(s.map.settlements[far_town].pos, far_town),
+              "a report from a town far from every own unit and holding does not");
     }
 
     std::printf("Separate dice:\n");

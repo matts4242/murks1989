@@ -738,7 +738,8 @@ public:
     std::vector<Civilian> civilians;
     bool civilians_on = true;               // off: none are created (tests, harnesses)
     const Civilian *civilian(int id) const; // by id, nullptr if gone
-    int civilians_at(int hex_idx) const;    // civilian vehicles in a hex (congestion)
+    int civilians_at(int hex_idx) const;
+    bool player_hears_of(HexCoord at, int town) const; // a civilian report reaches the player (MRK-34)    // civilian vehicles in a hex (congestion)
     // Sandbox: puts a civilian of this kind on the nearest land hex to `at`. Traffic heads for
     // a town nearby, services park in the nearest town as their home. Returns the id or -1.
     int sandbox_place_civilian(int kind, HexCoord at);
