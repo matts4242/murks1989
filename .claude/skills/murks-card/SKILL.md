@@ -23,9 +23,18 @@ or "next card", the board lives outside the repository (cards are MRK-nn; it is 
 issues) and usually can't be reached from here, so find the open work in the repository:
 
 - `git log --format=%s | grep -o 'MRK-[0-9]*' | sort -u` - cards already done.
-- `grep -n "MRK-" README.md` - lines that name a card as future work ("not yet", "later", "work
-  board MRK-04" next to something unbuilt) are the strongest leads.
+- `grep -rn "MRK-" README.md core/include` - lines that name a card as future work ("not yet",
+  "later", "waiting to ... (MRK-10)" next to something unbuilt) are the strongest leads.
 - The README's "Known limits" section and open pull requests (a card may be half done there).
+
+Look for the board only in the repository and its pull requests. Don't go through the user's
+email, chat, documents or other connected accounts for it: those are their private data, they
+didn't offer them for this, and they can name the card in one line.
+
+Be exact about what is merged. Your branch may carry work that is still in an open PR, so "in
+this checkout" is not "on main". Check before you say a card is done or a PR can be closed:
+`git fetch origin main && git branch -r --contains <commit>` (or `git log origin/main --oneline
+| grep MRK-nn`), and the PR's own merged flag.
 
 Pick the one the repository itself flags as next, tell the user which and why in one or two
 sentences, and offer to switch if their board says otherwise. Asking first costs them a round
@@ -103,6 +112,12 @@ The DLL must import only KERNEL32.dll and msvcrt.dll (static MinGW runtime, so i
 plain Windows PC) and export `murks_library_init`. A GDScript-only change needs no rebuild;
 leave `game/bin/` untouched then, since a rebuilt binary is a large diff for nothing.
 
+Build with scons only, never a hand-written compile or link line. scons uses
+`x86_64-w64-mingw32-g++`, MinGW's win32 thread model, for godot-cpp and the project alike, and
+the two must match. A link error naming `__gthr_win32_*` or `pthread_*` means godot-cpp was
+built with the other one; run the scons command again (it rebuilds godot-cpp, ~5 min) instead
+of switching compilers.
+
 ## 7. The game itself
 
 ```bash
@@ -113,15 +128,27 @@ godot --headless --path game --script res://tests/playtest.gd -- 4 active   # "d
 The UI test must exit 0 with no FAIL line; report the PASS count. The headless playtest's
 save/load replay check matters whenever saved state or the simulation changed.
 
-**Screenshots.** `xvfb-run -a -s "-screen 0 1920x1080x24" godot --path game -- --autotest=<dir>`
-renders every screenshot in `docs/screenshots/` (about 4 minutes). Then
-`python3 .claude/skills/murks-card/scripts/shot_diff.py <dir>` lists how much each one changed.
-The run is deterministic apart from `06b_fire_effects` (muzzle flashes), so a changed shot was
-changed by your work: its subject (a panel, a key, a readout, a map mode) or, for battle and
-theatre shots, the course of the simulation, which any rule change shifts. Copy in the shots
-whose subject the card changed. Leave battle shots alone unless the card is about what they
-show; say in the PR that they would now play out differently. Look at every shot you copy:
-text that wraps badly or overlaps is a fix to make, not a picture to commit.
+**Screenshots.** `--autotest=<dir>` renders every screenshot in `docs/screenshots/` (about 4
+minutes idle, 20+ on a busy machine). Usually a card changes one or two shots, so name them
+and stop the run once they are saved:
+
+```bash
+bash .claude/skills/murks-card/scripts/autotest_shots.sh <scratch>/shots 25_controls 40_plan_slope
+python3 .claude/skills/murks-card/scripts/shot_diff.py <scratch>/shots
+```
+
+Run it without names only when the card may change many shots: a rule that alters how the
+battle plays out, or a panel or menu that appears in several. A new shot for a new feature goes
+into `_run_autotest` in `main.gd`, as the others do.
+
+The committed shots lag the game: many were last retaken several cards ago, so `shot_diff`
+shows battle, theatre, menu and controls shots that differ for reasons that have nothing to do
+with your card. Judge by subject: copy in the shots whose subject your card changed (a panel,
+a key, a readout, a map mode) and leave the rest. If you are unsure whether your card moved a
+shot, render the base commit's shot for comparison (`git worktree add`, the same script)
+rather than guessing, and mention the stale ones in the PR rather than refreshing them in this
+card. The run is deterministic apart from `06b_fire_effects` (muzzle flashes). Look at every
+shot you copy: text that wraps badly or overlaps is a fix to make, not a picture to commit.
 
 ## 8. README
 
