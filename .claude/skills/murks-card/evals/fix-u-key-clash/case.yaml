@@ -1,0 +1,8 @@
+schema_version: "1.1"
+name: fix-u-key-clash
+expected_outcome: |
+  The double binding of U is resolved: Auto-pause and Rejoin team each have their own key,
+  consistently in the key handler, the menu accelerators, the in-game Controls dialog and the
+  README controls table. A UI test check covers the fix and the UI test passes. No C++ changed, so
+  the committed libraries in game/bin are left alone. Committed with a message that reports the
+  tests.

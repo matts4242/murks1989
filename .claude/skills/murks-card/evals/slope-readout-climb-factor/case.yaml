@@ -1,0 +1,8 @@
+schema_version: "1.1"
+name: slope-readout-climb-factor
+expected_outcome: |
+  The hex readout adds the climb factors for tracked, wheeled and foot units at that hex's
+  steepest grade, taken from the core's slope_factor through the extension, not duplicated in
+  GDScript. Both extension libraries are rebuilt and committed, the Windows DLL checked for its
+  imports. The UI test covers the new text and passes; core tests pass. README names MRK-33.
+  Commit title ends with (MRK-33).

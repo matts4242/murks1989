@@ -1,0 +1,9 @@
+schema_version: "1.1"
+name: continue-next-card
+expected_outcome: |
+  The run works out which card to do without access to the external work board, from repository
+  evidence (git log card numbers, README, open PRs), and says which card and why. It takes a
+  baseline of the core tests before changing anything, implements the card with a test (C++ rules
+  test or UI test check), runs the core tests and the UI test, rebuilds both libraries if and only
+  if C++ changed, updates the README naming the card, and commits with the card number in the
+  title.
