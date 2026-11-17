@@ -1,6 +1,7 @@
 #include "murks/sim.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdarg>
 #include <chrono>
 #include <cmath>
@@ -294,7 +295,7 @@ int World::spawn(int formation, int8_t side, UnitType type, const std::string &n
     u.formation = formation;
     u.slot = (int)formations[formation].members.size();
     u.pos = u.prev_pos = u.dest = best;
-    u.last_seen_pos[0] = u.last_seen_pos[1] = best;
+    for (auto &p : u.last_seen_pos) p = best;
     u.morale = side == SIDE_PLAYER ? 75 : 65;
     u.elements_max = u.elements = element_count(u);
     u.ai_next = rng_.range_int(0, 30);
@@ -303,7 +304,7 @@ int World::spawn(int formation, int8_t side, UnitType type, const std::string &n
     return u.id;
 }
 
-void World::setup_scenario(int extra_groups) {
+void World::setup_scenario(int extra_groups, int kind) {
     units.clear();
     formations.clear();
     groups.clear();
@@ -321,12 +322,21 @@ void World::setup_scenario(int extra_groups) {
     sandbox = false;
     hostile_ai = true;
     clock_started_ = false;
+    civilians.clear();
+    civ_next_id_ = 0;
+    active_towns_.clear();
+    danger_.clear();
+    incidents_.clear();
+    town_country_.clear();
+    civ_hex_count_.clear();
+    civ_rng_.reseed(rng_.state() ^ 0x5EEDC1u); // read, not drawn: the military dice stay as they were
+    scenario = kind == SC_THREE_WAY ? SC_THREE_WAY : SC_CONTRACT;
+    const bool three_way = scenario == SC_THREE_WAY;
     rng_.reseed(seed * 31ull + 7);
     const auto &S = map.settlements;
     if (S.empty()) return;
 
-    auto settlement_near = [&](double nx, double ny, int min_pop, int max_pop) {
-        HexCoord want{(int)(nx * map.cols()), (int)(ny * map.rows())};
+    auto settlement_at = [&](HexCoord want, int min_pop, int max_pop) {
         int best = 0, bd = 1 << 30;
         for (int i = 0; i < (int)S.size(); ++i) {
             if (S[i].population < min_pop || S[i].population > max_pop) continue;
@@ -337,6 +347,9 @@ void World::setup_scenario(int extra_groups) {
             }
         }
         return best;
+    };
+    auto settlement_near = [&](double nx, double ny, int min_pop, int max_pop) {
+        return settlement_at({(int)(nx * map.cols()), (int)(ny * map.rows())}, min_pop, max_pop);
     };
 
     // ---- The player's company -------------------------------------------------------
@@ -379,6 +392,40 @@ void World::setup_scenario(int extra_groups) {
         spawn(f, SIDE_HOSTILE, U_ARTILLERY, "7G Battery", "3x 2S1", {p.col + 2, p.row}, tk);
     }
 
+    // ---- Three-way: Kessler's Free Corps, at war with the company and the 7th Guards alike ----
+    // It starts at the third corner of a triangle with the company's town and the 7th Guards'
+    // start (about 70-100 km a side): the 7th Guards' bearing from home turned 60 degrees south,
+    // or north when the south corner is cut off by water.
+    int r_town = -1;
+    if (three_way) {
+        const Vec2 h0 = hex_center(home), a0 = hex_center(S[a_town].pos);
+        const double dx = a0.x - h0.x, dy = a0.y - h0.y;
+        for (double turn : {1.0471975512, -1.0471975512}) {
+            const double c = std::cos(turn), sn = std::sin(turn);
+            HexCoord want = world_to_hex(h0.x + dx * c - dy * sn, h0.y + dx * sn + dy * c);
+            want.col = std::max(0, std::min(map.cols() - 1, want.col));
+            want.row = std::max(0, std::min(map.rows() - 1, want.row));
+            const int t = settlement_at(want, 2000, 400000);
+            if (t != player_home && t != a_town && reachable(S[t].pos, home)) {
+                r_town = t;
+                break;
+            }
+        }
+        if (r_town < 0) r_town = settlement_near(0.38 - 120.0 / map.cols(), 0.54, 2000, 400000);
+        HexCoord p = S[r_town].pos;
+        formations.push_back({"Kessler's Free Corps", SIDE_RIVAL, r_town, true, 0, {}});
+        int f = (int)formations.size() - 1;
+        std::vector<int> tk;
+        spawn(f, SIDE_RIVAL, U_HQ, "FK HQ", "BTR-60PU", p, tk);
+        spawn(f, SIDE_RIVAL, U_TANK, "FK 1st Tank", "3x T-72M", {p.col + 2, p.row}, tk);
+        spawn(f, SIDE_RIVAL, U_TANK, "FK 2nd Tank", "3x T-55A", {p.col + 2, p.row - 2}, tk);
+        spawn(f, SIDE_RIVAL, U_MECH, "FK 1st Mech", "3x BMP-1", {p.col + 1, p.row + 2}, tk);
+        spawn(f, SIDE_RIVAL, U_MECH, "FK 2nd Mech", "3x BTR-70", {p.col + 3, p.row - 1}, tk);
+        spawn(f, SIDE_RIVAL, U_INFANTRY, "FK Rifles", "30 men, RPG-7", {p.col, p.row - 1}, tk);
+        spawn(f, SIDE_RIVAL, U_RECON, "FK Recon", "2x BRDM-2", {p.col + 4, p.row}, tk);
+        spawn(f, SIDE_RIVAL, U_ARTILLERY, "FK Battery", "3x D-30 howitzers", {p.col - 2, p.row}, tk);
+    }
+
     // ---- Patrolling bands across the map (also the scale stress test) ----------------
     static const char *band_names[] = {"Black Eagle Militia", "Free Corps Brandt", "Wolny Legion", "Red Banner Remnant",
                                        "River Wolves", "Kowal's Raiders", "Grey Coats", "Iron Road Band",
@@ -395,7 +442,9 @@ void World::setup_scenario(int extra_groups) {
         if (town < 0) continue;
         std::string fname = band_names[g % 12];
         if (g >= 12) fname += fmt(" %d", g / 12 + 1);
-        formations.push_back({fname, SIDE_HOSTILE, town, false, 0, {}});
+        // Three-way: the bands take sides too, every other one with the Free Corps.
+        const int8_t bside = three_way && (g % 2) ? SIDE_RIVAL : SIDE_HOSTILE;
+        formations.push_back({fname, bside, town, false, 0, {}});
         int f = (int)formations.size() - 1;
         std::vector<int> tk;
         HexCoord p = S[town].pos;
@@ -406,7 +455,7 @@ void World::setup_scenario(int extra_groups) {
                                        : roll < 0.92 ? U_RECON : U_ARTILLERY;
             const char *equip = t == U_TANK ? "T-55" : t == U_MECH ? "BTR-70" : t == U_RECON ? "technicals"
                               : t == U_ARTILLERY ? "D-30 howitzers" : t == U_HQ ? "trucks" : "riflemen";
-            spawn(f, SIDE_HOSTILE, t, fmt("%.10s %d", fname.c_str(), k + 1), equip,
+            spawn(f, bside, t, fmt("%.10s %d", fname.c_str(), k + 1), equip,
                   {p.col + rng_.range_int(-3, 3), p.row + rng_.range_int(-3, 3)}, tk);
         }
     }
@@ -419,9 +468,16 @@ void World::setup_scenario(int extra_groups) {
     }
     for (int f = 0; f < (int)formations.size(); ++f) formations[f].start_combat = effective_combat_units(f);
     setup_holdings();
-    push_event(EV_INFO, -1, false,
-               fmt("Company Murks is billeted at %s. The 7th Guards Remnant is moving on the town from the east: "
-                   "break it before it breaks you.", S[player_home].name.c_str()));
+    if (three_way)
+        push_event(EV_INFO, -1, false,
+                   fmt("Company Murks is billeted at %s. The 7th Guards Remnant is coming from the east and "
+                       "Kessler's Free Corps from %s, and they are at war with each other as much as with you: "
+                       "outlast them both.",
+                       S[player_home].name.c_str(), S[r_town].name.c_str()));
+    else
+        push_event(EV_INFO, -1, false,
+                   fmt("Company Murks is billeted at %s. The 7th Guards Remnant is moving on the town from the east: "
+                       "break it before it breaks you.", S[player_home].name.c_str()));
     rebuild_buckets();
     update_zones();
 }
@@ -654,7 +710,7 @@ void World::capture(Holding &h, int side) {
     } else if (was == SIDE_PLAYER) {
         h.known_owner = (int8_t)side;
         push_event(EV_HOLDING, -1, true,
-                   fmt("%s has been taken by hostile forces.%s", h.name.c_str(),
+                   fmt("%s has been taken by %s forces.%s", h.name.c_str(), side_word(side),
                        stores.empty() ? "" : (" Lost with it:" + stores + ".").c_str()));
         // Routes through a lost source stop: the stores are no longer ours.
         for (auto &r : routes)
@@ -689,7 +745,7 @@ void World::add_militia_squad(Holding &h) {
         }
     m.slot = (int)formations[m.formation].members.size();
     m.pos = m.prev_pos = m.dest = h.pos;
-    m.last_seen_pos[0] = m.last_seen_pos[1] = h.pos;
+    for (auto &p : m.last_seen_pos) p = h.pos;
     m.morale = 55;
     m.readiness = 60;
     m.elements_max = m.elements = 1;
@@ -719,9 +775,13 @@ void World::update_holdings() {
         });
         if (fighting) h.last_fight = time_min;
         // Capture: one side alone in the place for CAPTURE_MIN takes it. Both present: the fight decides.
-        const int sides = (present[0] > 0) + (present[1] > 0);
+        int sides = 0, s = -1;
+        for (int k = 0; k < SIDE_COUNT; ++k)
+            if (present[k] > 0) {
+                ++sides;
+                s = k;
+            }
         if (sides == 1) {
-            const int s = present[0] > 0 ? 0 : 1;
             if (s == h.owner) {
                 h.contested_since = -1;
             } else if (h.contested_since < 0) {
@@ -742,10 +802,9 @@ void World::update_holdings() {
         if (h.owner < 0) continue;
         // Loyalty to the owner: protection raises it, enemies nearby with nobody to stop them,
         // fighting in the streets and requisitions lower it.
-        const int enemy = 1 - h.owner;
         bool enemy_near = false;
         for_units_near(h.pos, 10, [&](const Unit &u) {
-            if (u.alive && u.side == enemy && u.type != U_TRUCK && hex_distance(u.pos, h.pos) <= 10) enemy_near = true;
+            if (u.alive && u.side != h.owner && u.type != U_TRUCK && hex_distance(u.pos, h.pos) <= 10) enemy_near = true;
         });
         const bool militia_here = militia_squads(h) > 0;
         const bool troops_here = present[h.owner] > (militia_here ? 1 : 0);
@@ -1472,7 +1531,15 @@ bool World::road_step(int from_idx, int to_idx) const {
 
 float World::move_cost(const Unit &u, int from_idx, int to_idx, bool planning) const {
     if (map.at_index(to_idx).terrain == T_WATER) return -1;
-    return step_minutes(unit_type_info(u.type).mobility, u.mode, from_idx, to_idx, road_step(from_idx, to_idx), planning);
+    const bool road = road_step(from_idx, to_idx);
+    float c = step_minutes(unit_type_info(u.type).mobility, u.mode, from_idx, to_idx, road, planning);
+    // Civilian traffic on the road slows a column (MRK-34; first estimate: +25% a vehicle, at
+    // most double). Driving only: routes are planned on empty roads.
+    if (!planning && road && c > 0) {
+        const int n = civilians_at(to_idx);
+        if (n > 0) c *= std::min(2.0f, 1.0f + 0.25f * n);
+    }
+    return c;
 }
 
 float World::step_minutes(int mob, int move_mode, int from_idx, int to_idx, bool road, bool planning) const {
@@ -1823,7 +1890,7 @@ void World::add_dismounts(int cid) {
     d.formation = c.formation;
     d.slot = c.slot;
     d.pos = d.prev_pos = d.dest = c.pos;
-    d.last_seen_pos[0] = d.last_seen_pos[1] = c.pos;
+    for (auto &p : d.last_seen_pos) p = c.pos;
     d.morale = c.morale;
     d.elements_max = d.elements = c.elements_max;
     d.ai_next = c.ai_next;
@@ -2046,8 +2113,8 @@ void World::update_standoff() {
                 pause_route(u, RP_STANDOFF, bpos); // picks the route up once it is clear
                 if (u.side == SIDE_PLAYER)
                     push_event(EV_INFO, u.id, false,
-                               fmt("%s halts at its %.1f km stand-off from a hostile %s.", u.name.c_str(), S * 0.5,
-                                   unit_type_info(units[best].type).name));
+                               fmt("%s halts at its %.1f km stand-off from a %s %s.", u.name.c_str(), S * 0.5,
+                                   side_word(units[best].side), unit_type_info(units[best].type).name));
             }
             continue;
         }
@@ -2068,8 +2135,8 @@ void World::update_standoff() {
         }
         if (u.side == SIDE_PLAYER)
             push_event(EV_INFO, u.id, false,
-                       fmt("%s pulls back to keep %.1f km from a hostile %s.", u.name.c_str(), S * 0.5,
-                           unit_type_info(units[best].type).name));
+                       fmt("%s pulls back to keep %.1f km from a %s %s.", u.name.c_str(), S * 0.5,
+                           side_word(units[best].side), unit_type_info(units[best].type).name));
     }
 }
 
@@ -2475,6 +2542,7 @@ void World::tick() {
     update_movement();
     update_mounting();
     update_convoys();
+    update_civilians();
     if (time_min % 5 == 0) {
         rebuild_buckets();
         update_zones();
@@ -2900,11 +2968,12 @@ void World::update_movement() {
                     u.last_seen_pos[e.side] = u.pos;
                     if (u.side == SIDE_PLAYER)
                         push_event(was_known ? EV_INFO : EV_CONTACT, u.id, true,
-                                   fmt("%s halts %s: hostile %s in the next hex. Only an assault can go in.",
-                                       u.name.c_str(), place_name(u.pos).c_str(), unit_type_info(e.type).name));
+                                   fmt("%s halts %s: %s %s in the next hex. Only an assault can go in.",
+                                       u.name.c_str(), place_name(u.pos).c_str(), side_word(e.side),
+                                       unit_type_info(e.type).name));
                     else if (e.side == SIDE_PLAYER && !was_known)
                         push_event(EV_CONTACT, u.id, true,
-                                   fmt("Contact: hostile %s halts in front of %s %s.", unit_type_info(u.type).name,
+                                   fmt("Contact: %s %s halts in front of %s %s.", side_word(u.side), unit_type_info(u.type).name,
                                        e.name.c_str(), place_name(e.pos).c_str()));
                     u.path.clear();
                     u.path_i = 0;
@@ -3000,7 +3069,7 @@ void World::update_spotting(bool full_pass) {
             t.last_seen_pos[obs.side] = t.pos;
             if (!was_known && obs.side == SIDE_PLAYER) {
                 push_event(EV_CONTACT, t.id, true,
-                           fmt("Contact: hostile %s %s, spotted by %s.", unit_type_info(t.type).name,
+                           fmt("Contact: %s %s %s, spotted by %s.", side_word(t.side), unit_type_info(t.type).name,
                                place_name(t.pos).c_str(), obs.name.c_str()));
             }
         });
@@ -3134,7 +3203,7 @@ void World::update_combat() {
             u.seen_until[t.side] = std::max(u.seen_until[t.side], time_min + 2);
             if (time_min - u.last_seen[t.side] > 30 && t.side == SIDE_PLAYER)
                 push_event(EV_UNDER_FIRE, t.id, true,
-                           fmt("%s under fire from a hostile %s.", t.name.c_str(), ti.name));
+                           fmt("%s under fire from a %s %s.", t.name.c_str(), side_word(u.side), ti.name));
             u.last_seen[t.side] = time_min;
             u.last_seen_pos[t.side] = u.pos;
         }
@@ -3172,6 +3241,10 @@ void World::update_combat() {
             if (th.terrain == T_FOREST || th.terrain == T_URBAN) S *= 0.6f;
             suppress(t, S, time_min + std::max(1, minutes(et.cycle)));
         }
+        // Civilians (MRK-34): the area is dangerous for a while. They are non-combatants and
+        // take no damage.
+        note_danger(u.pos, false);
+        note_danger(t.pos, hit || ti.indirect);
         if (hit) {
             const float per_element = 100.0f / t.elements_max;
             kills = std::min(kills, t.elements);
@@ -3212,11 +3285,21 @@ void World::update_combat() {
                 t.path.clear();
                 t.path_i = 0;
                 t.pending.active = false;
-                if (t.side == SIDE_PLAYER && !t.militia) stats_.losses++;
-                else if (t.side != SIDE_PLAYER) stats_.kills++;
-                push_event(EV_DESTROYED, t.id, t.side == SIDE_PLAYER,
-                           t.side != SIDE_PLAYER
-                               ? fmt("Hostile %s destroyed by %s.", tt.name, u.name.c_str())
+                const bool own_hit = t.side == SIDE_PLAYER, own_shot = u.side == SIDE_PLAYER;
+                if (own_hit && !t.militia) stats_.losses++;
+                else if (!own_hit && own_shot) stats_.kills++;
+                std::string foe = side_word(t.side);
+                foe[0] = (char)std::toupper((unsigned char)foe[0]);
+                // Three-way: the other two fighting each other. Word of it only if the company saw it.
+                if (!own_hit && !own_shot) {
+                    if (seen_by(t, SIDE_PLAYER))
+                        push_event(EV_DESTROYED, t.id, false,
+                                   fmt("%s %s destroyed %s by %s fire.", foe.c_str(), tt.name, place_name(t.pos).c_str(),
+                                       side_word(u.side)));
+                } else {
+                push_event(EV_DESTROYED, t.id, own_hit,
+                           !own_hit
+                               ? fmt("%s %s destroyed by %s.", foe.c_str(), tt.name, u.name.c_str())
                            : t.militia
                                ? fmt("%s wiped out %s: the town has no garrison left.", t.name.c_str(),
                                      place_name(t.pos).c_str())
@@ -3225,6 +3308,7 @@ void World::update_combat() {
                                      "%d minutes to report to a new commander.",
                                      t.name.c_str(), place_name(t.pos).c_str(), HANDOVER_MIN)
                                : fmt("%s has been destroyed %s.", t.name.c_str(), place_name(t.pos).c_str()));
+                }
                 if (t.type == U_TRUCK) {
                     const std::string why = fmt("destroyed %s with %.0f L diesel, %.1f t ammunition, %.0f kg food aboard",
                                                 place_name(t.pos).c_str(), t.cargo_l, t.cargo_t, t.cargo_kg);
@@ -3497,16 +3581,29 @@ void World::update_logistics() {
 
 // The strike group hunts the company: it heads for the freshest sighting any hostile has
 // made, and every six hours or so gets word of where the company HQ is (locals talk).
+// Three-way: each hunter hunts both of the others' main forces (the company and the other
+// hunter, until that one is broken; the patrolling bands are left to the units that run into
+// them). It heads for the freshest sighting of either, and the word that comes in is about
+// whichever of them is nearer to it.
 void World::update_hunters() {
-    for (auto &f : formations) {
+    const bool three_way = scenario == SC_THREE_WAY;
+    for (int fi = 0; fi < (int)formations.size(); ++fi) {
+        Formation &f = formations[fi];
         if (!f.hunts_player) continue;
+        const int me = f.side;
+        auto prey = [&](const Unit &p) {
+            if (!p.alive || p.side == me) return false;
+            if (!three_way) return p.side == SIDE_PLAYER;
+            const Formation &pf = formations[p.formation];
+            return p.side == SIDE_PLAYER || (pf.hunts_player && !pf.broken);
+        };
         int64_t best_t = -100000;
         HexCoord best_pos;
         for (const auto &p : units) {
-            if (!p.alive || p.side != SIDE_PLAYER) continue;
-            if (p.last_seen[SIDE_HOSTILE] > best_t) {
-                best_t = p.last_seen[SIDE_HOSTILE];
-                best_pos = p.last_seen_pos[SIDE_HOSTILE];
+            if (!prey(p)) continue;
+            if (p.last_seen[me] > best_t) {
+                best_t = p.last_seen[me];
+                best_pos = p.last_seen_pos[me];
             }
         }
         if (best_t > f.target_time && time_min - best_t <= 180) {
@@ -3516,10 +3613,48 @@ void World::update_hunters() {
         }
         if (time_min >= f.intel_next) {
             f.intel_next = time_min + 360 + rng_.range_int(0, 120);
-            // Word comes in about some part of the company, not necessarily its HQ.
+            // Word comes in about some part of the company (three-way: of the nearer force), not
+            // necessarily its HQ.
+            int prey_side = SIDE_PLAYER, prey_formation = -1;
+            if (three_way) {
+                int lead = acting_hq(fi);
+                if (lead < 0)
+                    for (int id : f.members)
+                        if (units[id].alive) {
+                            lead = id;
+                            break;
+                        }
+                // The forces it could hear of: the company and each other hunter still in the
+                // field, at the distance of their nearest unit. One is picked at random, the
+                // nearer the likelier (weight 1 / distance^2), so the two hunters go for each
+                // other about as often as for the company.
+                struct Force {
+                    int side, formation, dist;
+                };
+                std::vector<Force> forces;
+                if (lead >= 0)
+                    for (const auto &p : units) {
+                        if (!prey(p) || p.militia) continue;
+                        const int pf = p.side == SIDE_PLAYER ? -1 : p.formation;
+                        const int d = hex_distance(p.pos, units[lead].pos);
+                        auto it = std::find_if(forces.begin(), forces.end(), [&](const Force &x) { return x.formation == pf; });
+                        if (it == forces.end()) forces.push_back({p.side, pf, d});
+                        else it->dist = std::min(it->dist, d);
+                    }
+                double total = 0;
+                for (const auto &x : forces) total += 1.0 / std::max(1.0, (double)x.dist * x.dist);
+                double roll = rng_.uniform() * total;
+                for (const auto &x : forces) {
+                    prey_side = x.side;
+                    prey_formation = x.formation;
+                    roll -= 1.0 / std::max(1.0, (double)x.dist * x.dist);
+                    if (roll <= 0) break;
+                }
+            }
             std::vector<int> own;
             for (const auto &p : units)
-                if (p.alive && p.side == SIDE_PLAYER && !p.militia) own.push_back(p.id);
+                if (p.alive && p.side == prey_side && !p.militia && (prey_formation < 0 || p.formation == prey_formation))
+                    own.push_back(p.id);
             if (!own.empty() && time_min - f.target_time > 120) {
                 HexCoord h = units[own[rng_.range_int(0, (int)own.size() - 1)]].pos;
                 HexCoord guess{h.col + rng_.range_int(-4, 4), h.row + rng_.range_int(-4, 4)};
@@ -3536,6 +3671,17 @@ int World::strike_formation() const {
     for (int i = 0; i < (int)formations.size(); ++i)
         if (formations[i].hunts_player) return i;
     return -1;
+}
+
+std::vector<int> World::hunter_formations() const {
+    std::vector<int> out;
+    for (int i = 0; i < (int)formations.size(); ++i)
+        if (formations[i].hunts_player) out.push_back(i);
+    return out;
+}
+
+const char *World::side_word(int side) const {
+    return scenario == SC_THREE_WAY && side == SIDE_RIVAL ? "rival" : "hostile";
 }
 
 int World::effective_combat_units(int formation) const {
@@ -3560,6 +3706,31 @@ void World::check_outcome() {
                             ? "Company Murks is no longer combat effective, and its HQ is gone."
                             : "Company Murks is no longer combat effective.";
         push_event(EV_INFO, -1, true, outcome_text_);
+        return;
+    }
+    if (scenario == SC_THREE_WAY) {
+        // 1v1v1: the company wins once both of the others are broken, by its hand or each other's.
+        const std::vector<int> hs = hunter_formations();
+        std::vector<int> fresh, standing;
+        for (int i : hs) {
+            if (formations[i].start_combat > 0 && effective_combat_units(i) == 0) {
+                if (!formations[i].broken) fresh.push_back(i);
+            } else {
+                standing.push_back(i);
+            }
+        }
+        for (int i : fresh) formations[i].broken = true;
+        if (hs.empty()) return;
+        if (standing.empty()) {
+            outcome_ = OUT_VICTORY;
+            outcome_text_ = "The 7th Guards Remnant and Kessler's Free Corps are both broken. Company Murks holds the field.";
+            push_event(EV_INFO, -1, true, outcome_text_);
+            return;
+        }
+        for (int i : fresh)
+            push_event(EV_INFO, -1, true,
+                       formations[i].name + " is broken. " + formations[standing[0]].name +
+                           " is still in the field.");
         return;
     }
     int sf = strike_formation();
@@ -3745,7 +3916,7 @@ bool World::set_start_time(int day, int hour) {
 // ------------------------------------------------------------------------------------
 
 namespace {
-constexpr char kSaveMagic[8] = {'M', 'U', 'R', 'K', 'S', 'S', 'V', 'A'}; // v10
+constexpr char kSaveMagic[8] = {'M', 'U', 'R', 'K', 'S', 'S', 'V', 'C'}; // v12: civilians (MRK-34), then the scenario kind (three-way)
 
 struct SaveWriter {
     std::vector<uint8_t> b;
@@ -3809,6 +3980,14 @@ template <typename A> void io_route(A &a, std::vector<Waypoint> &r) {
     for (auto &w : r) {
         a.pod(w.at); a.pod(w.mode); a.pod(w.halt_min); a.pod(w.shape);
     }
+}
+
+// v11 on the civilians branch, v12 after the three-way merge: civilians (MRK-34).
+template <typename A> void io_civilian(A &a, Civilian &c) {
+    a.pod(c.id); a.pod(c.kind); a.pod(c.state); a.pod(c.country); a.pod(c.alive); a.pod(c.seen); a.pod(c.fleeing);
+    a.pod(c.pos); a.pod(c.prev_pos); a.pod(c.home); a.pod(c.dest); a.pod(c.target);
+    a.ints(c.path);
+    a.pod(c.path_i); a.pod(c.progress); a.pod(c.step_cost); a.pod(c.wait_until);
 }
 
 template <typename A, typename U> void io_unit(A &a, U &u) {
@@ -3883,6 +4062,7 @@ template <typename A, typename F> void io_formation(A &a, F &f) {
     a.str(f.name); a.pod(f.side); a.pod(f.objective); a.pod(f.hunts_player); a.pod(f.dwell_until);
     a.ints(f.members);
     a.pod(f.has_target); a.pod(f.target); a.pod(f.target_time); a.pod(f.intel_next); a.pod(f.start_combat);
+    a.pod(f.broken); // v12 (three-way)
 }
 } // namespace
 
@@ -3917,6 +4097,15 @@ std::vector<uint8_t> World::save_state() const {
         w.ints(m.xy);
     }
     w.pod(sandbox); w.pod(hostile_ai); w.pod(clock_started_);
+    w.pod(civilians_on); w.pod(civ_rng_.state()); w.pod(civ_next_id_);
+    w.pod((uint32_t)civilians.size());
+    for (const auto &c : civilians) io_civilian(w, const_cast<Civilian &>(c));
+    w.ints(active_towns_);
+    w.pod((uint32_t)danger_.size());
+    for (const auto &d : danger_) { w.pod(d.at); w.pod(d.until); }
+    w.pod((uint32_t)incidents_.size());
+    for (const auto &in : incidents_) { w.pod(in.at); w.pod(in.last_shot); w.pod(in.served); }
+    w.pod(scenario); // v12 (three-way; v11 on its own branch)
     return w.b;
 }
 
@@ -3971,7 +4160,36 @@ bool World::load_state(const uint8_t *data, size_t size, std::string *error) {
     }
     bool sbx = false, hai = true, clk = false;
     r.pod(sbx); r.pod(hai); r.pod(clk);
+    bool civ_on = true;
+    uint64_t civ_rs = 0;
+    int civ_next = 0;
+    r.pod(civ_on); r.pod(civ_rs); r.pod(civ_next);
+    std::vector<Civilian> civs(r.count(100000));
+    for (auto &c : civs) io_civilian(r, c);
+    std::vector<int> act;
+    r.ints(act);
+    std::vector<DangerMark> dng(r.count(1u << 20));
+    for (auto &d : dng) { r.pod(d.at); r.pod(d.until); }
+    std::vector<Incident> inc(r.count(1u << 20));
+    for (auto &in : inc) { r.pod(in.at); r.pod(in.last_shot); r.pod(in.served); }
+    for (int s2 : act)
+        if (s2 < 0 || s2 >= (int)map.settlements.size()) r.ok = false;
+    for (const auto &c : civs)
+        if (c.kind >= CV_KIND_COUNT || c.state > CS_RETURNING || !map.in_bounds(c.pos) || c.home >= (int)map.settlements.size() ||
+            c.dest >= (int)map.settlements.size() || c.path_i < 0 || c.path_i > (int)c.path.size())
+            r.ok = false;
+    for (const auto &c : civs)
+        for (int idx : c.path)
+            if (idx < 0 || idx >= map.cols() * map.rows()) r.ok = false;
+    uint8_t scn = SC_CONTRACT;
+    r.pod(scn);
     if (!r.ok) return fail("save is truncated or corrupt");
+    if (scn >= SC_COUNT) return fail("save is corrupt");
+    for (const auto &f : fs)
+        if (f.side < 0 || f.side >= SIDE_COUNT) return fail("save is corrupt");
+    for (const auto &h : hs)
+        if (h.owner < -1 || h.owner >= SIDE_COUNT || h.known_owner < -1 || h.known_owner >= SIDE_COUNT)
+            return fail("save is corrupt");
     for (const auto &m : mks)
         if (!marking_ok(map, m)) return fail("save is corrupt");
     for (const auto &h : hs)
@@ -3996,7 +4214,7 @@ bool World::load_state(const uint8_t *data, size_t size, std::string *error) {
     for (int i = 0; i < (int)us.size(); ++i) {
         const Unit &u = us[i];
         if (u.id != i || u.formation < 0 || u.formation >= (int)fs.size() || !map.in_bounds(u.pos) ||
-            u.type >= U_TYPE_COUNT || u.path_i > u.path.size() || u.elements_max <= 0 || u.elements < 0 ||
+            u.side < 0 || u.side >= SIDE_COUNT || u.type >= U_TYPE_COUNT || u.path_i > u.path.size() || u.elements_max <= 0 || u.elements < 0 ||
             u.elements > u.elements_max || u.carrier >= (int)us.size() || u.dismounts >= (int)us.size() ||
             u.carrier < -1 || u.dismounts < -1 || u.holding >= (int)hs.size() || u.convoy_route >= (int)rts.size())
             return fail("save is corrupt");
@@ -4026,6 +4244,16 @@ bool World::load_state(const uint8_t *data, size_t size, std::string *error) {
     sandbox = sbx;
     hostile_ai = hai;
     clock_started_ = clk;
+    civilians_on = civ_on;
+    civ_rng_.set_state(civ_rs);
+    civ_next_id_ = civ_next;
+    civilians = std::move(civs);
+    active_towns_ = std::move(act);
+    danger_ = std::move(dng);
+    incidents_ = std::move(inc);
+    civ_rebuild_counts();
+    stats_.civilians = (int)civilians.size();
+    scenario = scn;
     used_diesel_l_ = used_l;
     used_ammo_t_ = used_t;
     formations = std::move(fs);

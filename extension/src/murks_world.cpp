@@ -60,7 +60,8 @@ void MurksWorld::_bind_methods() {
     ClassDB::bind_method(D_METHOD("load_map_bytes", "bytes"), &MurksWorld::load_map_bytes);
     ClassDB::bind_method(D_METHOD("get_map_info"), &MurksWorld::get_map_info);
     ClassDB::bind_method(D_METHOD("world_to_lonlat", "pos"), &MurksWorld::world_to_lonlat);
-    ClassDB::bind_method(D_METHOD("setup_scenario", "hostile_groups"), &MurksWorld::setup_scenario);
+    ClassDB::bind_method(D_METHOD("setup_scenario", "hostile_groups", "kind"), &MurksWorld::setup_scenario, DEFVAL(0));
+    ClassDB::bind_method(D_METHOD("get_scenario"), &MurksWorld::get_scenario);
     ClassDB::bind_method(D_METHOD("get_map_size"), &MurksWorld::get_map_size);
     ClassDB::bind_method(D_METHOD("get_chunk_count"), &MurksWorld::get_chunk_count);
     ClassDB::bind_method(D_METHOD("get_world_size"), &MurksWorld::get_world_size);
@@ -149,6 +150,10 @@ void MurksWorld::_bind_methods() {
     ClassDB::bind_method(D_METHOD("set_start_time", "day", "hour"), &MurksWorld::set_start_time);
     ClassDB::bind_method(D_METHOD("is_clock_started"), &MurksWorld::is_clock_started);
     ClassDB::bind_method(D_METHOD("set_reveal_hostiles", "on"), &MurksWorld::set_reveal_hostiles);
+    ClassDB::bind_method(D_METHOD("get_civilians_snapshot"), &MurksWorld::get_civilians_snapshot);
+    ClassDB::bind_method(D_METHOD("get_civilian_info", "id"), &MurksWorld::get_civilian_info);
+    ClassDB::bind_method(D_METHOD("sandbox_place_civilian", "kind", "hex"), &MurksWorld::sandbox_place_civilian);
+    ClassDB::bind_method(D_METHOD("sandbox_remove_civilian", "id"), &MurksWorld::sandbox_remove_civilian);
     ClassDB::bind_method(D_METHOD("get_reveal_hostiles"), &MurksWorld::get_reveal_hostiles);
 }
 
@@ -211,8 +216,10 @@ Vector2 MurksWorld::world_to_lonlat(Vector2 pos) const {
     return Vector2((real_t)lon, (real_t)lat);
 }
 
-void MurksWorld::setup_scenario(int hostile_groups) {
-    if (generated_) world_.setup_scenario(hostile_groups);
+int MurksWorld::get_scenario() const { return (int)world_.scenario; }
+
+void MurksWorld::setup_scenario(int hostile_groups, int kind) {
+    if (generated_) world_.setup_scenario(hostile_groups, kind);
 }
 
 Vector2i MurksWorld::get_map_size() const { return Vector2i(world_.map.cols(), world_.map.rows()); }
@@ -629,6 +636,7 @@ Dictionary MurksWorld::get_objectives() const {
     d["time_minutes"] = (int64_t)world_.time_min;
     d["hq_alive"] = world_.hq_of(murks::SIDE_PLAYER) >= 0;
     d["sandbox"] = world_.sandbox;
+    d["civilians"] = world_.stats().civilians;
     d["hostile_ai"] = world_.hostile_ai;
     // Who runs the trains once the HQ is lost: "" while the HQ lives or during the handover.
     const int acting = world_.acting_hq(0);
@@ -642,6 +650,17 @@ Dictionary MurksWorld::get_objectives() const {
     d["enemy_name"] = sf >= 0 ? to_gd(world_.formations[sf].name) : String();
     d["enemy_effective"] = sf >= 0 ? world_.effective_combat_units(sf) : 0;
     d["enemy_start"] = sf >= 0 ? world_.formations[sf].start_combat : 0;
+    // Three-way: the second hunter, Kessler's Free Corps.
+    d["three_way"] = world_.scenario == murks::SC_THREE_WAY;
+    const std::vector<int> hunters = world_.hunter_formations();
+    const int rf = hunters.size() > 1 ? hunters[1] : -1;
+    d["rival_name"] = rf >= 0 ? to_gd(world_.formations[rf].name) : String();
+    d["rival_effective"] = rf >= 0 ? world_.effective_combat_units(rf) : 0;
+    d["rival_start"] = rf >= 0 ? world_.formations[rf].start_combat : 0;
+    if (rf >= 0) {
+        const int t = world_.formations[rf].objective;
+        d["rival_from"] = t >= 0 && t < (int)world_.map.settlements.size() ? to_gd(world_.map.settlements[t].name) : String();
+    }
     int home = world_.player_home;
     d["home"] = home >= 0 && home < (int)world_.map.settlements.size() ? to_gd(world_.map.settlements[home].name)
                                                                        : String();
@@ -745,6 +764,7 @@ PackedFloat32Array MurksWorld::get_units_snapshot() const {
         q[SF_ROLE] = !grouped ? -1.0f : world_.groups[u.group].leader == u.id ? 2.0f : (u.follow ? 1.0f : 0.0f);
         q[SF_GROUP_COLOR] = grouped ? (float)world_.groups[u.group].color : -1.0f;
         q[SF_STANDOFF] = own ? (float)world_.standoff_hexes(u) : -1.0f;
+        q[SF_STANDOFF_SET] = own ? (float)u.standoff : -1.0f;
         q[SF_CMD_ZONE] = own && (u.type == murks::U_HQ || (grouped && world_.groups[u.group].leader == u.id))
                              ? (float)world_.command_zone(u) : 0.0f;
         q[SF_CMD_BOSS] = -1.0f;
@@ -1334,7 +1354,10 @@ Dictionary MurksWorld::get_holding(int hid) const {
     d["population"] = h.population;
     // The owner as the player knows it: their own places exactly, the rest as last seen.
     d["owner"] = (int)h.known_owner;
-    d["owner_name"] = h.known_owner == murks::SIDE_PLAYER ? "Company Murks" : h.known_owner == murks::SIDE_HOSTILE ? "Hostile" : "Independent";
+    d["owner_name"] = h.known_owner == murks::SIDE_PLAYER   ? "Company Murks"
+                      : h.known_owner == murks::SIDE_HOSTILE ? "Hostile"
+                      : h.known_owner == murks::SIDE_RIVAL   ? "Rival"
+                                                             : "Independent";
     d["own"] = own;
     d["location"] = to_gd(world_.place_name(h.pos));
     // Garrison: own militia exactly; others' when seen.
@@ -1442,6 +1465,58 @@ bool MurksWorld::set_start_time(int day, int hour) { return world_.set_start_tim
 bool MurksWorld::is_clock_started() const { return world_.clock_started(); }
 void MurksWorld::set_reveal_hostiles(bool on) { reveal_hostiles_ = on; }
 bool MurksWorld::get_reveal_hostiles() const { return reveal_hostiles_; }
+
+PackedFloat32Array MurksWorld::get_civilians_snapshot() const {
+    PackedFloat32Array out;
+    const bool all = reveal_hostiles_ && world_.sandbox;
+    for (const auto &c : world_.civilians) {
+        if (!c.alive || !(c.seen || all)) continue;
+        murks::Vec2 a = murks::hex_center(c.pos), b = a;
+        float frac = 0;
+        if (c.moving()) {
+            b = murks::hex_center(world_.map.coord_of(c.path[c.path_i]));
+            frac = c.step_cost > 0 ? std::min(1.0f, c.progress / c.step_cost) : 0.0f;
+        } else if (c.prev_pos != c.pos) {
+            murks::Vec2 p = murks::hex_center(c.prev_pos);
+            b = murks::Vec2{a.x + (a.x - p.x), a.y + (a.y - p.y)}; // heading only
+        }
+        const double hx = b.x - a.x, hy = b.y - a.y;
+        const double hl = std::hypot(hx, hy);
+        out.append((float)c.id);
+        out.append((float)c.kind);
+        out.append((float)(a.x + (c.moving() ? hx * frac : 0)));
+        out.append((float)(a.y + (c.moving() ? hy * frac : 0)));
+        out.append(hl > 0 ? (float)(hx / hl) : 1.0f);
+        out.append(hl > 0 ? (float)(hy / hl) : 0.0f);
+        out.append((float)c.state);
+        out.append((float)c.country);
+    }
+    return out;
+}
+
+Dictionary MurksWorld::get_civilian_info(int id) const {
+    Dictionary d;
+    const murks::Civilian *c = world_.civilian(id);
+    if (!c) return d;
+    const auto &st = world_.map.settlements;
+    const char *police = c->country == murks::CC_POLAND ? "Milicja Obywatelska" : "Volkspolizei";
+    String kind = String(murks::civ_kind_name(c->kind));
+    if (c->kind == murks::CV_POLICE) kind = String("police car (") + police + ")";
+    d["id"] = c->id;
+    d["kind"] = (int)c->kind;
+    d["name"] = kind;
+    d["state"] = String(murks::civ_state_name(c->state));
+    d["home"] = c->home >= 0 && c->home < (int)st.size() ? String(st[c->home].name.c_str()) : String("");
+    d["dest"] = c->dest >= 0 && c->dest < (int)st.size() ? String(st[c->dest].name.c_str()) : String("");
+    d["fleeing"] = c->fleeing;
+    d["hex"] = Vector2i(c->pos.col, c->pos.row);
+    return d;
+}
+
+int MurksWorld::sandbox_place_civilian(int kind, Vector2i hex) {
+    return world_.sandbox_place_civilian(kind, murks::HexCoord{hex.x, hex.y});
+}
+bool MurksWorld::sandbox_remove_civilian(int id) { return world_.sandbox_remove_civilian(id); }
 
 bool MurksWorld::is_orderable(int id) const {
     return id >= 0 && id < (int)world_.units.size() && world_.units[id].alive && world_.orderable(world_.units[id]);

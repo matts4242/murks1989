@@ -60,6 +60,7 @@ func _draw() -> void:
 	_draw_mount_links(xf)
 	_draw_fire_links(xf)
 	_draw_orders(xf)
+	_draw_civilians(xf, view)
 	_draw_units(xf, view)
 	_draw_net_outlines()
 	_draw_fx(xf)
@@ -179,7 +180,8 @@ func _draw_towns(xf: Transform2D, zoom: float, view: Rect2) -> void:
 # shaken, hatching when broken or falling back), an under-fire bar along the top, and a
 # signal-yellow selection ring. Last-seen markers are faded with a dashed outline and "?".
 
-const SIDE_COL := [Color("#2c5ea8"), Color("#b0342b")]
+# Company blue, hostile red, and (three-way only) the rival Free Corps in purple (civilians keep APP-6 neutral green).
+const SIDE_COL := [Color("#2c5ea8"), Color("#b0342b"), Color("#6e3f96")]
 const BOX_PAPER := Color("#f4f2ea")
 const SYMBOL_INK := Color("#141712")
 const SIGNAL := Color("#d39a17")
@@ -187,11 +189,12 @@ const MIN_COUNTER := 10.0
 const THEATER_COUNTER := 22.0
 const COMPANY_COUNTER := 28.0
 const ECHELONS := ["coy", "plt", "plt", "plt", "sec", "btty", "col"] # by unit type (col: a supply column)
-const HOLDING_COL := [Color("#2c5ea8"), Color("#b0342b"), Color("#7a7f74")] # owner: company, hostile, independent
+const HOLDING_COL := [Color("#2c5ea8"), Color("#b0342b"), Color("#7a7f74"), Color("#6e3f96")] # company, hostile, independent, rival
 const HOLDING_GLYPH := ["T", "F", "D", "A"]  # town, farm collective, fuel depot, ammo dump
 const SF_MILITIA := 35              # own or seen units: 1 for a town's militia
 const SF_CONVOY := 36               # own supply columns: convoy state, else -1
 const SF_CARGO_T := 37              # own supply columns: tonnes aboard, else -1
+const SF_STANDOFF_SET := 38         # own units: own stand-off setting (255 = company default), else -1
 const CONVOY_COL := [Color("#9fb7a0"), Color("#8bd450"), Color("#f4f2ea"), Color("#5ab0ff"), Color("#f4f2ea"), Color("#c8c8c8")]
 const TEAM_COLORS := [Color("#f2c14e"), Color("#39c0b0"), Color("#c77dff"), Color("#8bd450"),
 	Color("#ff8c42"), Color("#5ab0ff"), Color("#ff6f91"), Color("#d9d9d9")]
@@ -245,7 +248,7 @@ func _row_item(o: int, i: int) -> Dictionary:
 		"under": main.oob_under.has(id),
 		"echelon": ECHELONS[clampi(int(snap[o + 2]), 0, 6)], "row": i,
 		"engage": snap[o + 17], "elem": int(snap[o + 18]), "elem_max": int(snap[o + 19]),
-		"team": int(snap[o + 20]), "role": int(snap[o + 21]), "tcol": int(snap[o + 22]), "standoff": int(snap[o + 24]),
+		"team": int(snap[o + 20]), "role": int(snap[o + 21]), "tcol": int(snap[o + 22]), "standoff": int(snap[o + 24]), "so_set": int(snap[o + SF_STANDOFF_SET]) if main.stride > SF_STANDOFF_SET else -1,
 		"carry": int(snap[o + SF_CARRY]), "supp": snap[o + SF_SUPP],
 		"militia": snap[o + SF_MILITIA] > 0.5, "convoy": int(snap[o + SF_CONVOY]), "cargo": snap[o + SF_CARGO_T]}
 	item["veh"] = vehicle_of(id, int(snap[o + 2]))
@@ -354,7 +357,7 @@ func _draw_counter(c: Vector2, s: float, it: Dictionary) -> void:
 	var rad := maxf(1.5, s * 0.11)
 	var ghost: bool = it["ghost"]
 	var side: int = it["side"]
-	var fill: Color = SIDE_COL[clampi(side, 0, 1)]
+	var fill: Color = SIDE_COL[clampi(side, 0, 2)]
 	var shape := _rrect(c, s, rad)
 	if ghost:
 		fill.a = 0.5
@@ -377,7 +380,7 @@ func _draw_counter(c: Vector2, s: float, it: Dictionary) -> void:
 		draw_rect(box, Color(0.85, 0.78, 0.55, 0.45 if ghost else 0.7))
 		draw_rect(box, ink, false, lw)
 	if show_vehicles and String(it.get("veh", "")) != "":
-		_draw_vehicle(box, String(it["veh"]), ink, paper, side == 1, int(it["type"]) == 0)
+		_draw_vehicle(box, String(it["veh"]), ink, paper, side != 0, int(it["type"]) == 0)
 	else:
 		_draw_symbol(box, int(it["type"]), ink, lw)
 	if it.get("militia", false) and s >= 22.0:
@@ -482,8 +485,13 @@ func _draw_counter(c: Vector2, s: float, it: Dictionary) -> void:
 		var tr := Rect2(Vector2(c.x - tw * 0.5 - 4, c.y - h - 17), Vector2(tw + 8, 14))
 		draw_rect(tr, SIGNAL)
 		draw_string(font, Vector2(tr.position.x + 4, tr.end.y - 3), t, HORIZONTAL_ALIGNMENT_LEFT, -1, fs, Color("#221800"))
+	# Standing-order tags (MRK-35): only what differs from the company's standing orders
+	# (fire at will, the company default stand-off), and everything for a selection of a few units.
 	var roe: int = it["roe"]
 	var so: int = it.get("standoff", -1)
+	var sel_tag: bool = it.get("sel", false) and main.selected.size() <= 4 # a whole company selected stays uncluttered
+	if not sel_tag and int(it.get("so_set", -1)) == 255:
+		so = 0
 	if (roe > 0 or so > 0) and not ghost:
 		var tag := ""
 		if roe > 0:
@@ -576,6 +584,67 @@ func _stadium(r: Rect2, ink: Color, lw: float) -> void:
 	draw_polyline(pts, ink, lw, true)
 
 
+# --- Civilians (MRK-34) -----------------------------------------------------------------
+# Neutral counters: square, pale green (APP-6 neutral), smaller than a unit's and drawn under
+# the units. The box shows the vehicle in side view facing where it drives; services carry a
+# blue light. In NATO-symbol mode (F7) the box holds a short abbreviation. Zoomed far out, or
+# with company grouping on, each is a small green dot.
+
+const CIV_FILL := Color("#b9dcaa")
+const CIV_FRAME := Color("#2f5a28")
+const CIV_INK := Color("#1d3519")
+const CIV_PAPER := Color("#f1f7ec")
+const CIV_KEYS := ["civ_car", "civ_bus", "civ_tractor", "civ_lorry", "civ_police", "civ_fire", "civ_amb"]
+const CIV_ABBR := ["CAR", "BUS", "TRC", "LRY", "POL", "FIRE", "AMB"]
+
+
+func _draw_civilians(xf: Transform2D, view: Rect2) -> void:
+	if not main.show_civilians:
+		return
+	var snap: PackedFloat32Array = main.civ_snapshot
+	var stride: int = main.CIV_STRIDE
+	var n := snap.size() / stride
+	if n == 0:
+		return
+	var s := counter_size() * 0.62
+	var dots := grouping_active() or s < 12.0
+	var stack := {}
+	for i in n:
+		var o := i * stride
+		var p: Vector2 = xf * Vector2(snap[o + 2], snap[o + 3])
+		if not view.has_point(p):
+			continue
+		if dots:
+			draw_circle(p, 3.0, CIV_FRAME)
+			draw_circle(p, 2.0, CIV_FILL)
+			continue
+		# A few sharing a spot fan out so each stays visible.
+		var key := Vector2i(int(p.x / (s * 0.5)), int(p.y / (s * 0.5)))
+		var k: int = stack.get(key, 0)
+		stack[key] = k + 1
+		p += Vector2(k * s * 0.22, -k * s * 0.18)
+		_draw_civ_counter(p, s, int(snap[o + 1]), snap[o + 4] < 0.0, int(snap[o + 6]))
+
+
+func _draw_civ_counter(c: Vector2, s: float, kind: int, faces_left: bool, state: int) -> void:
+	var h := s * 0.5
+	var r := Rect2(c - Vector2(h, h), Vector2(s, s))
+	draw_rect(Rect2(r.position + Vector2(s * 0.05, s * 0.07), r.size), Color(0, 0, 0, 0.28))
+	draw_rect(r, CIV_FILL)
+	draw_rect(r, CIV_FRAME, false, maxf(1.0, s * 0.05))
+	var box := Rect2(c.x - s * 0.4, c.y - s * 0.26, s * 0.8, s * 0.52)
+	draw_rect(box, CIV_PAPER)
+	var kind_i := clampi(kind, 0, CIV_KEYS.size() - 1)
+	if show_vehicles:
+		_draw_vehicle(box, CIV_KEYS[kind_i], CIV_INK, CIV_PAPER, faces_left, false)
+	else:
+		_text_center(box.get_center() + Vector2(0, s * 0.08), CIV_ABBR[kind_i], int(s * 0.24), CIV_INK)
+	draw_rect(box, CIV_INK, false, maxf(0.8, s * 0.03))
+	# Pulled over (state 2) or working a scene (state 4): a small bar under the box, it is not driving.
+	if state == 2 or state == 4:
+		draw_rect(Rect2(c.x - s * 0.3, c.y + s * 0.32, s * 0.6, maxf(1.5, s * 0.07)), CIV_INK)
+
+
 # --- Vehicle silhouettes ----------------------------------------------------------------
 # With "Vehicles on counters" on (View menu, F7) the symbol box shows the unit's most
 # important vehicle in side view instead of its NATO symbol: own units face right, hostile
@@ -585,6 +654,7 @@ func _stadium(r: Rect2, ink: Color, lw: float) -> void:
 # sharing a hex the highest-ranking unit lies on top.
 
 var show_vehicles := true
+const BLUE_LIGHT := Color(0.3, 0.55, 1.0)
 var _veh_cache := {}      # unit id -> silhouette key
 var _veh_cache_tick := 0
 
@@ -763,6 +833,62 @@ func _draw_vehicle(r: Rect2, key: String, ink: Color, paper: Color, flip: bool, 
 			wheels.call([26, 76], 49, 9, ink)
 			if k * 3.4 >= 1.0:
 				poly.call([40, 20, 58, 20, 63, 29, 40, 29], paper)
+		"civ_car":   # small saloon (Trabant, Wartburg, Polski Fiat)
+			poly.call([6, 42, 6, 31, 24, 29, 34, 17, 64, 17, 76, 29, 96, 32, 96, 42], ink)
+			wheels.call([24, 78], 46, 8, ink)
+			if k * 3.4 >= 1.0:
+				poly.call([38, 21, 62, 21, 70, 28, 32, 28], paper)
+		"civ_bus":   # long single-deck coach (Ikarus)
+			poly.call([2, 10, 92, 10, 98, 16, 98, 44, 2, 44], ink)
+			if k * 3.0 >= 1.0:
+				for wx in [8, 26, 44, 62, 80]:
+					poly.call([wx, 15, wx + 13, 15, wx + 13, 26, wx, 26], paper)
+			wheels.call([18, 80], 48, 8, ink)
+		"civ_tractor":   # small bonnet in front, cab, big rear wheel
+			poly.call([48, 28, 92, 28, 94, 42, 48, 42], ink)
+			line.call(26, 6, 50, 6, 3.0)
+			line.call(28, 6, 28, 34, 3.0)
+			line.call(48, 6, 48, 30, 3.0)
+			line.call(72, 28, 72, 14, 3.0)
+			wheels.call([34], 42, 16, ink)
+			wheels.call([84], 49, 9, ink)
+			if k * 6.0 >= 1.0:
+				wheels.call([34], 42, 6, paper)
+		"civ_lorry":   # cab-forward flatbed lorry with stakes (IFA W50, Star 28)
+			poly.call([70, 12, 90, 12, 98, 24, 98, 42, 70, 42], ink)
+			poly.call([2, 32, 68, 32, 68, 42, 2, 42], ink)
+			for sx in [4, 24, 44, 64]:
+				line.call(sx, 32, sx, 18, 2.6)
+			line.call(4, 18, 66, 18, 2.2)
+			wheels.call([16, 34, 84], 47, 7.5, ink)
+			if k * 3.4 >= 1.0:
+				poly.call([76, 16, 88, 16, 93, 24, 76, 24], paper)
+		"civ_police":   # saloon with a light bar
+			poly.call([6, 42, 6, 31, 24, 29, 34, 17, 64, 17, 76, 29, 96, 32, 96, 42], ink)
+			poly.call([42, 9, 58, 9, 58, 16, 42, 16], ink)
+			wheels.call([24, 78], 46, 8, ink)
+			if k * 3.4 >= 1.0:
+				poly.call([38, 21, 62, 21, 70, 28, 32, 28], paper)
+				line.call(10, 36, 92, 36, 1.4)
+			draw_circle(P.call(50, 7), maxf(1.2, 4.0 * k), BLUE_LIGHT)
+		"civ_fire":   # fire engine: cab, equipment body, ladder on top
+			poly.call([74, 14, 92, 14, 98, 24, 98, 42, 74, 42], ink)
+			poly.call([4, 18, 72, 18, 72, 42, 4, 42], ink)
+			line.call(4, 10, 74, 10, 2.4)
+			line.call(4, 14, 74, 14, 2.4)
+			if k * 3.0 >= 1.0:
+				for lx in range(8, 72, 9):
+					line.call(lx, 10, lx, 14, 1.4)
+			wheels.call([18, 58, 86], 47, 7.5, ink)
+			draw_circle(P.call(84, 11), maxf(1.2, 4.0 * k), BLUE_LIGHT)
+		"civ_amb":   # ambulance van (Barkas, Nysa), a plus on its side
+			poly.call([4, 12, 66, 12, 80, 22, 96, 26, 96, 42, 4, 42], ink)
+			if k * 3.4 >= 1.0:
+				poly.call([70, 16, 78, 22, 70, 22], paper)
+				draw_line(P.call(32, 18), P.call(32, 36), paper, maxf(1.0, 4.0 * k))
+				draw_line(P.call(23, 27), P.call(41, 27), paper, maxf(1.0, 4.0 * k))
+			wheels.call([22, 80], 46, 8, ink)
+			draw_circle(P.call(60, 9), maxf(1.2, 4.0 * k), BLUE_LIGHT)
 	if hq:
 		# Command vehicle: a whip aerial with a pennant.
 		line.call(34, 22, 26, -2, 1.6)
@@ -809,7 +935,7 @@ func _draw_holdings(xf: Transform2D, zoom: float, view: Rect2) -> void:
 		# Independent places only show up once the hexes are big enough to matter.
 		if owner < 0 and px < 4.0 and int(hd["id"]) != main.selected_holding:
 			continue
-		var col: Color = HOLDING_COL[2 if owner < 0 else clampi(owner, 0, 1)]
+		var col: Color = HOLDING_COL[2 if owner < 0 else (3 if owner == 2 else clampi(owner, 0, 1))]
 		var base := p + Vector2(px * 0.55, -px * 0.2)
 		var top := base + Vector2(0, -s * 1.35)
 		var sel: bool = int(hd["id"]) == main.selected_holding
@@ -910,7 +1036,8 @@ func _draw_grouped(xf: Transform2D, view: Rect2) -> void:
 		var flags := int(snap[o + 7])
 		var ghost := (flags & 2) != 0
 		var team := int(snap[o + 20])
-		var key := "g" if ghost else ("h" if side != 0 else ("t%d" % team if team >= 0 else "f%d" % int(snap[o + 10])))
+		# Spotted hostiles group by proximity only; hostiles and rivals never share a counter.
+		var key := ("g%d" % side) if ghost else ("h%d" % side if side != 0 else ("t%d" % team if team >= 0 else "f%d" % int(snap[o + 10])))
 		var list: Array = by_key.get(key, [])
 		var cl: Dictionary = {}
 		for c in list:
@@ -1050,7 +1177,7 @@ func _draw_company(c: Vector2, it: Dictionary, count: int, label: String) -> voi
 	var s := COMPANY_COUNTER
 	var side: int = it["side"]
 	var ghost: bool = it["ghost"]
-	var back: Color = (SIDE_COL[clampi(side, 0, 1)] as Color).darkened(0.25)
+	var back: Color = (SIDE_COL[clampi(side, 0, 2)] as Color).darkened(0.25)
 	if ghost:
 		back.a = 0.4
 	for k in [2, 1]:
@@ -1064,7 +1191,7 @@ func _draw_company(c: Vector2, it: Dictionary, count: int, label: String) -> voi
 	_text_center(badge, str(count), 11, Color.WHITE)
 	var lp := Vector2(c.x - s * 0.5 - 6, c.y + s * 0.5 + 16)
 	draw_string_outline(font, lp, label, HORIZONTAL_ALIGNMENT_LEFT, -1, 12, 4, Color(0, 0, 0, 0.8))
-	draw_string(font, lp, label, HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color(0.92, 0.96, 1.0) if side == 0 else Color(1.0, 0.82, 0.78))
+	draw_string(font, lp, label, HORIZONTAL_ALIGNMENT_LEFT, -1, 12, [Color(0.92, 0.96, 1.0), Color(1.0, 0.82, 0.78), Color(0.84, 1.0, 0.8)][clampi(side, 0, 2)])
 
 
 # --- Orders, routes and command links -------------------------------------------------
@@ -1510,7 +1637,7 @@ func _draw_fx(xf: Transform2D) -> void:
 			"shot":
 				var t := minf(1.0, age / 260.0)
 				var alpha := maxf(0.0, 1.0 - age / 800.0)
-				var tc := Color("#9cc4ff") if int(f["side"]) == 0 else Color("#ffb19c")
+				var tc: Color = [Color("#9cc4ff"), Color("#ffb19c"), Color("#b4e8a0")][clampi(int(f["side"]), 0, 2)]
 				tc.a = alpha
 				draw_line(a, a.lerp(b, t), tc, maxf(1.2, k * 0.06))
 				var head := Color("#fff6c8")

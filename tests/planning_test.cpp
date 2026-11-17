@@ -274,13 +274,14 @@ int main() {
         }
         std::vector<uint8_t> a = v.save_state(), b = plain.save_state();
         // The same run with and without markings: everything up to the markings is identical, and
-        // so are the sandbox flags saved after them (v10, MRK-31: 3 bytes).
-        const size_t tail = 3;
+        // so is everything saved after them (sandbox flags v10, civilians and the scenario kind v12).
         size_t marks_bytes = 4;
         for (const Marking &mk : v.markings) marks_bytes += 1 + 4 + mk.name.size() + 4 + 4 * mk.xy.size();
-        check(a.size() == b.size() - 4 + marks_bytes &&
-                  std::equal(b.begin(), b.end() - 4 - tail, a.begin()) &&
-                  std::equal(b.end() - tail, b.end(), a.end() - tail),
+        size_t L = 0;
+        while (L < a.size() && L < b.size() && a[L] == b[L]) ++L;
+        const size_t tail = b.size() >= L + 4 ? b.size() - L - 4 : 0;
+        check(a.size() == b.size() - 4 + marks_bytes && tail <= a.size() &&
+                  std::equal(b.end() - (long)tail, b.end(), a.end() - (long)tail),
               "the simulation runs the same with markings as without (600 min)");
         check(v.remove_marking(0) && v.markings.size() == 1 && !v.remove_marking(5), "a marking can be deleted");
     }

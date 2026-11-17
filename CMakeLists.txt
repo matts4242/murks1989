@@ -18,6 +18,7 @@ add_library(murks_core STATIC
     core/src/planning.cpp
     core/src/render_data.cpp
     core/src/sim.cpp
+    core/src/civilians.cpp
 )
 target_include_directories(murks_core PUBLIC core/include)
 
@@ -68,6 +69,10 @@ target_link_libraries(holdings_test PRIVATE murks_core)
 add_executable(route_test tests/route_test.cpp)
 target_link_libraries(route_test PRIVATE murks_core)
 
+# Civilians: traffic, services, danger, congestion, collateral, save/load. build/civilians_test
+add_executable(civilians_test tests/civilians_test.cpp)
+target_link_libraries(civilians_test PRIVATE murks_core)
+
 # Sandbox mode: placing, removing, start time, hostile AI off, no outcome, save/load. build/sandbox_test
 add_executable(sandbox_test tests/sandbox_test.cpp)
 target_link_libraries(sandbox_test PRIVATE murks_core)
@@ -75,6 +80,10 @@ target_link_libraries(sandbox_test PRIVATE murks_core)
 # Slope in the movement rules (MRK-04). build/slope_test
 add_executable(slope_test tests/slope_test.cpp)
 target_link_libraries(slope_test PRIVATE murks_core)
+
+# The three-way (1v1v1) scenario: third side, AI against AI, hunters, holdings, outcome, save/load. build/three_way_test
+add_executable(three_way_test tests/three_way_test.cpp)
+target_link_libraries(three_way_test PRIVATE murks_core)
 
 # Real-map 4-day scripted runs over several seeds (needs zlib). build/playtest game/data/poland_1989.murkz 4 active 1989 8
 find_package(ZLIB)

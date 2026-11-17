@@ -69,6 +69,8 @@ public:
         SF_MILITIA,    // own or seen units: 1 for a town's militia (garrison, takes no orders), else 0
         SF_CONVOY,     // own supply columns: ConvoyState (0 with the trains .. 5 returning), else -1
         SF_CARGO_T,    // own supply columns: tonnes aboard, else -1
+        // Counter tags (MRK-35): only what differs from the company's standing orders is tagged.
+        SF_STANDOFF_SET, // own units: the unit's own stand-off setting (255 = company default), else -1
         UNIT_STRIDE
     };
     enum SnapshotFlag {
@@ -85,7 +87,9 @@ public:
     Dictionary load_map_bytes(const PackedByteArray &bytes);
     Dictionary get_map_info() const;
     Vector2 world_to_lonlat(Vector2 pos) const; // (lon, lat) in degrees; (NAN, NAN) if not georeferenced
-    void setup_scenario(int hostile_groups);
+    // kind: murks::ScenarioKind (0 the contract, 1 the three-way).
+    void setup_scenario(int hostile_groups, int kind = 0);
+    int get_scenario() const;
 
     Vector2i get_map_size() const;
     Vector2i get_chunk_count() const;
@@ -190,6 +194,14 @@ public:
     bool is_clock_started() const;
     // Display only: draw every hostile where it is, seen or not (spotting is unchanged).
     void set_reveal_hostiles(bool on);
+    // Civilians (MRK-34). Snapshot: CIV_STRIDE floats per civilian the player sees (all of them
+    // with Show all hostiles in the sandbox): id, kind (murks::CivKind), x, y, heading x, heading y,
+    // state (murks::CivState), country (0 GDR, 1 Poland).
+    static constexpr int CIV_STRIDE = 8;
+    PackedFloat32Array get_civilians_snapshot() const;
+    Dictionary get_civilian_info(int id) const;
+    int sandbox_place_civilian(int kind, Vector2i hex);
+    bool sandbox_remove_civilian(int id);
     bool get_reveal_hostiles() const;
 
 protected:

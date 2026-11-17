@@ -46,6 +46,7 @@ var route_team := -1          # the team, when the plan is for a team
 var route_preview := {}       # {hex, path, minutes}: from the last waypoint to the cursor
 static var skip_title := false     # New game from the menus: reload straight into play, past the title screen
 static var sandbox_mode := false   # Sandbox (MRK-31): New game from its pause menu starts a fresh sandbox
+static var scenario_kind := 0      # 0 the contract, 1 the three-way (1v1v1); New game keeps it
 var sbx_side := 0                  # sandbox Place tool: 0 own, 1 hostile
 var sbx_kind := 0                  # World::SandboxKind
 var sbx_tool := ""                 # "", "place" or "delete": what a left-click on the map does
@@ -55,6 +56,9 @@ var briefing_text := ""
 var formation_names := {}          # formation id -> name (own companies)
 var selected: Array[int] = []
 var snapshot := PackedFloat32Array()
+var civ_snapshot := PackedFloat32Array() # civilians the player sees (MRK-34), MurksWorld.CIV_STRIDE floats each
+var show_civilians := true
+const CIV_STRIDE := 8
 var stride := 10
 var los_hexes := PackedVector2Array()
 # Planning map (MRK-25): the mode shown, and for line of sight the point and eye height.
@@ -118,6 +122,8 @@ func _ready() -> void:
 			uitest = true
 		elif a.begins_with("--views="):
 			views_dir = a.substr(8)
+		elif a == "--three-way":
+			scenario_kind = 1
 
 	camera = Camera2D.new()
 	add_child(camera)
@@ -171,7 +177,7 @@ func _start_world() -> void:
 		gen_info = _load_baked_map(MAP_FILE)
 	if not gen_info.get("ok", false):
 		gen_info = world.generate(SEED, CHUNKS.x, CHUNKS.y)
-	world.setup_scenario(hostile_groups)
+	world.setup_scenario(hostile_groups, scenario_kind)
 	stride = world.get_unit_stride()
 	map_view.setup(world)
 	overlay.set_towns(world.get_settlements(0))
@@ -190,21 +196,30 @@ func _start_world() -> void:
 	hud.set_toggle("Detail", map_view.show_detail)
 	hud.set_toggle("Edges", map_view.natural_edges)
 	hud.set_toggle("Vehicles", overlay.show_vehicles)
+	hud.set_toggle("Civilians", show_civilians)
 	hud.set_toggle("Topo", map_view.show_topo)
 	hud.set_toggle("KmGrid", tools.show_km_grid)
-	_show_plan_panel()   # fills the View > Planning map list
+	_show_plan_panel()   # fills the Tools > Planning map list
 	hud.set_toggle("Auto-pause", auto_pause)
 	hud.set_toggle("Group", group_companies)
 	hud.set_oob_visible(show_oob)
 	_refresh_oob()
 	set_speed(0)
 	var obj: Dictionary = world.get_objectives()
-	briefing_text = "Company Murks is billeted at %s. The %s is coming for you from the east.\nBreak it before it breaks you, and guard the HQ: without it orders crawl and supplies slow to half." % [
-		obj.get("home", _home_name()), obj.get("enemy_name", "enemy")]
+	if obj.get("three_way", false):
+		briefing_text = ("Three-way. Company Murks is billeted at %s. The %s is coming from the east and %s from %s, " +
+			"and they are at war with each other as much as with you.\nOutlast them both, and guard the HQ: without it " +
+			"orders crawl and supplies slow to half.") % [obj.get("home", _home_name()), obj.get("enemy_name", "enemy"),
+			obj.get("rival_name", "the rival"), obj.get("rival_from", "the south")]
+	else:
+		briefing_text = "Company Murks is billeted at %s. The %s is coming for you from the east.\nBreak it before it breaks you, and guard the HQ: without it orders crawl and supplies slow to half." % [
+			obj.get("home", _home_name()), obj.get("enemy_name", "enemy")]
 	_poll_events()
 	ready_to_play = true
 	if views_dir != "":
 		_run_views()
+	elif autotest_dir != "" and scenario_kind == 1:
+		_run_three_way_shots()
 	elif autotest_dir != "":
 		_run_autotest()
 	elif uitest:
@@ -265,8 +280,9 @@ func _sandbox_set_tool(tool: String) -> void:
 		return
 	sbx_tool = "" if sbx_tool == tool else tool
 	if sbx_tool == "place":
+		var what: String = String(hud.SBX_CIV_KINDS[sbx_kind][0]).to_lower() if sbx_side == 2 else String(hud.SBX_KINDS[sbx_kind][0]).to_lower()
 		hud.show_toast("Place: left-click the map for a %s %s. Ins or Esc ends it." % [
-			"hostile" if sbx_side == 1 else "own", String(hud.SBX_KINDS[sbx_kind][0]).to_lower()], 3.0)
+			["own", "hostile", "civilian"][sbx_side], what], 3.0)
 	elif sbx_tool == "delete":
 		hud.show_toast("Click-delete: left-click a unit to take it off the map. Shift+Del or Esc ends it.", 3.0)
 	_refresh_sandbox_panel()
@@ -276,6 +292,11 @@ func _sandbox_set_tool(tool: String) -> void:
 func _sandbox_click(screen_pos: Vector2) -> void:
 	if sbx_tool == "place":
 		var hex: Vector2i = world.world_to_hex(_screen_to_world(screen_pos))
+		if sbx_side == 2:
+			if world.sandbox_place_civilian(sbx_kind, hex) < 0:
+				hud.show_toast("No civilian placed there (no land or town near the click).", 3.0)
+			_after_sandbox_change()
+			return
 		var id: int = world.sandbox_place(sbx_side, sbx_kind, hex)
 		if id < 0:
 			hud.show_toast("Nothing placed there (no free land near the click%s)." % (
@@ -285,6 +306,12 @@ func _sandbox_click(screen_pos: Vector2) -> void:
 				selected = [id]
 		_after_sandbox_change()
 	elif sbx_tool == "delete":
+		var civ := civilian_at(_screen_to_world(screen_pos))
+		if civ >= 0:
+			if world.sandbox_remove_civilian(civ):
+				hud.show_toast("Deleted a civilian %s." % world.get_civilian_info(civ).get("name", "vehicle"), 2.5)
+			_after_sandbox_change()
+			return
 		var keep := selected.duplicate()
 		_click_select(screen_pos, false)
 		var hit := selected.duplicate()
@@ -597,7 +624,7 @@ func _poll_events() -> void:
 				pause_reason = e["text"]
 				if is_contact:
 					last_contact_pause = int(e["time"])
-	while event_log.size() > 9:
+	while event_log.size() > 60:
 		event_log.pop_back()
 	hud.set_events(event_log)
 	if pings.size() > 40:
@@ -727,14 +754,14 @@ func _on_key(key: Key) -> void:
 		KEY_I: _on_toggle("Fire support")
 		KEY_J:
 			_on_command("team_disband" if Input.is_key_pressed(KEY_SHIFT) else "team_form")
-		KEY_L: _on_command("team_select")
+		KEY_L:
+			_on_command("rejoin" if Input.is_key_pressed(KEY_SHIFT) else "team_select")
 		KEY_F: _on_command("mode_0")
 		KEY_Q: _on_command("mode_1")
 		KEY_E: _on_command("mode_2")
 		KEY_R: _on_command("mode_3")
 		KEY_B: _on_command("fall_back")
 		KEY_Y: _on_command("regroup")
-		KEY_U: _on_command("rejoin")
 		KEY_N: _on_command("rest")
 		KEY_COMMA: _on_command("mount_toggle")
 		KEY_X: _cycle_roe()
@@ -749,6 +776,7 @@ func _on_key(key: Key) -> void:
 		KEY_F4: hud.toggle_legend()
 		KEY_F6: _on_toggle("Detail")
 		KEY_F7: _on_toggle("Vehicles")
+		KEY_F12: _on_toggle("Civilians")
 		KEY_F8: _on_toggle("Topo")
 		KEY_F10: set_plan_mode((plan_mode + 1) % MapView.PLAN_COUNT)
 		KEY_F11: _on_toggle("OOB")
@@ -787,6 +815,10 @@ func _on_toggle(name: String) -> void:
 			overlay.show_vehicles = not overlay.show_vehicles
 			hud.set_toggle(name, overlay.show_vehicles)
 			hud.show_toast("Counters show each unit's main vehicle." if overlay.show_vehicles else "Counters show NATO symbols.")
+		"Civilians":
+			show_civilians = not show_civilians
+			hud.set_toggle(name, show_civilians)
+			hud.show_toast("Civilian traffic and services shown." if show_civilians else "Civilians hidden (they are still on the roads).")
 		"Sight":
 			show_los = not show_los
 			hud.set_toggle(name, show_los)
@@ -837,7 +869,7 @@ func _on_menu_action(name: String) -> void:
 		set_plan_mode(name.substr(5).to_int())
 		return
 	if name.begins_with("sbx_kind_"):
-		sbx_kind = clampi(name.substr(9).to_int(), 0, hud.SBX_KINDS.size() - 1)
+		sbx_kind = clampi(name.substr(9).to_int(), 0, (hud.SBX_CIV_KINDS if sbx_side == 2 else hud.SBX_KINDS).size() - 1)
 		_refresh_sandbox_panel()
 		return
 	if name.begins_with("sbx_day_") or name.begins_with("sbx_hour_"):
@@ -861,12 +893,33 @@ func _on_menu_action(name: String) -> void:
 		"start":
 			sandbox_mode = false
 			_begin_campaign()
-		"sandbox": _begin_sandbox()
+		"sandbox":
+			if world.get_scenario() != 0:
+				# The sandbox is built on the contract: back to it first.
+				scenario_kind = 0
+				skip_title = true
+				sandbox_mode = true
+				get_tree().reload_current_scene()
+			else:
+				_begin_sandbox()
+		"three_way":
+			if world.get_scenario() == 1:
+				sandbox_mode = false
+				_begin_campaign()
+			else:
+				# A fresh world set up for the three-way, straight into play.
+				scenario_kind = 1
+				skip_title = true
+				sandbox_mode = false
+				get_tree().reload_current_scene()
 		"sbx_place_tool": _sandbox_set_tool("place")
 		"sbx_delete_tool": _sandbox_set_tool("delete")
 		"sbx_delete": _sandbox_remove(selected.duplicate())
-		"sbx_side_0", "sbx_side_1":
+		"sbx_side_0", "sbx_side_1", "sbx_side_2":
+			var was_civ := sbx_side == 2
 			sbx_side = int(name.substr(9))
+			if was_civ != (sbx_side == 2):
+				sbx_kind = 0 # the type list changes between units and civilians
 			_refresh_sandbox_panel()
 		"sbx_ai_on", "sbx_ai_off":
 			world.set_hostile_ai(name == "sbx_ai_on")
@@ -883,10 +936,12 @@ func _on_menu_action(name: String) -> void:
 		"new_game":
 			skip_title = true
 			sandbox_mode = world != null and world.is_sandbox()
+			scenario_kind = world.get_scenario() if world != null else 0
 			get_tree().reload_current_scene()
 		"title":
 			skip_title = false
 			sandbox_mode = false
+			scenario_kind = 0
 			get_tree().reload_current_scene()
 		"quit": get_tree().quit()
 		"save": quick_save()
@@ -1752,6 +1807,9 @@ func _update_status() -> void:
 	if info.get("rail", false): bits.append("railway")
 	if info.get("bridge", false): bits.append("bridge")
 	elif info.get("river", false): bits.append("river")
+	var civ := civilian_at(get_global_mouse_position())
+	if civ >= 0:
+		bits.insert(0, _civilian_text(civ))
 	if info.has("settlement"):
 		bits.append("%s (pop. %s)" % [info["settlement"], hud._thousands(int(info["population"]))])
 	else:
@@ -1765,6 +1823,33 @@ func _update_status() -> void:
 	hud.set_status("%s   %s" % [where, "  ·  ".join(bits)])
 
 
+## The civilian (MRK-34) under a map point, -1 none: within its counter, the top one of a stack.
+func civilian_at(wp: Vector2) -> int:
+	if not show_civilians:
+		return -1
+	var best := -1
+	var best_d := overlay.counter_size() * 0.62 * 0.6 / camera.zoom.x
+	for i in civ_snapshot.size() / CIV_STRIDE:
+		var o := i * CIV_STRIDE
+		var d := Vector2(civ_snapshot[o + 2], civ_snapshot[o + 3]).distance_to(wp)
+		if d < best_d:
+			best_d = d
+			best = int(civ_snapshot[o])
+	return best
+
+
+func _civilian_text(id: int) -> String:
+	var ci: Dictionary = world.get_civilian_info(id)
+	if ci.is_empty():
+		return ""
+	var t := "Civilian %s" % ci["name"]
+	if String(ci["home"]) != "":
+		t += " from " + String(ci["home"])
+	if String(ci["dest"]) != "" and String(ci["state"]) == "driving":
+		t += (", turned back to " if ci["fleeing"] else " to ") + String(ci["dest"])
+	return t + ", " + String(ci["state"])
+
+
 # --- Counter display: glide, fire effects, labels ---------------------------------------
 
 func _glide_at(g: Array, now: int) -> Vector2:
@@ -1775,6 +1860,7 @@ func _glide_at(g: Array, now: int) -> Vector2:
 
 func _refresh_snapshot() -> void:
 	snapshot = world.get_units_snapshot()
+	civ_snapshot = world.get_civilians_snapshot()
 	_update_display_positions()
 
 
@@ -1979,7 +2065,12 @@ func _check_outcome() -> void:
 func _on_end_choice(choice: String) -> void:
 	hud.end_panel.visible = false
 	match choice:
-		"restart": get_tree().reload_current_scene()
+		"restart":
+			# The contract goes back to the title screen; the three-way starts again at once.
+			scenario_kind = world.get_scenario()
+			skip_title = scenario_kind != 0
+			sandbox_mode = false
+			get_tree().reload_current_scene()
 		"load": quick_load()
 		"quit": get_tree().quit()
 
@@ -2026,6 +2117,7 @@ func quick_load() -> void:
 		selected = [0]
 		camera.position = world.hex_to_world(hq["hex"])
 	sandbox_mode = world.is_sandbox()
+	scenario_kind = world.get_scenario()
 	_refresh_sandbox_panel()
 	_refresh_oob()
 	_check_outcome()
@@ -2355,7 +2447,7 @@ func _run_uitest() -> void:
 	camera.zoom = zoom_was
 	await _frames(2)
 
-	# Planning map (MRK-25): modes from the View menu, F10 and the panel; each tints the
+	# Planning map (MRK-25): modes from the Tools menu, F10 and the panel; each tints the
 	# ground; the status bar gives the mode's figure; Look from here sets the line-of-sight
 	# point and a higher eye sees at least as much.
 	var cam_keep := camera.position
@@ -2365,11 +2457,12 @@ func _run_uitest() -> void:
 		await get_tree().process_frame
 	await RenderingServer.frame_post_draw
 	var no_plan := get_viewport().get_texture().get_image()
-	view.show_popup()
+	var tools_menu := hud.menu_buttons["Tools"] as MenuButton
+	tools_menu.show_popup()
 	await _frames(2)
-	var plan_menu := _submenu_of(view.get_popup(), "Planning map")
-	check.call(plan_menu != null and _menu_pick(plan_menu, "Going: tracked"), "View > Planning map > Going: tracked")
-	view.get_popup().hide()
+	var plan_menu := _submenu_of(tools_menu.get_popup(), "Planning map")
+	check.call(plan_menu != null and _menu_pick(plan_menu, "Going: tracked"), "Tools > Planning map > Going: tracked")
+	tools_menu.get_popup().hide()
 	await _frames(3)
 	var ptm: ShaderMaterial = map_view.terrain_mat
 	check.call(plan_mode == 1 and int(ptm.get_shader_parameter("plan_mode")) == 1 and hud.plan_panel.visible,
@@ -2622,6 +2715,8 @@ func _run_uitest() -> void:
 	check.call(hud.title_new_game.disabled and hud.title_campaign.disabled and not hud.title_sandbox.disabled,
 		"title screen: New game and Campaign greyed out, Sandbox available")
 	check.call(not hud.sandbox_panel.visible, "no sandbox panel in the contract")
+	check.call(not hud.title_three_way.disabled and world.get_scenario() == 0 and
+		not bool(world.get_objectives().get("three_way", true)), "title screen: Three-way available; this game is the contract")
 	_push_key(KEY_INSERT)
 	await _frames(1)
 	check.call(sbx_tool == "", "Ins does nothing outside the sandbox")
@@ -2684,6 +2779,48 @@ func _run_uitest() -> void:
 		check.call(not bool(world.get_unit_info(hostile).get("alive", true)), "a click deletes the hostile")
 		_push_key(KEY_ESCAPE)
 		await _frames(1)
+	# Civilians (MRK-34): side Civilian, a bus placed by a click, drawn, named on hover, deleted by Shift+Del.
+	hud.sbx_side.select(2)
+	hud.sbx_side.item_selected.emit(2)
+	await _frames(1)
+	check.call(hud.sbx_kind.item_count == hud.SBX_CIV_KINDS.size() and hud.sbx_kind.get_item_text(1) == "Bus",
+		"sandbox side Civilian lists the civilian kinds")
+	hud.sbx_kind.select(1)
+	hud.sbx_kind.item_selected.emit(1)
+	_push_key(KEY_INSERT)
+	await _frames(1)
+	var n_civ := civ_snapshot.size() / CIV_STRIDE
+	_push_click(MOUSE_BUTTON_LEFT, vcs + Vector2(60, 120))
+	await _frames(2)
+	_refresh_snapshot()
+	var bus := -1
+	for i in civ_snapshot.size() / CIV_STRIDE:
+		if int(civ_snapshot[i * CIV_STRIDE + 1]) == 1:
+			bus = int(civ_snapshot[i * CIV_STRIDE])
+	check.call(bus >= 0 and civ_snapshot.size() / CIV_STRIDE == n_civ + 1, "a click puts a civilian bus on the map and it is drawn")
+	if bus >= 0:
+		var bw := Vector2.ZERO
+		for i in civ_snapshot.size() / CIV_STRIDE:
+			if int(civ_snapshot[i * CIV_STRIDE]) == bus:
+				bw = Vector2(civ_snapshot[i * CIV_STRIDE + 2], civ_snapshot[i * CIV_STRIDE + 3])
+		check.call(civilian_at(bw) == bus and _civilian_text(bus).begins_with("Civilian bus"), "hovering it names it (\"%s\")" % _civilian_text(bus))
+		_push_key(KEY_ESCAPE)
+		await _frames(1)
+		_push_shift_key(KEY_DELETE)
+		await _frames(1)
+		_push_click(MOUSE_BUTTON_LEFT, get_viewport().get_canvas_transform() * bw)
+		await _frames(2)
+		check.call(world.get_civilian_info(bus).is_empty(), "Shift+Del and a click delete the civilian")
+		_push_key(KEY_ESCAPE)
+		await _frames(1)
+	_push_key(KEY_F12)
+	await _frames(1)
+	check.call(not show_civilians, "F12 hides civilians")
+	_push_key(KEY_F12)
+	await _frames(1)
+	check.call(show_civilians, "and shows them again")
+	hud.sbx_side.select(0)
+	hud.sbx_side.item_selected.emit(0)
 	hud.sbx_ai.button_pressed = false
 	await _frames(1)
 	check.call(not world.get_hostile_ai() and hud.objective_label.text.contains("off"), "the Hostile AI box switches the AI off")
@@ -2709,6 +2846,59 @@ func _run_uitest() -> void:
 			if int(snapshot[i * stride + 2]) == 3 and String(di.get("equipment", "")).contains("(BMP-1)"):
 				dismount_ok = overlay.vehicle_of(uid, 3) == "" and overlay.vehicle_of(3, 2) == "ifv"
 	check.call(dismount_ok, "dismounted squads show the NATO symbol while their BMPs keep the vehicle (units %d -> %d)" % [units_before, snapshot.size() / stride])
+	# UI cleanup (MRK-35): docked panels that don't overlap, a short order menu with the rest
+	# in submenus, folded sections with summaries, filtered reports.
+	_select_company_of(0)
+	if not hud.oob_panel.visible:
+		_on_toggle("OOB")
+	await _frames(4)
+	var r_unit := hud.unit_panel.get_global_rect()
+	var r_oob := hud.oob_panel.get_global_rect()
+	var r_log := hud.log_panel.get_global_rect()
+	var r_obj := hud.objective_panel.get_global_rect()
+	var screen := Rect2(Vector2.ZERO, get_viewport_rect().size)
+	check.call(hud.unit_panel.visible and screen.encloses(r_unit) and screen.encloses(r_oob) and screen.encloses(r_log),
+		"docks: unit panel, order of battle and reports lie inside the screen")
+	check.call(not r_unit.intersects(r_oob) and not r_unit.intersects(r_log) and not r_oob.intersects(r_log)
+		and not r_obj.intersects(r_unit) and not r_obj.intersects(r_oob),
+		"docks: no two of contract line, order of battle, unit panel and reports overlap")
+	_push_click(MOUSE_BUTTON_RIGHT, vs * Vector2(0.45, 0.5))
+	await _frames(3)
+	var top_items := 0
+	for i in hud.order_popup.item_count:
+		if not hud.order_popup.is_item_separator(i):
+			top_items += 1
+	check.call(hud.order_popup.visible and top_items <= 14 and _submenu_of(hud.order_popup, "More orders") != null
+		and _submenu_of(hud.order_popup, "Standing orders") != null and _submenu_of(hud.order_popup, "Map here") != null,
+		"right-click menu is short (%d items) with More orders, Standing orders and Map here" % top_items)
+	var more_sub := _submenu_of(hud.order_popup, "More orders")
+	check.call(more_sub != null and _menu_pick(more_sub, "Regroup on the HQ"), "More orders > Regroup on the HQ")
+	hud.order_popup.hide()
+	check.call(not hud.standing_body.visible and hud.standing_toggle.text.contains("S/O"),
+		"standing orders fold to a summary: %s" % hud.standing_toggle.text)
+	hud.standing_toggle.pressed.emit()
+	await _frames(2)
+	check.call(hud.standing_body.visible and hud.roe_opt.is_visible_in_tree(), "unfolding shows the standing-order dropdowns")
+	hud.standing_toggle.pressed.emit()
+	var r_unit2 := hud.unit_panel.get_global_rect()
+	check.call(screen.encloses(r_unit2), "the unit panel stays on screen with every section unfolded and folded again")
+	hud.log_filter_buttons[1].pressed.emit()
+	await _frames(2)
+	var only_combat := true
+	for b in hud.log_box.get_children():
+		if b is Button:
+			var c: Color = (b as Button).get_theme_color("font_color")
+			only_combat = only_combat and (c.r > 0.95 and c.g < 0.9)
+	check.call(only_combat, "the Combat filter lists only contacts, fire, losses and withdrawals")
+	hud.log_filter_buttons[0].pressed.emit()
+	var help := hud.menu_buttons["Help"] as MenuButton
+	help.show_popup()
+	await _frames(2)
+	var zones_was := show_zones
+	check.call(_menu_pick(help.get_popup(), "Simulation fidelity zones") and show_zones != zones_was, "Help > Debug > Simulation fidelity zones")
+	help.get_popup().hide()
+	if show_zones != zones_was:
+		_on_toggle("Zones")
 	print("UITEST done: %d passed, %d failed" % [res[0], res[1]])
 	get_tree().quit(1 if res[1] > 0 else 0)
 
@@ -2772,10 +2962,16 @@ func _push_click(button: MouseButton, pos: Vector2) -> void:
 
 
 ## Picks the menu item labelled `text` as a click would; false if there is none or it is disabled.
+## Picks the item with this text in a menu or any of its submenus (MRK-35 moved many items
+## into submenus; the checks name the item, not the path to it).
 func _menu_pick(pm: PopupMenu, text: String) -> bool:
 	for i in pm.item_count:
 		if pm.get_item_text(i) == text and not pm.is_item_disabled(i):
 			pm.id_pressed.emit(pm.get_item_id(i))
+			return true
+	for i in pm.item_count:
+		var sub := pm.get_item_submenu_node(i)
+		if sub != null and _menu_pick(sub, text):
 			return true
 	return false
 
@@ -2784,6 +2980,12 @@ func _submenu_of(pm: PopupMenu, prefix: String) -> PopupMenu:
 	for i in pm.item_count:
 		if pm.get_item_text(i).begins_with(prefix) and pm.get_item_submenu_node(i) != null:
 			return pm.get_item_submenu_node(i)
+	for i in pm.item_count:
+		var sub := pm.get_item_submenu_node(i)
+		if sub != null:
+			var found := _submenu_of(sub, prefix)
+			if found != null:
+				return found
 	return null
 
 
@@ -2912,6 +3114,46 @@ func _run_views() -> void:
 				n += 1
 		sum = sum / n * 255.0
 		print("Views: average of terrain %d = %d, %d, %d" % [code, roundi(sum.x), roundi(sum.y), roundi(sum.z)])
+	get_tree().quit()
+
+
+## --three-way --autotest=DIR: the three-way's briefing, then the clock runs (the company holds
+## at home) until it has both the 7th Guards and the Free Corps in sight at once, or three days
+## pass, and the theater view is shot centred on what it sees.
+func _run_three_way_shots() -> void:
+	print("Autotest (three-way): writing screenshots to ", autotest_dir)
+	DirAccess.make_dir_recursive_absolute(autotest_dir)
+	auto_pause = false
+	show_oob = false
+	hud.set_oob_visible(false)
+	var hq: Vector2 = world.hex_to_world(world.get_unit_info(0)["hex"])
+	_begin_campaign()
+	await _shot("49_three_way_start", hq, 0.02)
+	var centre := hq
+	var found := false
+	var until := int(world.get_objectives()["time_minutes"]) + 72 * 60
+	while int(world.get_objectives()["time_minutes"]) < until:
+		world.advance(10, 5000.0) # stops early on a pause-worthy event; the loop goes on
+		_refresh_snapshot()
+		var sum := Vector2.ZERO
+		var n := 0
+		var sides := {}
+		for i in snapshot.size() / stride:
+			var o := i * stride
+			var side := int(snapshot[o + 1])
+			if side != 0 and (int(snapshot[o + 7]) & 1) != 0:
+				sides[side] = true
+				sum += disp[i]
+				n += 1
+		if sides.has(1) and sides.has(2):
+			centre = sum / n
+			found = true
+			print("Autotest (three-way): both in sight at %s" % world.get_time_string())
+			break
+	_poll_events()
+	await _shot("50_three_way_contact", centre if found else hq, 0.06)
+	await _shot("51_three_way_theater", centre if found else hq, 0.025)
+	print("Autotest (three-way): done (%s)" % ("both in sight" if found else "never both in sight"))
 	get_tree().quit()
 
 
@@ -3075,6 +3317,15 @@ func _run_autotest() -> void:
 	hud.refresh(world.get_time_string(), world.is_night(), world.get_stats(), 60, "")
 	_refresh_selection_panel()
 	await _shot("46_sandbox", world.hex_to_world(sh + Vector2i(10, -1)), 0.05)
+	# Civilians (MRK-34): one of each kind near the HQ, close up, then NATO-symbol mode.
+	for k in 7:
+		world.sandbox_place_civilian(k, sh + Vector2i(2 + k, 2 + (k % 2)))
+	selected.clear()
+	_after_sandbox_change()
+	await _shot("47_civilians", world.hex_to_world(sh + Vector2i(5, 2)), 0.5)
+	overlay.show_vehicles = false
+	await _shot("48_civilians_nato", world.hex_to_world(sh + Vector2i(5, 2)), 0.5)
+	overlay.show_vehicles = true
 	world.load_state(sbx_blob)
 	world.set_reveal_hostiles(false)
 	sbx_tool = ""
