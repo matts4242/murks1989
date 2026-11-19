@@ -340,6 +340,19 @@ constexpr double TRUCK_LOAD_T = 4.5;      // Ural-375D payload, tonnes
 constexpr double DIESEL_L_PER_T = 1190.0; // 0.84 kg per litre
 constexpr double WANT_DIESEL_L = 30000, WANT_AMMO_T = 60, WANT_FOOD_KG = 6000; // the trains' want levels
 
+// Replacements (work board MRK-10): men levied from the holdings wait in the company's pool
+// (CompanyStock::replacements) and fill infantry squads that were knocked out. A rifle platoon,
+// or the squads of an APC/IFV platoon (aboard or on foot), that stands at the trains (as for
+// resupply: halted within 3 hexes of the HQ or acting commander, out of the fight for 30
+// minutes) gets REPLACE_SQUADS_PER_HOUR whole squads back an hour, twice that while resting,
+// half under an acting commander; units are served in order of battle while the pool lasts.
+// An APC/IFV platoon's squads are filled up to one squad a vehicle left. Vehicles, guns and
+// their crews are not replaced: men alone don't make a tank. The new men come in at
+// REPLACEMENT_MORALE, so a refilled platoon's morale moves towards it in proportion. Rates and
+// morale are estimates (raw volunteers with a few days' drill at most).
+constexpr int REPLACE_SQUADS_PER_HOUR = 1;
+constexpr float REPLACEMENT_MORALE = 50.0f;
+
 // Time a unit needs to acquire a target and to work through each engagement cycle. Crew
 // condition does not change how many vehicles fight (that is the binary in-the-fight count);
 // it changes how fast they find, lay on and engage targets.
@@ -460,7 +473,7 @@ struct CompanyStock {
     double diesel_l = 30000, ammo_t = 60, food_kg = 6000;
     int personnel = 0;
     double cash = 20000;   // Deutsche Mark (1989 prices); wages and purchases come later (MRK-07)
-    int replacements = 0;  // men levied from holdings, waiting to fill losses (MRK-10)
+    int replacements = 0;  // men levied from holdings, waiting to fill squads (see REPLACE_*, MRK-10)
     // Consumption, smoothed hourly: what the trains hand out per hour. Days of supply follow.
     double rate_diesel_lph = 0, rate_ammo_tph = 0;
 };
@@ -744,6 +757,20 @@ public:
     // a town nearby, services park in the nearest town as their home. Returns the id or -1.
     int sandbox_place_civilian(int kind, HexCoord at);
     bool sandbox_remove_civilian(int id);
+
+    // Replacements (see REPLACE_*). replacement_squads: the unit whose squads the pool fills for
+    // u (u itself for a rifle platoon or squads on foot, the squads aboard an APC/IFV platoon),
+    // -1 none. squads_short: squads that unit could take now (up to its establishment; mounted
+    // squads up to one a vehicle left). men_per_squad: what one squad costs the pool.
+    // replace_rate: squads an hour this unit would get at the trains now (resting, acting HQ).
+    int replacement_squads(const Unit &u) const;
+    int squads_short(const Unit &u) const;
+    static int men_per_squad(const Unit &squads);
+    float replace_rate(const Unit &u) const { return replace_rate(u, acting_hq(0) >= 0 && units[acting_hq(0)].type != U_HQ); }
+    // Halted within TRAINS_REACH hexes of the trains (the HQ or acting commander) and out of the
+    // fight for 30 minutes: where resupply and replacements reach a unit of the company.
+    static constexpr int TRAINS_REACH = 3;
+    bool at_trains(const Unit &u) const { return at_trains(u, acting_hq(0)); }
     // A unit the player may order: not militia, and not a column working a route.
     bool orderable(const Unit &u) const;
 
@@ -786,6 +813,9 @@ private:
     void setup_holdings();
     void update_holdings();              // hourly: presence, capture, loyalty, militia training
     void update_trains_at_depot(int hq); // hourly: the trains draw from an own holding they stand at
+    bool at_trains(const Unit &u, int hq) const;
+    static float replace_rate(const Unit &u, bool acting);
+    void replace_losses(int hq, bool acting); // hourly: the replacement pool fills squads (MRK-10)
     void update_convoys();               // every tick: the convoy state machine
     bool convoy_arrive_or_repath(Unit &u, HexCoord target, int reach); // true once halted within reach
     void load_convoy(Unit &u, SupplyRoute &r);

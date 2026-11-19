@@ -63,7 +63,7 @@ const VIEW_GROUPS := [
 const LEVY_TIPS := ["0.1 kg a head from the town's larders (a farm collective gives 0.5). Loyalty -10.",
 	"0.5 L a head from garages and stations. Loyalty -10.",
 	"2 DM a head in taxes taken at once. Loyalty -15.",
-	"Every volunteer in the pool joins the company as replacements. Loyalty -15."]
+	"Every volunteer in the pool joins the company as replacements, who fill knocked-out infantry squads at the trains. Loyalty -15."]
 const SPEED_ITEMS := [["Pause", KEY_SPACE], ["1 min per second", KEY_1], ["5 min per second", KEY_2],
 	["30 min per second", KEY_3], ["2 hours per second", KEY_4], ["Max", KEY_5]]
 
@@ -627,7 +627,7 @@ func fill_orders(pm: PopupMenu, at_hex: bool, ctx: Dictionary) -> void:
 	_add(pm, "Fall back", "cmd", "fall_back", KEY_B, true, -1, "Withdraw about 6 km away from known enemies, or back to the HQ.")
 	var more := _submenu(pm, "More orders")
 	_add(more, "Regroup on the HQ", "cmd", "regroup", KEY_Y, true, -1, "Form up around the company HQ (or whoever took over from it).")
-	_add(more, "Rest & resupply", "cmd", "rest", KEY_N, true, -1, "At the HQ (or whoever took over from it): double refill rate, faster recovery.")
+	_add(more, "Rest & resupply", "cmd", "rest", KEY_N, true, -1, "At the HQ (or whoever took over from it): double refill rate and replacement squads, faster recovery.")
 	if ord["can_dismount"]:
 		_add(more, "Dismount the squads", "cmd", "dismount", KEY_COMMA, true, -1, "The vehicles halt and the squads get out to move and fight on foot.")
 	if ord["can_mount"]:
@@ -1073,7 +1073,7 @@ func _build_orders(parent: Control) -> void:
 	for d in [["Hold", "hold", "Stop and hold position. A team leader halts its team. Key H"],
 			["Fall back", "fall_back", "Withdraw about 6 km away from known enemies, or back to the HQ. Key B"],
 			["Regroup", "regroup", "Form up around the company HQ (or whoever took over from it). Key Y"],
-			["Resupply", "rest", "Rest & resupply at the HQ (or whoever took over from it): double refill rate, faster recovery. Key N"]]:
+			["Resupply", "rest", "Rest & resupply at the HQ (or whoever took over from it): double refill rate and replacement squads, faster recovery. Key N"]]:
 		var name: String = d[1]
 		var b := _small_button(d[0], false, d[2])
 		b.pressed.connect(func() -> void: command.emit(name))
@@ -1304,6 +1304,23 @@ func _mounted_line(info: Dictionary) -> String:
 		var fits := "" if info.get("can_mount", false) else "  [color=#ff6b4a](too few vehicles left to mount)[/color]"
 		return mi + "dismounted from %s (%d vehicles), %.1f km away%s\n" % [info["carrier_name"], int(info["carrier_vehicles"]), float(info["carrier_km"]), fits]
 	return ""
+
+
+## Replacements (MRK-10): squads short, and whether the company's pool is filling them.
+func _replacements_line(info: Dictionary) -> String:
+	var n := int(info.get("squads_short", 0))
+	if n <= 0:
+		return ""
+	var men := int(info["replace_men"])
+	var pool := int(info.get("replacements_pool", 0))
+	var t := "[color=#c8f0a0]Replacements[/color]  %d squad%s short (%d men each) · " % [n, "" if n == 1 else "s", men]
+	if pool < men:
+		return t + "[color=#ff6b4a]%d men in the pool: requisition men at an own town[/color]\n" % pool
+	if info.get("at_trains", false):
+		var r := float(info.get("replace_per_hour", 1.0))
+		var rate := ("%d squad%s an hour" % [int(r), "" if int(r) == 1 else "s"]) if r >= 1.0 else ("a squad every %d hours" % int(round(1.0 / r)))
+		return t + "[color=#5fd35f]filling at the trains, %s[/color]\n" % rate
+	return t + "%d men waiting: halt within %.1f km of the HQ, out of the fight\n" % [pool, float(info.get("trains_km", 1.5))]
 
 
 ## Fire support net (its own radio band) for one unit.
@@ -2711,7 +2728,7 @@ func refresh(time_text: String, night: bool, stats: Dictionary, fps: float, map_
 		_thousands(int(stats["food_kg"])), _days(float(stats.get("days_food", 1e9))),
 		int(stats["personnel"]), (" (+%d)" % int(stats["replacements"])) if int(stats.get("replacements", 0)) > 0 else "",
 		_thousands(int(stats.get("cash", 0.0)))]
-	stock_label.tooltip_text = "Company stocks; days of supply at the recent rate of use (shown on the bar under 30 days): diesel %s, ammunition %s, food %s. Men on the rolls (+ replacements waiting); cash. %d holding%s, %d trucks, %d route%s running." % [
+	stock_label.tooltip_text = "Company stocks; days of supply at the recent rate of use (shown on the bar under 30 days): diesel %s, ammunition %s, food %s. Men on the rolls (+ replacements waiting: they fill knocked-out infantry squads at the trains); cash. %d holding%s, %d trucks, %d route%s running." % [
 		_days_tip(float(stats.get("days_diesel", 1e9))), _days_tip(float(stats.get("days_ammo", 1e9))), _days_tip(float(stats.get("days_food", 1e9))),
 		int(stats.get("holdings_owned", 0)), "" if int(stats.get("holdings_owned", 0)) == 1 else "s", int(stats.get("trucks", 0)),
 		int(stats.get("routes_active", 0)), "" if int(stats.get("routes_active", 0)) == 1 else "s"]
@@ -2810,6 +2827,7 @@ func show_unit(info: Dictionary, count: int) -> void:
 		t += _stat("Strength", float(info["strength"])) + "\n"
 	t += _stats_line(float(info["morale"]), float(info["fuel"]), float(info["ammo"]), float(info["readiness"]))
 	t += "%s · %s\n" % [_situation(info), info["order"]]
+	t += _replacements_line(info)
 	if info.get("pending", false):
 		t += "[color=#ffd84a]%s order arrives in %d min[/color]\n" % [info["pending_kind"], int(info["pending_in"])]
 	if info.has("eta_minutes"):

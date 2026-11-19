@@ -3503,6 +3503,7 @@ void World::update_logistics() {
     // stand at, so what a convoy or a requisition brought in is handed out this same hour.
     update_holdings();
     update_trains_at_depot(hq);
+    replace_losses(hq, acting);
     stock.personnel = 0;
     for (auto &u : units) {
         if (!u.alive || u.side != SIDE_PLAYER) continue;
@@ -3515,10 +3516,8 @@ void World::update_logistics() {
         if (u.carrier >= 0) stock.personnel += u.squad_men * u.elements;          // squads on foot
         else if (u.dismounts >= 0 && units[u.dismounts].alive) stock.personnel += 3 * u.elements; // crews only
         else stock.personnel += (int)std::round(ti.crew * u.strength / 100.0f);
-        // Resupply from the company train: halted near the HQ and out of the fight for 30 minutes
-        // (enemies merely being nearby doesn't stop the trucks).
-        bool fighting = time_min - u.last_fired < 30 || time_min - u.last_hit < 30 || time_min - u.last_targeted < 30;
-        if (hq < 0 || fighting || u.moving() || hex_distance(u.pos, units[hq].pos) > 3) continue;
+        // Resupply from the company train: halted near the HQ and out of the fight for 30 minutes.
+        if (!at_trains(u, hq)) continue;
         float rate = (u.resting ? 50.0f : 25.0f) * (acting ? ACTING_SUPPLY_RATE : 1.0f);
         float want_fuel = std::min(rate, 100.0f - u.fuel);
         double litres = want_fuel / 100.0 * ti.fuel_litres;
@@ -3577,6 +3576,67 @@ void World::update_logistics() {
     }
     if (stock.diesel_l < 3000 && stock.diesel_l > 0 && time_min % 720 == 0)
         push_event(EV_SUPPLY, -1, true, fmt("Diesel is running low: %.0f litres left.", stock.diesel_l));
+}
+
+bool World::at_trains(const Unit &u, int hq) const {
+    // Enemies merely being nearby don't stop the trucks; fighting does.
+    const bool fighting = time_min - u.last_fired < 30 || time_min - u.last_hit < 30 || time_min - u.last_targeted < 30;
+    return hq >= 0 && u.alive && !fighting && !u.moving() && hex_distance(u.pos, units[hq].pos) <= TRAINS_REACH;
+}
+
+// Replacements (MRK-10): see REPLACE_SQUADS_PER_HOUR.
+int World::replacement_squads(const Unit &u) const {
+    if (!u.alive || u.side != SIDE_PLAYER || u.militia) return -1;
+    if (u.dismounts >= 0) {
+        const Unit &d = units[u.dismounts];
+        return d.embarked ? d.id : -1; // squads on foot are filled where they stand
+    }
+    if (u.type == U_INFANTRY) return u.id; // a rifle platoon, or squads on foot
+    return -1;
+}
+
+int World::squads_short(const Unit &u) const {
+    const int sid = replacement_squads(u);
+    if (sid < 0) return 0;
+    const Unit &s = units[sid];
+    int room = s.elements_max;
+    if (s.carrier >= 0 && units[s.carrier].alive) room = std::min(room, units[s.carrier].elements); // a squad a vehicle
+    return std::max(0, room - s.elements);
+}
+
+int World::men_per_squad(const Unit &s) {
+    if (s.squad_men > 0) return s.squad_men;
+    return std::max(1, (int)std::lround((double)unit_type_info(s.type).crew / std::max(1, s.elements_max)));
+}
+
+float World::replace_rate(const Unit &u, bool acting) {
+    return REPLACE_SQUADS_PER_HOUR * (u.resting ? 2.0f : 1.0f) * (acting ? ACTING_SUPPLY_RATE : 1.0f);
+}
+
+void World::replace_losses(int hq, bool acting) {
+    if (hq < 0 || stock.replacements <= 0) return;
+    // Whole squads: a fraction of a squad an hour (half a squad under an acting commander) comes
+    // as one squad on even hours, so the rule needs no saved state.
+    const bool even_hour = (time_min / 60) % 2 == 0;
+    for (auto &u : units) {
+        if (!u.alive || u.side != SIDE_PLAYER || !at_trains(u, hq)) continue;
+        int want = squads_short(u);
+        if (want <= 0) continue;
+        Unit &s = units[replacement_squads(u)];
+        const float r = replace_rate(u, acting);
+        const int rate = (int)r + ((r - (int)r > 0.01f && even_hour) ? 1 : 0);
+        const int men = men_per_squad(s);
+        const int n = std::min({want, rate, stock.replacements / men});
+        if (n <= 0) continue;
+        stock.replacements -= n * men;
+        s.morale = (s.morale * s.elements + REPLACEMENT_MORALE * n) / (float)(s.elements + n);
+        s.elements += n;
+        s.strength = 100.0f * s.elements / s.elements_max;
+        push_event(EV_SUPPLY, u.id, false,
+                   fmt("%s: %d squad%s of %d men filled from the replacements (%d of %d squads; %d men left in the "
+                       "pool).",
+                       s.name.c_str(), n, n == 1 ? "" : "s", men, s.elements, s.elements_max, stock.replacements));
+    }
 }
 
 // The strike group hunts the company: it heads for the freshest sighting any hostile has
