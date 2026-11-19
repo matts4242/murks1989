@@ -6,4 +6,4 @@ expected_outcome: |
   version is bumped and older saves are refused. A C++ rules test covers the preference and the
   save round trip; the full rules tests ran before and after; both libraries are rebuilt; a UI
   test check marks a hostile from the menu; the headless save/load replay check passes; README
-  names MRK-35; commit title ends (MRK-35).
+  names MRK-90; commit title ends (MRK-90).
