@@ -942,6 +942,15 @@ Dictionary MurksWorld::get_unit_info(int id) const {
         if (u.type == murks::U_HQ || (grouped && world_.groups[u.group].leader == u.id))
             d["own_zone_km"] = world_.command_zone(u) * 0.5;
         d["command_link"] = command_link(u, hq);
+        // Replacements (MRK-10): squads the company's pool could fill in this unit.
+        if (const int short_n = world_.squads_short(u); short_n > 0) {
+            d["squads_short"] = short_n;
+            d["replace_men"] = murks::World::men_per_squad(world_.units[world_.replacement_squads(u)]);
+            d["replace_per_hour"] = world_.replace_rate(u);
+            d["replacements_pool"] = world_.stock.replacements;
+            d["at_trains"] = world_.at_trains(u);
+            d["trains_km"] = murks::World::TRAINS_REACH * 0.5;
+        }
         // Mounted infantry.
         d["can_dismount"] = world_.can_dismount(u);
         d["can_mount"] = world_.can_mount(u);

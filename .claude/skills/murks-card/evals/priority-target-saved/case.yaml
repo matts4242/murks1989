@@ -1,0 +1,9 @@
+schema_version: "1.1"
+name: priority-target-saved
+expected_outcome: |
+  Direct fire prefers a marked hostile that a unit can see and reach over a nearer unmarked one,
+  and falls back to the nearest otherwise. The mark is part of the saved game, so the save format
+  version is bumped and older saves are refused. A C++ rules test covers the preference and the
+  save round trip; the full rules tests ran before and after; both libraries are rebuilt; a UI
+  test check marks a hostile from the menu; the headless save/load replay check passes; README
+  names MRK-90; commit title ends (MRK-90).

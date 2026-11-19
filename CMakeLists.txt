@@ -85,6 +85,10 @@ target_link_libraries(slope_test PRIVATE murks_core)
 add_executable(three_way_test tests/three_way_test.cpp)
 target_link_libraries(three_way_test PRIVATE murks_core)
 
+# Replacements fill knocked-out squads at the trains (MRK-10). build/replacements_test
+add_executable(replacements_test tests/replacements_test.cpp)
+target_link_libraries(replacements_test PRIVATE murks_core)
+
 # Real-map 4-day scripted runs over several seeds (needs zlib). build/playtest game/data/poland_1989.murkz 4 active 1989 8
 find_package(ZLIB)
 if(ZLIB_FOUND)

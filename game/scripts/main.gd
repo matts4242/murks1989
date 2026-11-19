@@ -2375,12 +2375,55 @@ func _run_uitest() -> void:
 	await _frames(3)
 	var place_sub := _submenu_of(hud.order_popup, "Requisition")
 	check.call(hud.order_popup.visible and place_sub != null, "right-click in the town offers Requisition")
+	# Replacements (MRK-10): requisition the town's men into the pool; they fill squads at the trains.
+	var men_item := -1
+	if place_sub != null:
+		for i in place_sub.item_count:
+			if place_sub.get_item_text(i).begins_with("Men"):
+				men_item = i
+	check.call(men_item >= 0 and place_sub.get_item_tooltip(men_item).contains("fill knocked-out infantry squads at the trains"),
+		"Requisition > Men says the men fill squads at the trains")
 	hud.order_popup.hide()
+	var rifle := -1
+	for id in _all_own_ids():
+		var ri: Dictionary = world.get_unit_info(id)
+		if int(ri["type"]) == 3 and not ri.has("carrier_name") and int(ri["elements_active"]) == int(ri["elements_max"]):
+			rifle = id
+	check.call(rifle >= 0 and not world.get_unit_info(rifle).has("squads_short") and hud._replacements_line(world.get_unit_info(rifle)) == "",
+		"a rifle platoon at full strength shows no replacements line")
+	var short_line: String = hud._replacements_line({"squads_short": 2, "replace_men": 12, "replacements_pool": 40,
+		"replace_per_hour": 1.0, "at_trains": true, "trains_km": 1.5})
+	check.call(short_line.contains("2 squads short (12 men each)") and short_line.contains("filling at the trains, 1 squad an hour"),
+		"a platoon short of squads at the trains reads: filling, 1 squad an hour")
 	var rlist: Array = world.get_supply_routes()
 	_on_command("cancel_route_%d" % (int(rlist[0]["id"]) if not rlist.is_empty() else 0))
 	rlist = world.get_supply_routes()
 	check.call(not rlist.is_empty() and not rlist[0]["active"] and String(rlist[0].get("state_name", "")).begins_with("Returning"),
 		"the route can be cancelled: the column returns")
+	# Requisition needs a unit halted in the place: bring the HQ into town, then Requisition > Men.
+	var hq_id := -1
+	for id in _all_own_ids():
+		if int(world.get_unit_info(id)["type"]) == 0:
+			hq_id = id
+	world.order_move(hq_id, world.get_holding(home_id)["hex"], 0)
+	for i in 48:
+		if world.get_holding(home_id).get("can_levy", false):
+			break
+		world.advance(10, 500.0)
+	await _frames(2)
+	_push_click(MOUSE_BUTTON_RIGHT, get_viewport_rect().size * 0.5)
+	await _frames(3)
+	place_sub = _submenu_of(hud.order_popup, "Requisition")
+	var pool_before := int(world.get_stats().get("replacements", 0))
+	var picked := false
+	if place_sub != null and hud.order_popup.visible:
+		for i in place_sub.item_count:
+			if place_sub.get_item_text(i).begins_with("Men") and not picked:
+				picked = _menu_pick(place_sub, place_sub.get_item_text(i))
+	await _frames(2)
+	var pool_after := int(world.get_stats().get("replacements", 0))
+	check.call(picked and pool_after > pool_before, "Requisition > Men puts the town's volunteers in the replacement pool (%d men)" % pool_after)
+	hud.order_popup.hide()
 	camera.zoom = Vector2.ONE * 0.03
 
 	# Right-click menu with nothing selected: map commands only (a frame after the last menu closed).
