@@ -19,6 +19,10 @@ signal menu_action(name: String)    # game level: start, continue, new_game, tit
 signal event_clicked(pos: Vector2)
 signal end_choice(choice: String)    # end screen: continue / load / restart / quit
 signal oob_pick(id: int, how: String) # order of battle row: "select", "add", "command" (double-click), "company"
+## Order of battle: move units in the chain of command (MRK-36). how: "hq" (under the HQ `target`),
+## "team" (into target's team), "company" (back under the company HQ) or "" (order only); then,
+## with ref >= 0, put them just before (or after) ref in the order of battle.
+signal oob_drop(ids: Array, target: int, how: String, ref: int, after: bool)
 
 const TEXT := Color(0.92, 0.92, 0.86)
 const MUTED := Color(0.72, 0.77, 0.68)
@@ -107,6 +111,12 @@ var oob_items := {}                 # unit id -> TreeItem
 var oob_sig := ""                   # shape of the tree last built; rebuilt when it changes
 var oob_folded := {}                # row key -> folded by the player
 var oob_sel_seen: Array = []        # selection last scrolled to
+var oob_by_id := {}                 # unit id -> its get_oob row, as last shown
+var oob_selected: Array = []        # the map's selection, as last shown
+var oob_press := -1                 # a press on a row of a multi-selection: narrows to it on release if no drag
+var oob_menu: PopupMenu             # right-click menu on a row
+var oob_menu_acts: Array = []       # what each item of that menu does
+var oob_hint := ""                  # the footer's own text, put back after a drag
 const PLAN_EYES := [[2.0, "2 m: on foot"], [3.0, "3 m: vehicle (as the rules)"], [10.0, "10 m: rooftop"], [30.0, "30 m: mast or tower"]]
 # Ruler and elevation profile panel (MRK-26)
 var ruler_panel: PanelContainer
@@ -1567,7 +1577,15 @@ func _build_oob_panel() -> void:
 	oob_tree.add_theme_constant_override("h_separation", 4)
 	oob_tree.add_theme_constant_override("inner_item_margin_left", 2)
 	oob_tree.add_theme_font_size_override("font_size", 13)
+	oob_tree.allow_rmb_select = true
 	oob_tree.item_mouse_selected.connect(_on_oob_click)
+	# Drag rows to move units in the chain of command or in the list (MRK-36).
+	oob_tree.set_drag_forwarding(_oob_get_drag, _oob_can_drop, _oob_drop)
+	oob_tree.gui_input.connect(func(ev: InputEvent) -> void:
+		if ev is InputEventMouseButton and not ev.pressed and ev.button_index == MOUSE_BUTTON_LEFT:
+			if oob_press >= 0 and not get_viewport().gui_is_dragging():
+				oob_pick.emit(oob_press, "select")
+			oob_press = -1)
 	oob_tree.item_activated.connect(_on_oob_activated)
 	oob_tree.item_collapsed.connect(func(it: TreeItem) -> void:
 		var key = it.get_metadata(0).get("key", "")
@@ -1578,6 +1596,9 @@ func _build_oob_panel() -> void:
 	oob_foot.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	oob_foot.custom_minimum_size = Vector2(300, 0)
 	col.add_child(oob_foot)
+	oob_menu = PopupMenu.new()
+	oob_menu.id_pressed.connect(_on_oob_menu)
+	add_child(oob_menu)
 
 
 func set_oob_visible(on: bool) -> void:
@@ -1585,17 +1606,242 @@ func set_oob_visible(on: bool) -> void:
 	set_toggle("OOB", on)
 
 
-func _on_oob_click(_pos: Vector2, button: int) -> void:
+func _on_oob_click(pos: Vector2, button: int) -> void:
 	var it := oob_tree.get_selected()
 	oob_tree.deselect_all()
-	if it == null or button != MOUSE_BUTTON_LEFT:
+	if it == null:
 		return
 	var md: Dictionary = it.get_metadata(0)
+	if button == MOUSE_BUTTON_RIGHT:
+		if String(md.get("kind", "")) == "unit":
+			_open_oob_menu(int(md["id"]), oob_tree.get_screen_transform() * pos)
+		return
+	if button != MOUSE_BUTTON_LEFT:
+		return
 	match String(md.get("kind", "")):
 		"unit":
-			oob_pick.emit(int(md["id"]), "add" if Input.is_key_pressed(KEY_SHIFT) or Input.is_key_pressed(KEY_CTRL) else "select")
+			var id := int(md["id"])
+			if Input.is_key_pressed(KEY_SHIFT) or Input.is_key_pressed(KEY_CTRL):
+				oob_pick.emit(id, "add")
+			elif oob_selected.size() > 1 and oob_selected.has(id):
+				oob_press = id # keep the selection for a drag; narrow to this unit on release
+			else:
+				oob_pick.emit(id, "select")
 		"company":
 			oob_pick.emit(int(md["id"]), "company")
+
+
+# --- Moving units in the order of battle (MRK-36) ---
+
+func _oob_row_movable(r: Dictionary) -> bool:
+	return not r.is_empty() and r["alive"] and not r["embarked"] and not r["militia"]
+
+
+func _oob_is_hq(r: Dictionary) -> bool:
+	return String(r.get("type_name", "")) == "HQ"
+
+
+## The units a drag or menu on row `id` moves: the selection when the row is part of it.
+func _oob_moving(id: int) -> Array:
+	var ids: Array = []
+	if oob_selected.has(id):
+		for s in oob_selected:
+			if _oob_row_movable(oob_by_id.get(int(s), {})):
+				ids.append(int(s))
+	elif _oob_row_movable(oob_by_id.get(id, {})):
+		ids.append(id)
+	return ids
+
+
+func _oob_names(ids: Array) -> String:
+	if ids.size() == 1:
+		var r: Dictionary = oob_by_id.get(int(ids[0]), {})
+		var nm := String(r.get("name", "?"))
+		return nm + (" and its team" if String(r.get("role", "")) == "leader" else "")
+	return "%d units" % ids.size()
+
+
+func _oob_get_drag(at: Vector2) -> Variant:
+	var it := oob_tree.get_item_at_position(at)
+	if it == null:
+		return null
+	var md: Dictionary = it.get_metadata(0)
+	if String(md.get("kind", "")) != "unit":
+		return null
+	var ids := _oob_moving(int(md["id"]))
+	if ids.is_empty():
+		return null
+	oob_press = -1
+	oob_tree.drop_mode_flags = Tree.DROP_MODE_ON_ITEM | Tree.DROP_MODE_INBETWEEN
+	var pv := PanelContainer.new()
+	pv.add_theme_stylebox_override("panel", _panel_style(0.92))
+	pv.add_child(_label(_oob_names(ids), 13, AMBER))
+	oob_tree.set_drag_preview(pv)
+	oob_hint = oob_foot.text
+	return {"oob_ids": ids}
+
+
+## What a drop at `at` would do: {ok, how, target, ref, after, text}.
+func _oob_drop_plan(at: Vector2, data: Variant) -> Dictionary:
+	var no := {"ok": false, "text": "Drop on an HQ (command), on a platoon (team), or between rows (order)."}
+	if not (data is Dictionary) or not data.has("oob_ids"):
+		return no
+	var ids: Array = data["oob_ids"]
+	var it := oob_tree.get_item_at_position(at)
+	if it == null:
+		return no
+	var md: Dictionary = it.get_metadata(0)
+	var who := _oob_names(ids)
+	if String(md.get("kind", "")) == "company":
+		return {"ok": true, "how": "company", "target": -1, "ref": -1, "after": false,
+			"text": "%s back under the company HQ." % who}
+	if String(md.get("kind", "")) != "unit":
+		return no
+	var tid := int(md["id"])
+	var tr: Dictionary = oob_by_id.get(tid, {})
+	if tr.is_empty() or not tr["alive"] or tr["militia"] or ids.has(tid):
+		return no
+	var sec := oob_tree.get_drop_section_at_position(at)
+	if sec == 0:
+		if _oob_is_hq(tr):
+			return {"ok": true, "how": "hq", "target": tid, "ref": -1, "after": false,
+				"text": "%s under %s: orders through it (command only)." % [who, tr["name"]]}
+		if tr["embarked"]:
+			return no
+		var leader := tid
+		if int(tr.get("group_id", -1)) >= 0 and String(tr["role"]) != "leader":
+			leader = int(tr["parent"])
+		var lr: Dictionary = oob_by_id.get(leader, tr)
+		if int(tr.get("group_id", -1)) >= 0:
+			return {"ok": true, "how": "team", "target": tid, "ref": -1, "after": false,
+				"text": "%s into %s under %s: follows it in formation." % [who, tr.get("group_name", "the team"), lr["name"]]}
+		return {"ok": true, "how": "team", "target": tid, "ref": -1, "after": false,
+			"text": "%s forms a team under %s: follows it in formation." % [who, tr["name"]]}
+	if sec != -1 and sec != 1:
+		return no
+	# Between rows: next to that unit, under whoever it answers to.
+	var after := sec == 1
+	var pr: Dictionary = oob_by_id.get(int(tr["parent"]), {})
+	var plan := {"ok": true, "how": "", "target": -1, "ref": tid, "after": after}
+	var where := "%s %s" % ["after" if after else "before", tr["name"]]
+	if pr.is_empty():
+		plan["how"] = "company"
+		plan["text"] = "%s %s, under the company HQ." % [who, where]
+	elif _oob_is_hq(pr):
+		plan["how"] = "hq"
+		plan["target"] = int(pr["id"])
+		plan["text"] = "%s %s, under %s." % [who, where, pr["name"]]
+	elif String(pr["role"]) == "leader" and int(pr.get("group_id", -1)) == int(tr.get("group_id", -2)):
+		plan["how"] = "team"
+		plan["target"] = int(pr["id"])
+		plan["text"] = "%s %s, in %s." % [who, where, pr.get("group_name", "the team")]
+	else:
+		plan["text"] = "%s %s." % [who, where] # squads under their vehicles: order only
+	return plan
+
+
+func _oob_can_drop(at: Vector2, data: Variant) -> bool:
+	var plan := _oob_drop_plan(at, data)
+	oob_foot.text = String(plan.get("text", ""))
+	oob_foot.add_theme_color_override("font_color", AMBER if plan["ok"] else Color("#ff8a6b"))
+	return plan["ok"]
+
+
+func _oob_drop(at: Vector2, data: Variant) -> void:
+	var plan := _oob_drop_plan(at, data)
+	_oob_drag_done()
+	if plan["ok"]:
+		oob_drop.emit(data["oob_ids"], int(plan["target"]), String(plan["how"]), int(plan["ref"]), bool(plan["after"]))
+
+
+func _oob_drag_done() -> void:
+	oob_tree.drop_mode_flags = 0
+	oob_foot.remove_theme_color_override("font_color")
+	if oob_hint != "":
+		oob_foot.text = oob_hint
+		oob_hint = ""
+
+
+func _notification(what: int) -> void:
+	if what == NOTIFICATION_DRAG_END and oob_tree != null and oob_tree.drop_mode_flags != 0:
+		_oob_drag_done()
+
+
+## Right-click on a row: the same moves from a menu.
+func _open_oob_menu(id: int, at: Vector2) -> void:
+	var r: Dictionary = oob_by_id.get(id, {})
+	var ids := _oob_moving(id)
+	oob_menu.clear(true)
+	oob_menu_acts.clear()
+	var who := _oob_names(ids)
+	oob_menu.add_separator(who if not ids.is_empty() else String(r.get("name", "")))
+	if ids.is_empty():
+		_oob_menu_add("Can't be moved (aboard, knocked out or militia)", {}, oob_menu, false)
+	else:
+		var hqs := PopupMenu.new()
+		hqs.id_pressed.connect(_on_oob_menu)
+		var teams := PopupMenu.new()
+		teams.id_pressed.connect(_on_oob_menu)
+		for k in oob_by_id:
+			var h: Dictionary = oob_by_id[k]
+			if not h["alive"] or h["militia"] or ids.has(int(k)):
+				continue
+			if _oob_is_hq(h):
+				_oob_menu_add(String(h["name"]), {"how": "hq", "target": int(k)}, hqs)
+			if String(h["role"]) == "leader" or String(h["role"]) == "hq" and int(h.get("group_id", -1)) >= 0:
+				_oob_menu_add("%s (%s)" % [h.get("group_name", "Team"), h["name"]], {"how": "team", "target": int(k)}, teams)
+		oob_menu.add_submenu_node_item("Put under an HQ (command)", hqs)
+		oob_menu.add_submenu_node_item("Into a team (follow in formation)", teams)
+		var others: Array = []
+		for s in oob_selected:
+			if int(s) != id and _oob_row_movable(oob_by_id.get(int(s), {})):
+				others.append(int(s))
+		if not oob_selected.has(id) and not others.is_empty() and not r["embarked"] and not r["militia"]:
+			_oob_menu_add("Take the %d selected unit%s into its team" % [others.size(), "" if others.size() == 1 else "s"],
+				{"how": "team", "target": id, "ids": others})
+		_oob_menu_add("Back under the company HQ", {"how": "company", "target": -1})
+		oob_menu.add_separator()
+		# Up and down among the units next to it in the list.
+		var sib := _oob_siblings(id)
+		var k := sib.find(id)
+		_oob_menu_add("Move up", {"how": "", "ref": sib[k - 1] if k > 0 else -1, "after": false, "ids": [id]}, oob_menu, k > 0)
+		_oob_menu_add("Move down", {"how": "", "ref": sib[k + 1] if k >= 0 and k + 1 < sib.size() else -1, "after": true, "ids": [id]},
+			oob_menu, k >= 0 and k + 1 < sib.size())
+	for a in oob_menu_acts:
+		if not a.has("ids"):
+			a["ids"] = ids
+	oob_menu.position = Vector2i(at)
+	oob_menu.reset_size()
+	oob_menu.popup()
+
+
+func _oob_menu_add(label: String, act: Dictionary, menu: PopupMenu = null, enabled := true) -> void:
+	if menu == null:
+		menu = oob_menu
+	menu.add_item(label, oob_menu_acts.size())
+	menu.set_item_disabled(menu.item_count - 1, not enabled)
+	oob_menu_acts.append(act)
+
+
+func _oob_siblings(id: int) -> Array:
+	var it: TreeItem = oob_items.get(id, null)
+	var out: Array = []
+	if it == null or it.get_parent() == null:
+		return out
+	for c in it.get_parent().get_children():
+		var md: Dictionary = c.get_metadata(0)
+		if String(md.get("kind", "")) == "unit":
+			out.append(int(md["id"]))
+	return out
+
+
+func _on_oob_menu(i: int) -> void:
+	if i < 0 or i >= oob_menu_acts.size():
+		return
+	var a: Dictionary = oob_menu_acts[i]
+	if a.is_empty():
+		return
+	oob_drop.emit(a["ids"], int(a.get("target", -1)), String(a.get("how", "")), int(a.get("ref", -1)), bool(a.get("after", false)))
 
 
 func _on_oob_activated() -> void:
@@ -1636,6 +1882,10 @@ func show_oob(rows: Array, selected: Array, under: Dictionary, children: Diction
 	var by_id := {}
 	for r in rows:
 		by_id[int(r["id"])] = r
+	oob_by_id = by_id
+	oob_selected = selected.duplicate()
+	if oob_tree.drop_mode_flags != 0 and not get_viewport().gui_is_dragging():
+		_oob_drag_done()
 	# Rebuild only when the shape of the tree changes (a team formed, a unit lost, squads out).
 	var sig := ""
 	for r in rows:
@@ -1680,8 +1930,11 @@ func show_oob(rows: Array, selected: Array, under: Dictionary, children: Diction
 		foot = "%s commands %d unit%s, marked blue here and on the map." % [r["name"], n, "" if n == 1 else "s"]
 		break
 	if foot == "":
-		foot = "Click: select · Shift-click: add · Double-click: the unit and everything under it, centred."
-	oob_foot.text = foot
+		foot = "Click: select · Shift-click: add · Double-click: the unit and everything under it, centred. Drag a row onto an HQ, a platoon or between rows to move it; right-click for more."
+	if oob_tree.drop_mode_flags != 0:
+		oob_hint = foot # a drag is on: its own text stays
+	else:
+		oob_foot.text = foot
 
 
 func _count_under(id: int, children: Dictionary, by_id: Dictionary) -> int:
@@ -1874,7 +2127,7 @@ func _fill_oob_row(it: TreeItem, r: Dictionary, children: Dictionary, by_id: Dic
 		if n > 0:
 			tip += "\nCommands %d unit%s" % [n, "" if n == 1 else "s"]
 	if r["alive"] and not r["embarked"]:
-		tip += "\nClick: select · Double-click: it and everything under it"
+		tip += "\nClick: select · Double-click: it and everything under it\nDrag onto an HQ, a platoon or between rows to move it · Right-click: move menu"
 	for c in 3:
 		it.set_tooltip_text(c, tip)
 
@@ -2420,7 +2673,7 @@ func _controls_body() -> Control:
 			["F4 / F6", "Map legend / painted terrain textures on or off"],
 			["F7", "Counters show vehicles or NATO symbols"],
 			["F10", "Planning map: going, cover, slope, line of sight (steps through)"],
-			["F11", "Order of battle panel: click a row to select, double-click for the whole command"],
+			["F11", "Order of battle panel: click a row to select, double-click for the whole command; drag a row onto an HQ, a platoon or between rows to move it (right-click: menu)"],
 			["F8", "Topographic map: contour lines and heights"],
 			["Esc", "Pause menu"]]]]
 	var cols := HBoxContainer.new()
