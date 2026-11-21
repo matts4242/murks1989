@@ -141,14 +141,17 @@ Run it without names only when the card may change many shots: a rule that alter
 battle plays out, or a panel or menu that appears in several. A new shot for a new feature goes
 into `_run_autotest` in `main.gd`, as the others do.
 
-The committed shots lag the game: many were last retaken several cards ago, so `shot_diff`
-shows battle, theatre, menu and controls shots that differ for reasons that have nothing to do
-with your card. Judge by subject: copy in the shots whose subject your card changed (a panel,
-a key, a readout, a map mode) and leave the rest. If you are unsure whether your card moved a
-shot, render the base commit's shot for comparison (`git worktree add`, the same script)
-rather than guessing, and mention the stale ones in the PR rather than refreshing them in this
-card. The run is deterministic apart from `06b_fire_effects` (muzzle flashes). Look at every
-shot you copy: text that wraps badly or overlaps is a fix to make, not a picture to commit.
+On an up-to-date `main` the committed shots match a fresh render exactly (checked after the
+MRK-10 merge: 0.000% on every shot except `06b_fire_effects`, whose muzzle flashes vary, and
+about 0.1% on the title and pause screens), so a changed shot was changed by your work: its
+subject (a panel, a key, a readout, a map mode) or, for battle and theatre shots, the course of
+the simulation, which any rule change shifts. But a branch started from an older commit can
+carry shots that lag the game. If `shot_diff` shows changes you can't explain, render the
+base commit's shot for comparison (`git worktree add`, the same script) rather than guessing,
+and mention the stale ones in the PR instead of refreshing them in this card.
+
+Copy in the shots whose subject your card changed and leave the rest. Look at every shot you
+copy: text that wraps badly or overlaps is a fix to make, not a picture to commit.
 
 ## 8. README
 
