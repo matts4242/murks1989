@@ -89,6 +89,14 @@ target_link_libraries(three_way_test PRIVATE murks_core)
 add_executable(replacements_test tests/replacements_test.cpp)
 target_link_libraries(replacements_test PRIVATE murks_core)
 
+# Wages (MRK-07): the men are paid from the cash at 06:00, an unpaid company loses morale. build/wages_test
+add_executable(wages_test tests/wages_test.cpp)
+target_link_libraries(wages_test PRIVATE murks_core)
+
+# Reinforcements (MRK-07): lost vehicles come back by request in two to three days, save/load. build/reinforcements_test
+add_executable(reinforcements_test tests/reinforcements_test.cpp)
+target_link_libraries(reinforcements_test PRIVATE murks_core)
+
 # Real-map 4-day scripted runs over several seeds (needs zlib). build/playtest game/data/poland_1989.murkz 4 active 1989 8
 find_package(ZLIB)
 if(ZLIB_FOUND)

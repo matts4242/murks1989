@@ -534,11 +534,14 @@ func _update_orders_state() -> void:
 	var can_dis := false
 	var can_mnt := false
 	var detached := false
+	var can_reinforce := false
 	for id in _own_selected():
 		var mi: Dictionary = world.get_unit_info(id)
 		can_dis = can_dis or bool(mi.get("can_dismount", false))
 		can_mnt = can_mnt or bool(mi.get("can_mount", false))
 		detached = detached or String(mi.get("group_role", "")) == "detached"
+		can_reinforce = can_reinforce or int(mi.get("vehicles_short", 0)) > 0
+	hud.set_reinforce_state(can_reinforce)
 	hud.set_mount_state(can_dis, can_mnt)
 	hud.set_rejoin_state(detached)
 	var so := -2
@@ -1464,6 +1467,18 @@ func _on_command(name: String) -> void:
 			_select_company_of(selected[0])
 	elif name == "hold":
 		_order_hold()
+	elif name == "reinforce":
+		var asked := 0
+		var shortest := 1 << 30
+		for id in _own_selected():
+			var d: int = world.request_reinforcements(id)
+			if d >= 0:
+				asked += 1
+				shortest = mini(shortest, d)
+		if asked > 0:
+			hud.show_toast("Reinforcements requested for %d unit%s: at the trains in about %s." % [asked, "" if asked == 1 else "s", hud._wait_text(shortest)], 5.0)
+		else:
+			hud.show_toast("Nothing to ask for: select vehicle, gun or truck units that have lost some, with no request already on its way.")
 	elif name == "rejoin":
 		var n := 0
 		var lo := 1 << 30
@@ -2942,6 +2957,45 @@ func _run_uitest() -> void:
 	help.get_popup().hide()
 	if show_zones != zones_was:
 		_on_toggle("Zones")
+	# Wages (MRK-07): the stock bar says how many days the cash pays the men, once it is short,
+	# and the tooltip gives the wage bill; both come from the rule's own figures.
+	var wage_stats: Dictionary = world.get_stats()
+	check.call(float(wage_stats.get("wage_bill", 0.0)) > 0.0 and float(wage_stats.get("days_cash", 0.0)) > 1.0,
+		"the stats give the wage bill (%d DM a day) and the days of cash (%.1f)" % [int(wage_stats.get("wage_bill", 0.0)), float(wage_stats.get("days_cash", 0.0))])
+	wage_stats["days_cash"] = 2.5
+	hud.refresh(world.get_time_string(), world.is_night(), wage_stats, 60, "")
+	check.call(hud.stock_label.text.ends_with(" DM (2.5 d)"), "short cash shows its days on the stock bar: \"%s\"" % hud.stock_label.text.right(24))
+	check.call(hud.stock_label.tooltip_text.contains("a day at 06:00") and hud.stock_label.tooltip_text.contains("2.5 d of cash"), "the tooltip gives the wage bill and the days of cash")
+	wage_stats["days_cash"] = 6.8
+	hud.refresh(world.get_time_string(), world.is_night(), wage_stats, 60, "")
+	check.call(hud.stock_label.text.ends_with(" DM"), "cash for a week adds nothing to the bar (only under 3 days is shown)")
+	# Reinforcements (MRK-07): the panel line and the command, with a tank platoon that loses a vehicle in a
+	# sandbox fight; the rules themselves are checked by reinforcements_test.
+	check.call(hud._reinforcement_line({}) == "" and hud._reinforcement_line({"vehicles_short": 2}).contains("2 vehicles lost")
+		and hud._reinforcement_line({"vehicles_short": 2}).contains("request reinforcements"), "a unit short of vehicles says to request reinforcements")
+	var rq_line: String = hud._reinforcement_line({"reinf_count": 2, "reinf_due_in": 3000, "reinf_at_trains": false})
+	check.call(rq_line.contains("2 vehicles on the way") and rq_line.contains("2 d 2 h"), "a request on its way reads: 2 vehicles, 2 d 2 h")
+	check.call(hud._reinforcement_line({"reinf_count": 1, "reinf_due_in": 0, "reinf_at_trains": false}).contains("waiting at the trains"), "arrived reinforcements wait at the trains for a unit that is away")
+	var tank_at: Vector2i = world.get_holding(home_id)["hex"] + Vector2i(6, 4)
+	var own_tank: int = world.sandbox_place(0, 1, tank_at)
+	world.sandbox_place(1, 1, tank_at + Vector2i(3, 0))
+	world.sandbox_place(1, 1, tank_at + Vector2i(3, 1))
+	for i in 120:
+		if int(world.get_unit_info(own_tank).get("vehicles_short", 0)) > 0 or not world.get_unit_info(own_tank)["alive"]:
+			break
+		world.advance(5, 500.0)
+	var tank_info: Dictionary = world.get_unit_info(own_tank)
+	check.call(own_tank >= 0 and int(tank_info.get("vehicles_short", 0)) > 0, "a tank platoon in a sandbox fight loses a vehicle (%d short)" % int(tank_info.get("vehicles_short", 0)))
+	selected = [own_tank]
+	_on_command("reinforce")
+	tank_info = world.get_unit_info(own_tank)
+	check.call(hud.toast.text.begins_with("Reinforcements requested for 1 unit") and int(tank_info.get("reinf_count", 0)) > 0
+		and int(tank_info.get("reinf_due_in", 0)) >= 2 * 1440 and not tank_info.has("vehicles_short"),
+		"Request reinforcements asks for the lost vehicles: \"%s\"" % hud.toast.text)
+	check.call(hud._reinforcement_line(tank_info).contains("on the way, at the trains in about 2 d") or hud._reinforcement_line(tank_info).contains("on the way, at the trains in about 3 d"),
+		"the unit panel says when they should arrive")
+	_on_command("reinforce")
+	check.call(hud.toast.text.begins_with("Nothing to ask for"), "a second request while one is on its way is refused")
 	print("UITEST done: %d passed, %d failed" % [res[0], res[1]])
 	get_tree().quit(1 if res[1] > 0 else 0)
 

@@ -132,6 +132,7 @@ void MurksWorld::_bind_methods() {
     ClassDB::bind_method(D_METHOD("poll_events"), &MurksWorld::poll_events);
     ClassDB::bind_method(D_METHOD("get_stats"), &MurksWorld::get_stats);
     ClassDB::bind_method(D_METHOD("order_rejoin", "id"), &MurksWorld::order_rejoin);
+    ClassDB::bind_method(D_METHOD("request_reinforcements", "id"), &MurksWorld::request_reinforcements);
     ClassDB::bind_method(D_METHOD("get_holdings"), &MurksWorld::get_holdings);
     ClassDB::bind_method(D_METHOD("get_holding", "hid"), &MurksWorld::get_holding);
     ClassDB::bind_method(D_METHOD("holding_at", "hex"), &MurksWorld::holding_at);
@@ -951,6 +952,13 @@ Dictionary MurksWorld::get_unit_info(int id) const {
             d["at_trains"] = world_.at_trains(u);
             d["trains_km"] = murks::World::TRAINS_REACH * 0.5;
         }
+        // Reinforcements (MRK-07): vehicles, guns or trucks the unit is short of, or the request on its way.
+        if (const int vs = world_.vehicles_short(u); vs > 0) d["vehicles_short"] = vs;
+        if (const murks::Reinforcement *rq = world_.reinforcement_for(u.id)) {
+            d["reinf_count"] = rq->count;
+            d["reinf_due_in"] = (int)std::max<int64_t>(0, rq->due - world_.time_min);
+            d["reinf_at_trains"] = world_.at_trains(u);
+        }
         // Mounted infantry.
         d["can_dismount"] = world_.can_dismount(u);
         d["can_mount"] = world_.can_mount(u);
@@ -1149,6 +1157,8 @@ int MurksWorld::order_hold(int id) {
 }
 
 int MurksWorld::order_rejoin(int id) { return own_unit(world_, id) ? world_.order_rejoin(id) : -1; }
+// Minutes until the reinforcements reach the trains, -1 if nothing could be asked (MRK-07).
+int MurksWorld::request_reinforcements(int id) { return own_unit(world_, id) ? world_.request_reinforcements(id) : -1; }
 
 int MurksWorld::create_group(const PackedInt32Array &ids, int leader) {
     std::vector<int> v;
@@ -1320,6 +1330,8 @@ Dictionary MurksWorld::get_stats() const {
     d["food_kg"] = world_.stock.food_kg;
     d["personnel"] = world_.stock.personnel;
     d["cash"] = world_.stock.cash;
+    d["wage_bill"] = world_.wage_bill();
+    d["days_cash"] = world_.days_of_cash();
     d["replacements"] = world_.stock.replacements;
     d["days_diesel"] = world_.days_of_diesel();
     d["days_ammo"] = world_.days_of_ammo();

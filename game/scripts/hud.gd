@@ -179,7 +179,7 @@ var orders_hint: Label
 # roe / brk / shape / spacing / standoff: -1 mixed across the selection.
 var ord := {"has_own": false, "mode": -1, "roe": 0, "brk": 0, "pending": false, "delay": "",
 	"in_team": false, "can_form": false, "shape": -1, "spacing": -1, "team": "",
-	"standoff": 255, "default_standoff": 0, "can_dismount": false, "can_mount": false, "detached": false}
+	"standoff": 255, "default_standoff": 0, "can_dismount": false, "can_mount": false, "detached": false, "can_reinforce": false}
 
 # Holding panel (a town, farm collective or depot selected by its pennant)
 var holding_panel: PanelContainer
@@ -632,6 +632,8 @@ func fill_orders(pm: PopupMenu, at_hex: bool, ctx: Dictionary) -> void:
 		_add(more, "Dismount the squads", "cmd", "dismount", KEY_COMMA, true, -1, "The vehicles halt and the squads get out to move and fight on foot.")
 	if ord["can_mount"]:
 		_add(more, "Mount up", "cmd", "mount", KEY_COMMA, true, -1, "The squads walk back to their vehicles and climb aboard (2 min once together).")
+	if ord["can_reinforce"]:
+		_add(more, "Request reinforcements", "cmd", "reinforce", 0, true, -1, "Ask the rear for the vehicles, guns or trucks the unit has lost. They reach the trains in two to three days and join once the unit is there. There is no price, only the wait.")
 	if ord["detached"]:
 		_add(more, "Rejoin team", "cmd", "rejoin", KEY_L | KEY_MASK_SHIFT, true, -1, "A member that left its formation on its own orders takes its place by the leader again.")
 	var st := _submenu(pm, "Standing orders")
@@ -1243,6 +1245,10 @@ func set_standoff_state(setting: int, default_value: int) -> void:
 
 
 ## Teams: whether the selection holds a detached member (shows Rejoin team).
+func set_reinforce_state(can: bool) -> void:
+	ord["can_reinforce"] = can
+
+
 func set_rejoin_state(detached: bool) -> void:
 	ord["detached"] = detached
 	rejoin_button.visible = detached
@@ -1321,6 +1327,30 @@ func _replacements_line(info: Dictionary) -> String:
 		var rate := ("%d squad%s an hour" % [int(r), "" if int(r) == 1 else "s"]) if r >= 1.0 else ("a squad every %d hours" % int(round(1.0 / r)))
 		return t + "[color=#5fd35f]filling at the trains, %s[/color]\n" % rate
 	return t + "%d men waiting: halt within %.1f km of the HQ, out of the fight\n" % [pool, float(info.get("trains_km", 1.5))]
+
+
+## "2 d 5 h" / "7 h" / "40 min" for a number of minutes.
+func _wait_text(minutes: int) -> String:
+	if minutes >= 1440:
+		return "%d d %d h" % [minutes / 1440, (minutes % 1440) / 60]
+	return "%d h" % (minutes / 60) if minutes >= 60 else "%d min" % minutes
+
+
+## Reinforcements (MRK-07): vehicles, guns or trucks the unit is short of, or the request on its way.
+func _reinforcement_line(info: Dictionary) -> String:
+	if info.has("reinf_count"):
+		var n := int(info["reinf_count"])
+		var what := "%d vehicle%s" % [n, "" if n == 1 else "s"]
+		var due := int(info["reinf_due_in"])
+		if due > 0:
+			return "[color=#c8f0a0]Reinforcements[/color]  %s on the way, at the trains in about %s\n" % [what, _wait_text(due)]
+		if info.get("reinf_at_trains", false):
+			return "[color=#5fd35f]Reinforcements[/color]  %s joining\n" % what
+		return "[color=#c8f0a0]Reinforcements[/color]  %s waiting at the trains: halt within %.1f km of the HQ, out of the fight\n" % [what, float(info.get("trains_km", 1.5))]
+	var short := int(info.get("vehicles_short", 0))
+	if short > 0:
+		return "[color=#ffc040]%d vehicle%s lost[/color] · request reinforcements\n" % [short, "" if short == 1 else "s"]
+	return ""
 
 
 ## Fire support net (its own radio band) for one unit.
@@ -2722,14 +2752,15 @@ func _dock(c: Control, x: float, y: float, w: float, h: float) -> void:
 
 func refresh(time_text: String, night: bool, stats: Dictionary, fps: float, map_stats: String) -> void:
 	time_label.text = time_text + ("  night" if night else "")
-	stock_label.text = "Diesel %s L%s   Ammo %.1f t%s   Food %s kg%s   Men %d%s   %s DM" % [
+	stock_label.text = "Diesel %s L%s   Ammo %.1f t%s   Food %s kg%s   Men %d%s   %s DM%s" % [
 		_thousands(int(stats["diesel_l"])), _days(float(stats.get("days_diesel", 1e9))),
 		float(stats["ammo_t"]), _days(float(stats.get("days_ammo", 1e9))),
 		_thousands(int(stats["food_kg"])), _days(float(stats.get("days_food", 1e9))),
 		int(stats["personnel"]), (" (+%d)" % int(stats["replacements"])) if int(stats.get("replacements", 0)) > 0 else "",
-		_thousands(int(stats.get("cash", 0.0)))]
-	stock_label.tooltip_text = "Company stocks; days of supply at the recent rate of use (shown on the bar under 30 days): diesel %s, ammunition %s, food %s. Men on the rolls (+ replacements waiting: they fill knocked-out infantry squads at the trains); cash. %d holding%s, %d trucks, %d route%s running." % [
+		_thousands(int(stats.get("cash", 0.0))), _days(float(stats.get("days_cash", 1e9)), 3.0)]
+	stock_label.tooltip_text = "Company stocks; days of supply at the recent rate of use (shown on the bar under 30 days, cash under 3): diesel %s, ammunition %s, food %s. Men on the rolls (+ replacements waiting: they fill knocked-out infantry squads at the trains); cash, which pays the men %s DM a day at 06:00 (%s of cash; an unpaid company loses morale). %d holding%s, %d trucks, %d route%s running." % [
 		_days_tip(float(stats.get("days_diesel", 1e9))), _days_tip(float(stats.get("days_ammo", 1e9))), _days_tip(float(stats.get("days_food", 1e9))),
+		_thousands(int(stats.get("wage_bill", 0.0))), _days_tip(float(stats.get("days_cash", 1e9))),
 		int(stats.get("holdings_owned", 0)), "" if int(stats.get("holdings_owned", 0)) == 1 else "s", int(stats.get("trucks", 0)),
 		int(stats.get("routes_active", 0)), "" if int(stats.get("routes_active", 0)) == 1 else "s"]
 	perf_label.visible = show_perf
@@ -2828,6 +2859,7 @@ func show_unit(info: Dictionary, count: int) -> void:
 	t += _stats_line(float(info["morale"]), float(info["fuel"]), float(info["ammo"]), float(info["readiness"]))
 	t += "%s · %s\n" % [_situation(info), info["order"]]
 	t += _replacements_line(info)
+	t += _reinforcement_line(info)
 	if info.get("pending", false):
 		t += "[color=#ffd84a]%s order arrives in %d min[/color]\n" % [info["pending_kind"], int(info["pending_in"])]
 	if info.has("eta_minutes"):
@@ -3054,8 +3086,8 @@ func _days_tip(d: float) -> String:
 	return "not being used" if d >= 999.0 else ("%.1f d" % d if d < 10.0 else "%d d" % int(d))
 
 
-func _days(d: float) -> String:
-	if d >= 30.0:
+func _days(d: float, shown_under := 30.0) -> String:
+	if d >= shown_under:
 		return "" # only short supplies are shown; the tooltip has every figure
 	return " (%.1f d)" % d if d < 10.0 else " (%d d)" % int(d)
 
