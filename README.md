@@ -147,7 +147,7 @@ The prebuilt extension is in `game/bin/` (`libmurks.windows.template_debug.x86_6
 | F5 / F9 | Quick save / quick load (one slot, in Godot's user folder) |
 | J / Shift+J | Form a team from the selection / disband the selection's teams |
 | L | Select the team of the selected unit (double-click does the same) |
-| U | Rejoin team: a member that left its formation on its own orders takes its place again |
+| Shift+L | Rejoin team: a member that left its formation on its own orders takes its place again |
 | , (comma) | Dismount the squads of the selected APC/IFV platoons, or mount them up again |
 | Click a pennant | Select a holding: its panel shows stores, loyalty, militia and routes, with Raise militia, Requisition and Supply route |
 | F3 | Supply overlay: routes and convoys |
