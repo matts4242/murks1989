@@ -150,6 +150,7 @@ public:
     Dictionary plan_leg(int id, Vector2i from, Vector2i to, int mode); // {minutes, path} (world positions)
     int order_hold(int id);
     int order_rejoin(int id); // detached team member takes its place again
+    int request_reinforcements(int id); // lost vehicles, guns or trucks come in 2-3 days (MRK-07); -1 if none can be asked
     int order_fall_back(int id);
     int order_regroup(int id, bool rest);
     int order_dismount(int id);

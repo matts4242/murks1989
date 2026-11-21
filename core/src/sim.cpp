@@ -306,6 +306,7 @@ int World::spawn(int formation, int8_t side, UnitType type, const std::string &n
 
 void World::setup_scenario(int extra_groups, int kind) {
     units.clear();
+    reinforcements.clear();
     formations.clear();
     groups.clear();
     holdings.clear();
@@ -3504,6 +3505,7 @@ void World::update_logistics() {
     update_holdings();
     update_trains_at_depot(hq);
     replace_losses(hq, acting);
+    deliver_reinforcements(hq);
     stock.personnel = 0;
     for (auto &u : units) {
         if (!u.alive || u.side != SIDE_PLAYER) continue;
@@ -3649,6 +3651,73 @@ void World::replace_losses(int hq, bool acting) {
                    fmt("%s: %d squad%s of %d men filled from the replacements (%d of %d squads; %d men left in the "
                        "pool).",
                        s.name.c_str(), n, n == 1 ? "" : "s", men, s.elements, s.elements_max, stock.replacements));
+    }
+}
+
+// Reinforcements (MRK-07).
+const Reinforcement *World::reinforcement_for(int unit_id) const {
+    for (const auto &r : reinforcements)
+        if (r.unit == unit_id) return &r;
+    return nullptr;
+}
+
+int World::vehicles_short(const Unit &u) const {
+    if (!u.alive || u.side != SIDE_PLAYER || u.militia || u.type == U_INFANTRY) return 0;
+    if (reinforcement_for(u.id)) return 0;
+    return std::max(0, u.elements_max - u.elements);
+}
+
+int World::request_reinforcements(int unit_id, std::string *why) {
+    auto refuse = [&](const char *text) {
+        if (why) *why = text;
+        return -1;
+    };
+    if (unit_id < 0 || unit_id >= (int)units.size()) return refuse("no such unit");
+    const Unit &u = units[unit_id];
+    if (!u.alive || u.side != SIDE_PLAYER || u.militia || u.type == U_INFANTRY) return refuse("only vehicle, gun and truck units ask for reinforcements");
+    if (reinforcement_for(unit_id)) return refuse("reinforcements are already on their way");
+    const int n = vehicles_short(u);
+    if (n <= 0) return refuse("nothing is missing");
+    if (acting_hq(0) < 0) return refuse("there is no headquarters to ask");
+    Reinforcement r;
+    r.unit = unit_id;
+    r.count = n;
+    r.asked = time_min;
+    r.due = time_min + REINF_MIN_DELAY_MIN + rng_.range_int(0, REINF_EXTRA_DELAY_MIN);
+    reinforcements.push_back(r);
+    push_event(EV_SUPPLY, unit_id, false,
+               fmt("%s: %d %s requested from the rear; they should reach the trains in %d to %d days.", u.name.c_str(), n,
+                   n == 1 ? "vehicle" : "vehicles", REINF_MIN_DELAY_MIN / 1440, (REINF_MIN_DELAY_MIN + REINF_EXTRA_DELAY_MIN) / 1440));
+    return (int)(r.due - time_min);
+}
+
+void World::deliver_reinforcements(int hq) {
+    for (size_t i = 0; i < reinforcements.size();) {
+        const Reinforcement r = reinforcements[i];
+        Unit &u = units[r.unit];
+        auto drop = [&]() { reinforcements.erase(reinforcements.begin() + i); };
+        if (!u.alive) {
+            push_event(EV_SUPPLY, -1, false, fmt("The reinforcements asked for %s have no unit to go to.", u.name.c_str()));
+            drop();
+            continue;
+        }
+        if (time_min < r.due || hq < 0 || !at_trains(u, hq)) {
+            ++i;
+            continue;
+        }
+        const int n = std::min(r.count, u.elements_max - u.elements);
+        if (n > 0) {
+            const float e = (float)u.elements;
+            u.morale = (u.morale * e + REINFORCEMENT_MORALE * n) / (e + n);
+            u.fuel = (u.fuel * e + 100.0f * n) / (e + n);
+            u.ammo = (u.ammo * e + 100.0f * n) / (e + n);
+            u.elements += n;
+            u.strength = 100.0f * u.elements / u.elements_max;
+            push_event(EV_SUPPLY, u.id, false,
+                       fmt("%s: %d reinforcement%s arrived at the trains and joined (%d of %d).", u.name.c_str(), n, n == 1 ? "" : "s",
+                           u.elements, u.elements_max));
+        }
+        drop();
     }
 }
 
@@ -3989,7 +4058,7 @@ bool World::set_start_time(int day, int hour) {
 // ------------------------------------------------------------------------------------
 
 namespace {
-constexpr char kSaveMagic[8] = {'M', 'U', 'R', 'K', 'S', 'S', 'V', 'C'}; // v12: civilians (MRK-34), then the scenario kind (three-way)
+constexpr char kSaveMagic[8] = {'M', 'U', 'R', 'K', 'S', 'S', 'V', 'D'}; // v13: reinforcement requests (MRK-07); v12: civilians (MRK-34), the scenario kind (three-way)
 
 struct SaveWriter {
     std::vector<uint8_t> b;
@@ -4179,6 +4248,8 @@ std::vector<uint8_t> World::save_state() const {
     w.pod((uint32_t)incidents_.size());
     for (const auto &in : incidents_) { w.pod(in.at); w.pod(in.last_shot); w.pod(in.served); }
     w.pod(scenario); // v12 (three-way; v11 on its own branch)
+    w.pod((uint32_t)reinforcements.size()); // v13
+    for (const auto &q : reinforcements) { w.pod(q.unit); w.pod(q.count); w.pod(q.asked); w.pod(q.due); }
     return w.b;
 }
 
@@ -4256,8 +4327,15 @@ bool World::load_state(const uint8_t *data, size_t size, std::string *error) {
             if (idx < 0 || idx >= map.cols() * map.rows()) r.ok = false;
     uint8_t scn = SC_CONTRACT;
     r.pod(scn);
+    uint32_t n_reinf = 0;
+    r.pod(n_reinf);
+    if (!r.ok || n_reinf > 100000) return fail("save is truncated or corrupt");
+    std::vector<Reinforcement> reinf(n_reinf);
+    for (auto &q : reinf) { r.pod(q.unit); r.pod(q.count); r.pod(q.asked); r.pod(q.due); }
     if (!r.ok) return fail("save is truncated or corrupt");
     if (scn >= SC_COUNT) return fail("save is corrupt");
+    for (const auto &q : reinf)
+        if (q.unit < 0 || q.unit >= (int)us.size() || q.count <= 0) return fail("save is corrupt");
     for (const auto &f : fs)
         if (f.side < 0 || f.side >= SIDE_COUNT) return fail("save is corrupt");
     for (const auto &h : hs)
@@ -4327,6 +4405,7 @@ bool World::load_state(const uint8_t *data, size_t size, std::string *error) {
     civ_rebuild_counts();
     stats_.civilians = (int)civilians.size();
     scenario = scn;
+    reinforcements = std::move(reinf);
     used_diesel_l_ = used_l;
     used_ammo_t_ = used_t;
     formations = std::move(fs);

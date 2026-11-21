@@ -353,6 +353,25 @@ constexpr double WANT_DIESEL_L = 30000, WANT_AMMO_T = 60, WANT_FOOD_KG = 6000; /
 constexpr int REPLACE_SQUADS_PER_HOUR = 1;
 constexpr float REPLACEMENT_MORALE = 50.0f;
 
+// Reinforcements (work board MRK-07): vehicles, guns and trucks are not bought. A lost one is
+// replaced only by asking the company's headquarters for reinforcements for the unit (a request
+// for what the unit is short of), which arrive at the trains REINF_MIN_DELAY_MIN to
+// REINF_MIN_DELAY_MIN + REINF_EXTRA_DELAY_MIN minutes later (two to three days, drawn at the
+// request). They are handed over to the unit once it is at the trains (as for resupply and
+// replacements), with fresh crews: morale and fuel and ammunition of the new vehicles mix into the unit's
+// by their share. One request per unit at a time; a unit wiped out in the meantime loses it, and a
+// platoon that has been wiped out is not raised again. The wait is the whole cost: there is no
+// price. The delay and the fresh crews' morale are estimates.
+constexpr int REINF_MIN_DELAY_MIN = 2 * 1440;
+constexpr int REINF_EXTRA_DELAY_MIN = 1440;
+constexpr float REINFORCEMENT_MORALE = 70.0f;
+struct Reinforcement {
+    int unit = -1;       // the unit they are for
+    int count = 0;       // vehicles, guns or trucks asked for
+    int64_t asked = 0;   // when the request was made
+    int64_t due = 0;     // when they reach the trains
+};
+
 // Time a unit needs to acquire a target and to work through each engagement cycle. Crew
 // condition does not change how many vehicles fight (that is the binary in-the-fight count);
 // it changes how fast they find, lay on and engage targets.
@@ -479,7 +498,7 @@ constexpr float UNPAID_MORALE_HIT = 5.0f;
 struct CompanyStock {
     double diesel_l = 30000, ammo_t = 60, food_kg = 6000;
     int personnel = 0;
-    double cash = 20000;   // Deutsche Mark (1989 prices); wages are paid from it (WAGE_*), purchases come later (MRK-07)
+    double cash = 20000;   // Deutsche Mark (1989 prices); wages are paid from it (WAGE_*); vehicles are not bought: see Reinforcement (MRK-07)
     int replacements = 0;  // men levied from holdings, waiting to fill squads (see REPLACE_*, MRK-10)
     // Consumption, smoothed hourly: what the trains hand out per hour. Days of supply follow.
     double rate_diesel_lph = 0, rate_ammo_tph = 0;
@@ -776,6 +795,15 @@ public:
     // replace_rate: squads an hour this unit would get at the trains now (resting, acting HQ).
     int replacement_squads(const Unit &u) const;
     int squads_short(const Unit &u) const;
+    // Reinforcements (see Reinforcement). vehicles_short: vehicles, guns or trucks this unit is
+    // short of and has not already asked for (0 for infantry, whose men are the replacements, and
+    // for units that cannot ask). request_reinforcements: the minutes until they arrive, or -1
+    // with the reason in `why` (nothing short, already asked, no headquarters to ask).
+    // reinforcement_for: the unit's pending request, or nullptr.
+    std::vector<Reinforcement> reinforcements;
+    int vehicles_short(const Unit &u) const;
+    int request_reinforcements(int unit_id, std::string *why = nullptr);
+    const Reinforcement *reinforcement_for(int unit_id) const;
     static int men_per_squad(const Unit &squads);
     float replace_rate(const Unit &u) const { return replace_rate(u, acting_hq(0) >= 0 && units[acting_hq(0)].type != U_HQ); }
     // Halted within TRAINS_REACH hexes of the trains (the HQ or acting commander) and out of the
@@ -827,6 +855,7 @@ private:
     bool at_trains(const Unit &u, int hq) const;
     static float replace_rate(const Unit &u, bool acting);
     void replace_losses(int hq, bool acting); // hourly: the replacement pool fills squads (MRK-10)
+    void deliver_reinforcements(int hq);       // hourly: arrived reinforcements go to units at the trains (MRK-07)
     void update_convoys();               // every tick: the convoy state machine
     bool convoy_arrive_or_repath(Unit &u, HexCoord target, int reach); // true once halted within reach
     void load_convoy(Unit &u, SupplyRoute &r);
