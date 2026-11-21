@@ -57,11 +57,11 @@ target_link_libraries(suppression_test PRIVATE murks_core)
 add_executable(team_detach_test tests/team_detach_test.cpp)
 target_link_libraries(team_detach_test PRIVATE murks_core)
 
-# Holdings, militia and supply routes: capture, loyalty, levy, training, convoys, save/load. build/holdings_test
 # Checks the planning map against the rules (going, line of sight, tints). build/planning_test
 add_executable(planning_test tests/planning_test.cpp)
 target_link_libraries(planning_test PRIVATE murks_core)
 
+# Holdings, militia and supply routes: capture, loyalty, levy, training, convoys, save/load. build/holdings_test
 add_executable(holdings_test tests/holdings_test.cpp)
 target_link_libraries(holdings_test PRIVATE murks_core)
 
