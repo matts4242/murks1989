@@ -1320,6 +1320,8 @@ Dictionary MurksWorld::get_stats() const {
     d["food_kg"] = world_.stock.food_kg;
     d["personnel"] = world_.stock.personnel;
     d["cash"] = world_.stock.cash;
+    d["wage_bill"] = world_.wage_bill();
+    d["days_cash"] = world_.days_of_cash();
     d["replacements"] = world_.stock.replacements;
     d["days_diesel"] = world_.days_of_diesel();
     d["days_ammo"] = world_.days_of_ammo();

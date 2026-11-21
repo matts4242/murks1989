@@ -3551,6 +3551,19 @@ void World::update_logistics() {
                 if (u.alive && u.side == SIDE_PLAYER && !u.militia) u.morale = std::max(0.0f, u.morale - 10.0f);
             push_event(EV_SUPPLY, -1, true, "The company is out of food. Morale is falling.");
         }
+        // Wages (MRK-07): the men on the rolls are paid from the cash; what cannot be paid is
+        // owed to no one, but they notice.
+        const double bill = wage_bill();
+        if (bill > 0) {
+            if (stock.cash >= bill) {
+                stock.cash -= bill;
+            } else {
+                stock.cash = 0;
+                for (auto &u : units)
+                    if (u.alive && u.side == SIDE_PLAYER && !u.militia) u.morale = std::max(0.0f, u.morale - UNPAID_MORALE_HIT);
+                push_event(EV_SUPPLY, -1, true, fmt("The company cannot pay its men (%.0f DM due). Morale is falling.", bill));
+            }
+        }
         // The holdings' day: taxes and food into their stores, volunteers into the pool.
         double cash_day = 0, food_day = 0;
         int towns = 0;

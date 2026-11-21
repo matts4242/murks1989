@@ -469,10 +469,17 @@ struct Event {
     std::string text;
 };
 
+// Wages (MRK-07): paid with the food at 06:00 from the company's cash, per man on the rolls.
+// 10 DM a day is an estimate (about 300 DM a month, a hired hand's pay, not a wage for a
+// skilled man): 289 men cost ~2,900 DM a day and the starting 20,000 DM lasts a week. A company
+// that cannot pay in full pays what it has and every unit's morale drops by UNPAID_MORALE_HIT.
+constexpr double WAGE_DM_PER_MAN_DAY = 10.0;
+constexpr float UNPAID_MORALE_HIT = 5.0f;
+
 struct CompanyStock {
     double diesel_l = 30000, ammo_t = 60, food_kg = 6000;
     int personnel = 0;
-    double cash = 20000;   // Deutsche Mark (1989 prices); wages and purchases come later (MRK-07)
+    double cash = 20000;   // Deutsche Mark (1989 prices); wages are paid from it (WAGE_*), purchases come later (MRK-07)
     int replacements = 0;  // men levied from holdings, waiting to fill squads (see REPLACE_*, MRK-10)
     // Consumption, smoothed hourly: what the trains hand out per hour. Days of supply follow.
     double rate_diesel_lph = 0, rate_ammo_tph = 0;
@@ -702,6 +709,10 @@ public:
     // Units of `side` present in the place (alive, on the map, not trucks); militia count for
     // their owner.
     int present_in(const Holding &h, int side) const;
+    // The day's wage bill (DM) at the present headcount, and the days the cash covers it
+    // (1e9 with no bill). Income from holdings is not counted: it is what the trains collect.
+    double wage_bill() const { return stock.personnel * WAGE_DM_PER_MAN_DAY; }
+    double days_of_cash() const { return wage_bill() > 0 ? stock.cash / wage_bill() : 1e9; }
     // Daily yield into the holding's own stock at its present loyalty (cash DM, food kg).
     void daily_yield(const Holding &h, double &cash, double &food_kg) const;
     int militia_max_squads(const Holding &h) const;

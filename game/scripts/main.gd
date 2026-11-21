@@ -2942,6 +2942,18 @@ func _run_uitest() -> void:
 	help.get_popup().hide()
 	if show_zones != zones_was:
 		_on_toggle("Zones")
+	# Wages (MRK-07): the stock bar says how many days the cash pays the men, once it is short,
+	# and the tooltip gives the wage bill; both come from the rule's own figures.
+	var wage_stats: Dictionary = world.get_stats()
+	check.call(float(wage_stats.get("wage_bill", 0.0)) > 0.0 and float(wage_stats.get("days_cash", 0.0)) > 1.0,
+		"the stats give the wage bill (%d DM a day) and the days of cash (%.1f)" % [int(wage_stats.get("wage_bill", 0.0)), float(wage_stats.get("days_cash", 0.0))])
+	wage_stats["days_cash"] = 2.5
+	hud.refresh(world.get_time_string(), world.is_night(), wage_stats, 60, "")
+	check.call(hud.stock_label.text.ends_with(" DM (2.5 d)"), "short cash shows its days on the stock bar: \"%s\"" % hud.stock_label.text.right(24))
+	check.call(hud.stock_label.tooltip_text.contains("a day at 06:00") and hud.stock_label.tooltip_text.contains("2.5 d of cash"), "the tooltip gives the wage bill and the days of cash")
+	wage_stats["days_cash"] = 6.8
+	hud.refresh(world.get_time_string(), world.is_night(), wage_stats, 60, "")
+	check.call(hud.stock_label.text.ends_with(" DM"), "cash for a week adds nothing to the bar (only under 3 days is shown)")
 	print("UITEST done: %d passed, %d failed" % [res[0], res[1]])
 	get_tree().quit(1 if res[1] > 0 else 0)
 

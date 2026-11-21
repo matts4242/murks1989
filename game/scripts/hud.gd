@@ -2722,14 +2722,15 @@ func _dock(c: Control, x: float, y: float, w: float, h: float) -> void:
 
 func refresh(time_text: String, night: bool, stats: Dictionary, fps: float, map_stats: String) -> void:
 	time_label.text = time_text + ("  night" if night else "")
-	stock_label.text = "Diesel %s L%s   Ammo %.1f t%s   Food %s kg%s   Men %d%s   %s DM" % [
+	stock_label.text = "Diesel %s L%s   Ammo %.1f t%s   Food %s kg%s   Men %d%s   %s DM%s" % [
 		_thousands(int(stats["diesel_l"])), _days(float(stats.get("days_diesel", 1e9))),
 		float(stats["ammo_t"]), _days(float(stats.get("days_ammo", 1e9))),
 		_thousands(int(stats["food_kg"])), _days(float(stats.get("days_food", 1e9))),
 		int(stats["personnel"]), (" (+%d)" % int(stats["replacements"])) if int(stats.get("replacements", 0)) > 0 else "",
-		_thousands(int(stats.get("cash", 0.0)))]
-	stock_label.tooltip_text = "Company stocks; days of supply at the recent rate of use (shown on the bar under 30 days): diesel %s, ammunition %s, food %s. Men on the rolls (+ replacements waiting: they fill knocked-out infantry squads at the trains); cash. %d holding%s, %d trucks, %d route%s running." % [
+		_thousands(int(stats.get("cash", 0.0))), _days(float(stats.get("days_cash", 1e9)), 3.0)]
+	stock_label.tooltip_text = "Company stocks; days of supply at the recent rate of use (shown on the bar under 30 days, cash under 3): diesel %s, ammunition %s, food %s. Men on the rolls (+ replacements waiting: they fill knocked-out infantry squads at the trains); cash, which pays the men %s DM a day at 06:00 (%s of cash; an unpaid company loses morale). %d holding%s, %d trucks, %d route%s running." % [
 		_days_tip(float(stats.get("days_diesel", 1e9))), _days_tip(float(stats.get("days_ammo", 1e9))), _days_tip(float(stats.get("days_food", 1e9))),
+		_thousands(int(stats.get("wage_bill", 0.0))), _days_tip(float(stats.get("days_cash", 1e9))),
 		int(stats.get("holdings_owned", 0)), "" if int(stats.get("holdings_owned", 0)) == 1 else "s", int(stats.get("trucks", 0)),
 		int(stats.get("routes_active", 0)), "" if int(stats.get("routes_active", 0)) == 1 else "s"]
 	perf_label.visible = show_perf
@@ -3054,8 +3055,8 @@ func _days_tip(d: float) -> String:
 	return "not being used" if d >= 999.0 else ("%.1f d" % d if d < 10.0 else "%d d" % int(d))
 
 
-func _days(d: float) -> String:
-	if d >= 30.0:
+func _days(d: float, shown_under := 30.0) -> String:
+	if d >= shown_under:
 		return "" # only short supplies are shown; the tooltip has every figure
 	return " (%.1f d)" % d if d < 10.0 else " (%d d)" % int(d)
 
