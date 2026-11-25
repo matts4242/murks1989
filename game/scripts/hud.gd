@@ -17,6 +17,8 @@ signal hold_pressed
 signal command(name: String)        # orders: panel, Orders menu, right-click menu (same names the keys use)
 signal menu_action(name: String)    # game level: start, continue, new_game, title, quit, save, load, resume, ...
 signal event_clicked(pos: Vector2)
+signal event_picked(e: Dictionary)     # a report row: centre on it and select its unit
+signal alert_picked(kind: String)      # an alert chip: jump to the next unit of that kind
 signal end_choice(choice: String)    # end screen: continue / load / restart / quit
 signal oob_pick(id: int, how: String) # order of battle row: "select", "add", "command" (double-click), "company"
 
@@ -139,6 +141,16 @@ var log_filter_buttons: Array[Button] = []
 var log_filter := 0                 # index into LOG_FILTERS
 var log_open := false               # folded: the latest 3 reports; open: 10
 var log_events: Array = []
+var alerts_panel: PanelContainer      # units that need attention, and the control groups
+var alerts_row: HBoxContainer
+var groups_row: HBoxContainer
+var alert_sig := ""
+var group_counts := {}
+var hover_card: PanelContainer        # a counter under the mouse: who it is and how it is doing
+var hover_text: RichTextLabel
+var hover_id := -1
+const ALERT_COLORS := {"fire": Color(1.0, 0.45, 0.35), "pinned": Color(1.0, 0.45, 0.35), "hit": Color(1.0, 0.45, 0.35),
+	"ammo": Color(1.0, 0.8, 0.35), "fuel": Color(1.0, 0.8, 0.35), "morale": Color(1.0, 0.8, 0.35), "cut": Color(0.7, 0.85, 1.0)}
 var show_perf := false              # Help > Debug: frame and simulation timings in the top bar
 # Docked layout (MRK-35): order of battle left, the selection right with the tool panels
 # (sandbox, planning key, ruler) stacked under it, reports along the bottom.
@@ -225,6 +237,8 @@ func _ready() -> void:
 	_build_unit_panel()
 	_build_holding_panel()
 	_build_log()
+	_build_alerts()
+	_build_hover_card()
 	_build_plan_panel()
 	_build_oob_panel()
 	_build_ruler_panel()
@@ -2173,7 +2187,7 @@ func _build_log() -> void:
 	head.add_theme_constant_override("separation", 4)
 	col.add_child(head)
 	var title := _label("Reports", 13, AMBER)
-	title.tooltip_text = "Click a report to centre the map on it."
+	title.tooltip_text = "Click a report to centre the map on it and select the unit it is about."
 	title.mouse_filter = Control.MOUSE_FILTER_PASS
 	head.add_child(title)
 	head.add_child(VSeparator.new())
@@ -2443,7 +2457,9 @@ func _build_dialog(title: String, body: Control) -> Control:
 func _controls_body() -> Control:
 	var sections := [
 		["Mouse", [["Left click", "Select a unit (Shift adds or removes)"],
+			["Shift+drag", "Box: add every own unit inside to the selection"],
 			["Double-click", "Select its team, or else its whole company"],
+			["Hover a counter", "Its strength, morale, fuel, ammo and orders"],
 			["Right click", "Order menu at that hex (or send the armed order)"],
 			["Drag, WASD, arrows", "Pan the map"], ["Wheel", "Zoom"]]],
 		["Orders", [["F  Q  E  R", "Arm the next right-click: move, road march,\ndeliberate move, assault"],
@@ -2451,7 +2467,9 @@ func _controls_body() -> Control:
 			["H", "Hold position"], ["B  Y  N", "Fall back, regroup on the HQ, rest & resupply"], ["Shift+L", "Rejoin team (a detached member)"],
 			[", (comma)", "Dismount or mount up"], ["X", "Cycle fire: at will, return fire, hold fire"],
 			["J / Shift+J", "Form a team / disband it"], ["L / K", "Select the whole team / company"],
-			["Tab / C", "Next unit / centre on the selection"]]],
+			["Tab / C", "Next unit / centre on the selection"],
+			["Ctrl+1-9 / Alt+1-9", "Store the selection as a group / select it (twice: centre)"],
+			["Attention strip", "Click an alert to jump to the unit; reports too"]]],
 		["Time", [["Space", "Pause or resume"], ["1 – 5", "1 min, 5 min, 30 min, 2 h per second, max"],
 			[". (period)", "Step 15 minutes while paused"], ["P / U", "WeGo pulse / auto-pause on contact"]]],
 		["View", [["O  T  I", "Company grouping, direct command, fire support"],
@@ -2701,7 +2719,7 @@ func set_toggle(name: String, on: bool) -> void:
 ## between them. Panels keep their size from their content; the unit panel scrolls when the
 ## right column is too short for it.
 func _layout() -> void:
-	if top_bar == null or unit_panel == null or log_panel == null or oob_panel == null:
+	if top_bar == null or unit_panel == null or log_panel == null or oob_panel == null or alerts_panel == null:
 		return
 	var vs := size
 	if vs.x < 400.0 or vs.y < 300.0:
@@ -2729,7 +2747,10 @@ func _layout() -> void:
 	var left_r := DOCK_PAD
 	if oob_panel.visible:
 		_dock(oob_panel, DOCK_PAD, below, LEFT_W, maxf(120.0, vs.y - DOCK_PAD - lh - 6.0 - below))
-		left_r = DOCK_PAD + LEFT_W + 6.0
+		left_r = DOCK_PAD + maxf(LEFT_W, oob_panel.get_combined_minimum_size().x) + 6.0
+	if alerts_panel.visible:
+		_dock(alerts_panel, left_r, below, 0.0, 0.0)
+		below += alerts_panel.get_combined_minimum_size().y + 4.0
 	_dock(status_panel, left_r, below, 0.0, 0.0)
 	var cx := (left_r + map_r) * 0.5
 	var half := minf(390.0, (map_r - left_r) * 0.5 - 10.0)
@@ -2809,9 +2830,11 @@ func _render_log() -> void:
 		elif kind == "holding": col = Color(0.75, 0.95, 0.7)
 		elif kind == "order" or kind == "arrived": col = Color(0.7, 0.85, 1.0)
 		b.add_theme_color_override("font_color", col)
-		if e.has("pos"):
-			var p: Vector2 = e["pos"]
-			b.pressed.connect(func() -> void: event_clicked.emit(p))
+		if e.has("pos") or int(e.get("unit", -1)) >= 0:
+			var ev: Dictionary = e
+			b.pressed.connect(func() -> void: event_picked.emit(ev))
+			b.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+			b.tooltip_text = "%s\nClick: centre here and select the unit." % String(e["text"])
 		log_box.add_child(b)
 	if shown == 0:
 		log_box.add_child(_label("   nothing yet" if kinds.is_empty() else "   none of these yet", 12, MUTED))
@@ -2891,7 +2914,15 @@ func show_unit(info: Dictionary, count: int) -> void:
 
 ## Morale, fuel, ammo, readiness on one line, each number coloured by how low it is.
 func _stats_line(mor: float, fuel: float, ammo: float, ready: float) -> String:
-	return "%s   %s   %s   %s\n" % [_stat("Morale", mor), _stat("Fuel", fuel), _stat("Ammo", ammo), _stat("Ready", ready)]
+	return "[table=2]%s%s%s%s[/table]\n" % [_stat_cell("Morale", mor), _stat_cell("Fuel", fuel), _stat_cell("Ammo", ammo), _stat_cell("Ready", ready)]
+
+
+## One stat as a short bar and its number, coloured by how low it is (a table cell).
+func _stat_cell(name: String, v: float) -> String:
+	var c := "#5fd35f" if v >= 60.0 else ("#ffc040" if v >= 30.0 else "#ff5040")
+	var n := int(round(clampf(v, 0.0, 100.0) / 10.0))
+	return "[cell padding=0,0,14,0][color=#b8c0a8]%s[/color] [font_size=9][color=%s]%s[/color][color=#4a4f44]%s[/color][/font_size] [color=%s]%d[/color][/cell]" % [
+		name.rpad(6), c, "■".repeat(n), "■".repeat(10 - n), c, int(round(v))]
 
 
 func _stat(name: String, v: float) -> String:
@@ -3099,3 +3130,164 @@ func _thousands(v: int) -> String:
 		out = "," + s.substr(s.length() - 3) + out
 		s = s.substr(0, s.length() - 3)
 	return ("-" if v < 0 else "") + s + out
+
+
+# --- Alerts strip and control groups (playability pass) ---------------------------------
+
+func _build_alerts() -> void:
+	alerts_panel = PanelContainer.new()
+	var ast := _panel_style(0.82)
+	ast.content_margin_left = 8
+	ast.content_margin_right = 6
+	ast.content_margin_top = 3
+	ast.content_margin_bottom = 3
+	alerts_panel.add_theme_stylebox_override("panel", ast)
+	alerts_panel.set_anchors_preset(Control.PRESET_TOP_LEFT)
+	alerts_panel.visible = false
+	add_child(alerts_panel)
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 4)
+	alerts_panel.add_child(row)
+	alerts_row = HBoxContainer.new()
+	alerts_row.add_theme_constant_override("separation", 4)
+	row.add_child(alerts_row)
+	groups_row = HBoxContainer.new()
+	groups_row.add_theme_constant_override("separation", 3)
+	row.add_child(groups_row)
+
+
+func _chip(text: String, col: Color, tip: String) -> Button:
+	var b := _button(text)
+	b.add_theme_font_size_override("font_size", 12)
+	b.add_theme_color_override("font_color", col)
+	b.add_theme_color_override("font_hover_color", col.lightened(0.3))
+	b.tooltip_text = tip
+	b.focus_mode = Control.FOCUS_NONE
+	b.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+	return b
+
+
+## `items`: [{kind, label, count, tip}] in order of urgency. Rebuilt only when it changes.
+func set_alerts(items: Array) -> void:
+	var sig := ""
+	for it in items:
+		sig += "%s%d;%s|" % [it["kind"], int(it["count"]), it["tip"]]
+	if sig == alert_sig:
+		return
+	alert_sig = sig
+	for c in alerts_row.get_children():
+		c.queue_free()
+	if not items.is_empty():
+		var head := _label("Attention", 12, AMBER)
+		head.tooltip_text = "Units that need you. Click one to select it and centre the map; click again for the next."
+		head.mouse_filter = Control.MOUSE_FILTER_PASS
+		alerts_row.add_child(head)
+	for it in items:
+		var kind := String(it["kind"])
+		var b := _chip("● %s %d" % [it["label"], int(it["count"])], ALERT_COLORS.get(kind, TEXT), String(it["tip"]))
+		b.pressed.connect(func() -> void: alert_picked.emit(kind))
+		alerts_row.add_child(b)
+	_update_alerts_visible()
+
+
+## Control groups that hold units: number -> unit count. A chip per group recalls it.
+func set_control_groups(counts: Dictionary) -> void:
+	group_counts = counts
+	for c in groups_row.get_children():
+		c.queue_free()
+	var keys := counts.keys()
+	keys.sort()
+	if not keys.is_empty():
+		if alerts_row.get_child_count() > 0:
+			groups_row.add_child(VSeparator.new())
+		var head := _label("Groups", 12, MUTED)
+		head.tooltip_text = "Ctrl+1-9 stores the selection as a group; Alt+number selects it, twice to centre on it."
+		head.mouse_filter = Control.MOUSE_FILTER_PASS
+		groups_row.add_child(head)
+	for n in keys:
+		var num := int(n)
+		var b := _chip("%d · %d" % [num, int(counts[n])], HINT, "Group %d: %d units. Click or Alt+%d to select, twice to centre." % [num, int(counts[n]), num])
+		b.pressed.connect(func() -> void: main._recall_group(num))
+		groups_row.add_child(b)
+	_update_alerts_visible()
+
+
+func _update_alerts_visible() -> void:
+	var on := not alert_sig.is_empty() or not group_counts.is_empty()
+	alerts_panel.visible = on
+	_layout.call_deferred()
+
+
+# --- Hover card: the counter under the mouse ----------------------------------------------
+
+func _build_hover_card() -> void:
+	hover_card = PanelContainer.new()
+	hover_card.add_theme_stylebox_override("panel", _box(Color(0.06, 0.07, 0.06, 0.94), Color(0.5, 0.55, 0.42), 3, Vector4(8, 5, 8, 5)))
+	hover_card.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	hover_card.visible = false
+	hover_card.z_index = 5
+	add_child(hover_card)
+	hover_text = _rich(12)
+	hover_text.custom_minimum_size = Vector2(340, 0)
+	hover_text.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	hover_card.add_child(hover_text)
+
+
+## The counter under the mouse, -1 none: the topmost drawn counter, over the map only.
+func _counter_under_mouse() -> int:
+	if main == null or main.overlay == null or is_modal() or is_menu_open():
+		return -1
+	if get_viewport().gui_get_hovered_control() != null:
+		return -1 # over a panel
+	var mp := get_viewport().get_mouse_position()
+	var drawn: Array = main.overlay.drawn
+	for i in range(drawn.size() - 1, -1, -1):
+		var dc: Dictionary = drawn[i]
+		if (dc["rect"] as Rect2).grow(2.0).has_point(mp):
+			return int(dc["id"])
+	return -1
+
+
+func update_hover_card() -> void:
+	if hover_card == null:
+		return
+	var id := _counter_under_mouse()
+	if id < 0 or main.box_selecting:
+		hover_card.visible = false
+		hover_id = -1
+		return
+	var info: Dictionary = main.world.get_unit_info(id)
+	if info.is_empty():
+		hover_card.visible = false
+		return
+	hover_id = id
+	hover_text.text = hover_card_text(info)
+	hover_card.visible = true
+	hover_card.reset_size()
+	var mp := get_viewport().get_mouse_position()
+	var sz := hover_card.get_combined_minimum_size()
+	var p := mp + Vector2(18, 18)
+	if p.x + sz.x > size.x - 4.0: p.x = mp.x - sz.x - 12.0
+	if p.y + sz.y > size.y - 4.0: p.y = mp.y - sz.y - 12.0
+	hover_card.position = p
+
+
+func hover_card_text(info: Dictionary) -> String:
+	var t := ""
+	if int(info["side"]) != 0:
+		t += "[b]%s[/b]\n" % info["name"]
+		t += "[color=#ff9a50]In sight now[/color]" if info.get("seen", false) else "Last seen %d min ago" % int(info.get("last_seen_minutes_ago", 0))
+		return t + "\n[color=#b8c0a8]Strength unknown · right-click: orders against it[/color]"
+	t += "[b]%s[/b]  [color=#b8c0a8]%s[/color]\n" % [info["name"], info["type_name"]]
+	if info.has("elements_max"):
+		var em := int(info["elements_max"])
+		var ea := int(info["elements_active"])
+		var pc := "#5fd35f" if ea >= em else ("#ffc040" if ea * 2 >= em else "#ff5040")
+		t += "[color=%s]%s[/color][color=#666]%s[/color] %d of %d in the fight\n" % [pc, "■".repeat(ea), "□".repeat(em - ea), ea, em]
+	t += _stats_line(float(info["morale"]), float(info["fuel"]), float(info["ammo"]), float(info["readiness"]))
+	t += "%s · %s" % [_situation(info), info["order"]]
+	if info.get("pinned", false):
+		t += "\n[color=#ff5040]Pinned[/color]"
+	if info.get("pending", false):
+		t += "\n[color=#ffd84a]%s order arrives in %d min[/color]" % [info["pending_kind"], int(info["pending_in"])]
+	return t
