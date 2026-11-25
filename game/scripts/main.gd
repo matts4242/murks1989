@@ -107,9 +107,9 @@ const ALERT_KINDS := [
 var alerts := {}                   # alert kind -> Array of own unit ids, worst first
 var alert_cycle := {}              # alert kind -> index of the unit a click on it jumps to next
 var alert_timer := 0.0
-var box_selecting := false         # Shift + left-drag draws a selection box
+var box_selecting := false         # left button down on the map: a drag draws a selection box
 var box_rect := Rect2()            # screen rectangle of the box being drawn
-var control_groups := {}           # 1..9 -> Array of own unit ids (Ctrl+number stores, Alt+number recalls)
+var control_groups := {}           # 1..9 -> Array of own unit ids (Ctrl+number stores, the number recalls)
 var last_recall := {"n": -1, "t": 0}
 var cursor_shape := Input.CURSOR_ARROW # crosshair while an order is armed
 var dragging := false
@@ -723,30 +723,29 @@ func _unhandled_input(event: InputEvent) -> void:
 			if selected.size() == 1 and not _select_team_of(selected[0]):
 				_select_company_of(selected[0])
 			dragging = false
-		elif mb.button_index == MOUSE_BUTTON_LEFT and mb.pressed and mb.shift_pressed and sbx_tool == "":
-			# Shift + left: a click toggles one unit, a drag draws a selection box.
-			box_selecting = true
-			drag_moved = false
-			drag_start = mb.position
-			box_rect = Rect2(mb.position, Vector2.ZERO)
-		elif mb.button_index == MOUSE_BUTTON_LEFT and not mb.pressed and box_selecting:
-			box_selecting = false
-			if drag_moved:
-				_box_select(box_rect.abs(), true)
-			else:
-				_click_select(mb.position, true)
-			box_rect = Rect2()
-		elif mb.button_index == MOUSE_BUTTON_LEFT or mb.button_index == MOUSE_BUTTON_MIDDLE:
+		elif mb.button_index == MOUSE_BUTTON_LEFT:
+			# Left: a click selects (Shift adds or removes); a drag draws a selection box
+			# (Shift adds to the selection). The map pans with the middle button or the keys.
+			if mb.pressed:
+				box_selecting = true
+				drag_moved = false
+				drag_start = mb.position
+				box_rect = Rect2(mb.position, Vector2.ZERO)
+			elif box_selecting:
+				box_selecting = false
+				if drag_moved:
+					_box_select(box_rect.abs(), mb.shift_pressed)
+				elif sbx_tool != "":
+					_sandbox_click(mb.position)
+				else:
+					_click_select(mb.position, mb.shift_pressed)
+				box_rect = Rect2()
+		elif mb.button_index == MOUSE_BUTTON_MIDDLE:
 			if mb.pressed:
 				dragging = true
 				drag_moved = false
 				drag_start = mb.position
 			else:
-				if mb.button_index == MOUSE_BUTTON_LEFT and not drag_moved:
-					if sbx_tool != "":
-						_sandbox_click(mb.position)
-					else:
-						_click_select(mb.position, mb.shift_pressed)
 				dragging = false
 		elif mb.button_index == MOUSE_BUTTON_RIGHT and mb.pressed:
 			# Shift+right-click plots a waypoint; an armed order (F/Q/E/R or the panel) goes at
@@ -782,7 +781,7 @@ func _unhandled_input(event: InputEvent) -> void:
 		if num > 0 and ke.ctrl_pressed:
 			_store_group(num)
 			return
-		if num > 0 and ke.alt_pressed:
+		if num > 0:
 			_recall_group(num)
 			return
 		_on_key(ke.keycode)
@@ -791,11 +790,8 @@ func _unhandled_input(event: InputEvent) -> void:
 func _on_key(key: Key) -> void:
 	match key:
 		KEY_SPACE: set_speed(0 if speed_index > 0 else last_speed)
-		KEY_1: set_speed(1)
-		KEY_2: set_speed(2)
-		KEY_3: set_speed(3)
-		KEY_4: set_speed(4)
-		KEY_5: set_speed(5)
+		KEY_EQUAL, KEY_PLUS, KEY_KP_ADD: _speed_step(1)
+		KEY_MINUS, KEY_KP_SUBTRACT: _speed_step(-1)
 		KEY_PERIOD: _step_15()
 		KEY_H: _order_hold()
 		KEY_G: _on_toggle("Grid")
@@ -1022,6 +1018,8 @@ func _on_menu_action(name: String) -> void:
 			camera.zoom = Vector2.ONE * clampf(get_viewport_rect().size.x / world.get_world_size().x * 0.95, ZOOM_MIN, ZOOM_MAX)
 		"next_unit": _select_next()
 		"step": _step_15()
+		"faster": _speed_step(1)
+		"slower": _speed_step(-1)
 
 
 ## Esc: close a dialog, else cancel an armed order, else open or close the pause menu.
@@ -1228,8 +1226,8 @@ func _click_select(screen_pos: Vector2, add: bool) -> void:
 		selected = [best]
 
 
-## Selects the own units whose counters lie inside a screen rectangle (Shift + left-drag).
-## With `add`, they join the selection; a box over nothing leaves the selection as it was.
+## Selects the own units whose counters lie inside a screen rectangle (left-drag).
+## With `add` (Shift), they join the selection; without, they replace it.
 func _box_select(r: Rect2, add: bool) -> void:
 	if r.size.x < 4.0 and r.size.y < 4.0:
 		return
@@ -1250,6 +1248,8 @@ func _box_select(r: Rect2, add: bool) -> void:
 		if r.has_point(xf * display_position(id)):
 			hits.append(id)
 	if hits.is_empty():
+		if not add:
+			selected.clear()
 		return
 	selected_holding = -1
 	if not add:
@@ -1258,6 +1258,11 @@ func _box_select(r: Rect2, add: bool) -> void:
 		if not selected.has(id):
 			selected.append(id)
 	hud.show_toast("%d unit%s selected." % [selected.size(), "" if selected.size() == 1 else "s"], 2.0)
+
+
+## + and -: one speed faster or slower (- from the slowest pauses; + from pause resumes at 1 min).
+func _speed_step(d: int) -> void:
+	set_speed(clampi(speed_index + d, 0, SPEEDS.size() - 1))
 
 
 ## 1..9 for the number keys (top row or keypad), else 0.
@@ -1277,11 +1282,11 @@ func _store_group(n: int) -> void:
 		hud.show_toast("Group %d cleared." % n, 2.0)
 	else:
 		control_groups[n] = own.duplicate()
-		hud.show_toast("Group %d: %d unit%s. Alt+%d selects them, twice to centre." % [n, own.size(), "" if own.size() == 1 else "s", n], 3.0)
+		hud.show_toast("Group %d: %d unit%s. %d selects them, twice to centre." % [n, own.size(), "" if own.size() == 1 else "s", n], 3.0)
 	hud.set_control_groups(_group_summary())
 
 
-## Alt+number: selects control group `n`; pressing it again within half a second centres on it.
+## A number key: selects control group `n`; pressing it again within half a second centres on it.
 func _recall_group(n: int) -> void:
 	var ids: Array[int] = []
 	for id in control_groups.get(n, []):
@@ -3257,14 +3262,40 @@ func _run_uitest() -> void:
 	camera.zoom = Vector2.ONE * 0.045
 	await _frames(3)
 	selected = []
-	_push_shift_drag(Vector2(LEFT_DOCK_X + 60, 220), vs - Vector2(420, 140))
+	_push_left_drag(Vector2(LEFT_DOCK_X + 60, 220), vs - Vector2(420, 140), false)
 	await _frames(2)
 	var boxed := 0
 	for id in selected:
 		if int(world.get_unit_info(id).get("side", 1)) == 0:
 			boxed += 1
-	check.call(boxed >= 3 and boxed == selected.size(), "Shift+drag box-selects %d own units and no hostiles" % boxed)
+	check.call(boxed >= 3 and boxed == selected.size(), "left-drag box-selects %d own units and no hostiles" % boxed)
 	check.call(not box_selecting, "the box is gone after the release")
+	var before := selected.size()
+	var cam0 := camera.position
+	_push_left_drag(Vector2(LEFT_DOCK_X + 30, 200), Vector2(LEFT_DOCK_X + 50, 215), false)
+	await _frames(2)
+	check.call(selected.is_empty() and camera.position == cam0, "a left-drag over empty map clears the selection and does not pan (was %d)" % before)
+	_push_left_drag(Vector2(LEFT_DOCK_X + 60, 220), vs - Vector2(420, 140), false)
+	await _frames(1)
+	var boxed_n := selected.size()
+	if boxed_n > 1:
+		selected.resize(1)
+	_push_left_drag(Vector2(LEFT_DOCK_X + 60, 220), vs - Vector2(420, 140), true)
+	await _frames(1)
+	check.call(selected.size() == boxed_n, "Shift+drag adds the box to the selection")
+	_push_middle_drag(vs * 0.5, vs * 0.5 + Vector2(100, 0))
+	await _frames(1)
+	check.call(camera.position.x < cam0.x - 1.0, "middle-drag pans the map")
+	camera.position = cam0
+	set_speed(0)
+	_push_key(KEY_EQUAL)
+	await _frames(1)
+	check.call(speed_index == 1, "+ starts the clock at the slowest speed")
+	_push_key(KEY_EQUAL)
+	_push_key(KEY_MINUS)
+	_push_key(KEY_MINUS)
+	await _frames(1)
+	check.call(speed_index == 0, "- steps down to pause")
 
 	selected = [1, 2]
 	_push_mod_key(KEY_3, true, false)
@@ -3272,14 +3303,14 @@ func _run_uitest() -> void:
 	check.call(control_groups.get(3, []) == [1, 2], "Ctrl+3 stores the selection as group 3")
 	check.call(hud.groups_row.get_child_count() >= 2, "the group shows as a chip in the strip")
 	selected = []
-	_push_mod_key(KEY_3, false, true)
+	_push_key(KEY_3)
 	await _frames(1)
-	check.call(selected == [1, 2], "Alt+3 selects group 3")
-	check.call(speed_index == 0, "Alt+3 does not change the speed")
+	check.call(selected == [1, 2], "3 selects group 3")
+	check.call(speed_index == 0, "3 no longer changes the speed")
 	camera.position = Vector2.ZERO
-	_push_mod_key(KEY_3, false, true)
+	_push_key(KEY_3)
 	await _frames(1)
-	check.call(camera.position.distance_to(_centre_of([1, 2])) < 1.0, "Alt+3 twice centres on the group")
+	check.call(camera.position.distance_to(_centre_of([1, 2])) < 1.0, "3 twice centres on the group")
 
 	await _frames(2)
 	var target := {}
@@ -3376,25 +3407,37 @@ func _push_mod_key(k: Key, ctrl: bool, alt: bool) -> void:
 		get_viewport().push_input(ev)
 
 
-## Shift + left-button drag from a to b (the selection box).
-func _push_shift_drag(a: Vector2, b: Vector2) -> void:
+## Left-button drag from a to b (the selection box), Shift held if `shift`.
+func _push_left_drag(a: Vector2, b: Vector2, shift: bool) -> void:
+	_push_drag(MOUSE_BUTTON_LEFT, a, b, shift)
+
+
+func _push_middle_drag(a: Vector2, b: Vector2) -> void:
+	_push_drag(MOUSE_BUTTON_MIDDLE, a, b, false)
+
+
+func _push_drag(button: MouseButton, a: Vector2, b: Vector2, shift: bool) -> void:
 	var press := InputEventMouseButton.new()
-	press.button_index = MOUSE_BUTTON_LEFT
+	press.button_index = button
 	press.pressed = true
-	press.shift_pressed = true
+	press.shift_pressed = shift
 	press.position = a
 	press.global_position = a
 	get_viewport().push_input(press)
+	var last := a
 	for t in [0.33, 0.66, 1.0]:
 		var mv := InputEventMouseMotion.new()
 		mv.position = a.lerp(b, t)
 		mv.global_position = mv.position
-		mv.shift_pressed = true
+		mv.relative = mv.position - last
+		last = mv.position
+		mv.shift_pressed = shift
+		mv.button_mask = MOUSE_BUTTON_MASK_LEFT if button == MOUSE_BUTTON_LEFT else MOUSE_BUTTON_MASK_MIDDLE
 		get_viewport().push_input(mv)
 	var rel := InputEventMouseButton.new()
-	rel.button_index = MOUSE_BUTTON_LEFT
+	rel.button_index = button
 	rel.pressed = false
-	rel.shift_pressed = true
+	rel.shift_pressed = shift
 	rel.position = b
 	rel.global_position = b
 	get_viewport().push_input(rel)

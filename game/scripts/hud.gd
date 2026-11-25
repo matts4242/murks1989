@@ -66,8 +66,8 @@ const LEVY_TIPS := ["0.1 kg a head from the town's larders (a farm collective gi
 	"0.5 L a head from garages and stations. Loyalty -10.",
 	"2 DM a head in taxes taken at once. Loyalty -15.",
 	"Every volunteer in the pool joins the company as replacements, who fill knocked-out infantry squads at the trains. Loyalty -15."]
-const SPEED_ITEMS := [["Pause", KEY_SPACE], ["1 min per second", KEY_1], ["5 min per second", KEY_2],
-	["30 min per second", KEY_3], ["2 hours per second", KEY_4], ["Max", KEY_5]]
+const SPEED_ITEMS := [["Pause", KEY_SPACE], ["1 min per second", 0], ["5 min per second", 0],
+	["30 min per second", 0], ["2 hours per second", 0], ["Max", 0]]
 
 var main: Node
 var save_path := ""                 # quick save file, set by main (enables Continue / Quick load)
@@ -550,6 +550,8 @@ func _fill_time(pm: PopupMenu) -> void:
 	pm.add_separator("Game time per real second")
 	for i in SPEED_ITEMS.size():
 		_add(pm, String(SPEED_ITEMS[i][0]), "speed", i, int(SPEED_ITEMS[i][1]), true, 3 if speed_index == i else 2)
+	_add(pm, "Faster", "menu", "faster", KEY_EQUAL, speed_index < SPEED_ITEMS.size() - 1, -1, "Also + on the keypad.")
+	_add(pm, "Slower", "menu", "slower", KEY_MINUS, speed_index > 0, -1, "Below 1 min per second: pause.")
 	pm.add_separator()
 	_add(pm, "Step 15 minutes", "menu", "step", KEY_PERIOD, speed_index == 0, -1, "Only while paused.")
 	pm.add_separator()
@@ -855,7 +857,7 @@ func _build_top_bar() -> void:
 	var names := ["Pause", "1 min", "5 min", "30 min", "2 h", "Max"]  # game time per real second
 	for i in names.size():
 		var b := _button(names[i], true)
-		b.tooltip_text = ("Pause / resume. Key Space" if i == 0 else "Game time per real second. Key %d" % i)
+		b.tooltip_text = ("Pause / resume. Key Space" if i == 0 else "Game time per real second. Keys - and + step slower and faster.")
 		b.pressed.connect(func() -> void: speed_pressed.emit(i))
 		row.add_child(b)
 		speed_buttons.append(b)
@@ -2457,20 +2459,20 @@ func _build_dialog(title: String, body: Control) -> Control:
 func _controls_body() -> Control:
 	var sections := [
 		["Mouse", [["Left click", "Select a unit (Shift adds or removes)"],
-			["Shift+drag", "Box: add every own unit inside to the selection"],
+			["Left-drag", "Box: select every own unit inside (Shift adds)"],
 			["Double-click", "Select its team, or else its whole company"],
 			["Hover a counter", "Its strength, morale, fuel, ammo and orders"],
 			["Right click", "Order menu at that hex (or send the armed order)"],
-			["Drag, WASD, arrows", "Pan the map"], ["Wheel", "Zoom"]]],
+			["Middle-drag, WASD, arrows", "Pan the map"], ["Wheel", "Zoom"]]],
 		["Orders", [["F  Q  E  R", "Arm the next right-click: move, road march,\ndeliberate move, assault"],
 			["Esc", "Disarm; with nothing armed, the pause menu"],
 			["H", "Hold position"], ["B  Y  N", "Fall back, regroup on the HQ, rest & resupply"], ["Shift+L", "Rejoin team (a detached member)"],
 			[", (comma)", "Dismount or mount up"], ["X", "Cycle fire: at will, return fire, hold fire"],
 			["J / Shift+J", "Form a team / disband it"], ["L / K", "Select the whole team / company"],
 			["Tab / C", "Next unit / centre on the selection"],
-			["Ctrl+1-9 / Alt+1-9", "Store the selection as a group / select it (twice: centre)"],
+			["Ctrl+1-9 / 1-9", "Store the selection as a group / select it (twice: centre)"],
 			["Attention strip", "Click an alert to jump to the unit; reports too"]]],
-		["Time", [["Space", "Pause or resume"], ["1 – 5", "1 min, 5 min, 30 min, 2 h per second, max"],
+		["Time", [["Space", "Pause or resume"], ["-  /  +", "Slower / faster: pause, 1 min, 5 min, 30 min, 2 h per second, max"],
 			[". (period)", "Step 15 minutes while paused"], ["P / U", "WeGo pulse / auto-pause on contact"]]],
 		["View", [["O  T  I", "Company grouping, direct command, fire support"],
 			["F3", "Supply routes and convoys"],
@@ -3201,12 +3203,12 @@ func set_control_groups(counts: Dictionary) -> void:
 		if alerts_row.get_child_count() > 0:
 			groups_row.add_child(VSeparator.new())
 		var head := _label("Groups", 12, MUTED)
-		head.tooltip_text = "Ctrl+1-9 stores the selection as a group; Alt+number selects it, twice to centre on it."
+		head.tooltip_text = "Ctrl+1-9 stores the selection as a group; the number key selects it, twice to centre on it."
 		head.mouse_filter = Control.MOUSE_FILTER_PASS
 		groups_row.add_child(head)
 	for n in keys:
 		var num := int(n)
-		var b := _chip("%d · %d" % [num, int(counts[n])], HINT, "Group %d: %d units. Click or Alt+%d to select, twice to centre." % [num, int(counts[n]), num])
+		var b := _chip("%d · %d" % [num, int(counts[n])], HINT, "Group %d: %d units. Click or press %d to select, twice to centre." % [num, int(counts[n]), num])
 		b.pressed.connect(func() -> void: main._recall_group(num))
 		groups_row.add_child(b)
 	_update_alerts_visible()
