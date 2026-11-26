@@ -240,8 +240,8 @@ vec4 terrain_rec(vec2 p) {
 
 // What each painted material averages to, measured with --views (they print it); also
 // the far-zoom palette in core/src/render_data.cpp (base_color). Keep all three in step.
-const vec3 FLAT_OPEN = vec3(124.0, 149.0, 77.0) / 255.0;
-const vec3 FLAT_FIELDS = vec3(139.0, 137.0, 88.0) / 255.0;
+const vec3 FLAT_OPEN = vec3(126.0, 140.0, 82.0) / 255.0;
+const vec3 FLAT_FIELDS = vec3(136.0, 138.0, 87.0) / 255.0;
 const vec3 FLAT_FOREST = vec3(58.0, 91.0, 47.0) / 255.0;
 const vec3 FLAT_FOREST_DENSE = vec3(44.0, 72.0, 40.0) / 255.0;
 const vec3 FLAT_WETLAND = vec3(118.0, 137.0, 109.0) / 255.0;
@@ -297,7 +297,7 @@ vec3 paint_open(vec2 p) {
 	// a grass texture close in, and copses or single trees here and there.
 	float big = fbm(p, 1500.0, 101u, 3);
 	float mid = fbm(p, 240.0, 103u, 3);
-	vec3 c = mix(vec3(0.43, 0.56, 0.28), vec3(0.55, 0.62, 0.33), smoothstep(0.3, 0.7, big));
+	vec3 c = mix(vec3(0.46, 0.53, 0.30), vec3(0.54, 0.58, 0.35), smoothstep(0.3, 0.7, big)); // muted olive grass
 	c *= 0.90 + 0.18 * mid;
 	c *= 0.95 + 0.10 * fbm(p, 32.0, 105u, 2);
 	return scatter(p, c, 64.0, 0.13, 107u, vec3(0.21, 0.33, 0.15), 0.16);
@@ -305,12 +305,14 @@ vec3 paint_open(vec2 p) {
 
 vec3 crop_colour(uint h) {
 	uint k = h % 20u;
-	if (k < 8u) return vec3(0.58, 0.48, 0.36);   // ploughed
-	if (k < 10u) return vec3(0.49, 0.42, 0.32);  // harrowed, darker
-	if (k < 15u) return vec3(0.50, 0.61, 0.31);  // young winter wheat
-	if (k < 17u) return vec3(0.43, 0.56, 0.29);  // greener crop
-	if (k < 19u) return vec3(0.72, 0.68, 0.48);  // stubble, fallow
-	return vec3(0.63, 0.67, 0.31);               // rapeseed coming up
+	// A restrained olive-khaki range (a wargame map reads terrain, not crop types): ploughed
+	// and stubble stay apart from the green crops, but nothing shouts.
+	if (k < 8u) return vec3(0.57, 0.51, 0.36);   // ploughed
+	if (k < 10u) return vec3(0.48, 0.46, 0.33);  // harrowed, darker
+	if (k < 15u) return vec3(0.49, 0.58, 0.31);  // young winter wheat
+	if (k < 17u) return vec3(0.44, 0.53, 0.30);  // greener crop
+	if (k < 19u) return vec3(0.64, 0.62, 0.43);  // stubble, fallow
+	return vec3(0.60, 0.62, 0.32);               // rapeseed coming up
 }
 
 vec3 paint_fields(vec2 p) {
@@ -330,8 +332,8 @@ vec3 paint_fields(vec2 p) {
 	float colm = floor((lp.x + shift) / l);
 	uint ph = hash_u(ivec2(int(colm), int(row)) + ivec2(int(dh & 1023u), int((dh >> 10u) & 1023u)), 223u);
 	// A district leans to one crop; parcels too thin to see fade to its tone.
-	vec3 district = mix(vec3(0.53, 0.52, 0.34), crop_colour(dh >> 3u), 0.5);
-	vec3 crop = mix(crop_colour(ph), district, 0.32);
+	vec3 district = mix(vec3(0.54, 0.55, 0.34), crop_colour(dh >> 3u), 0.5);
+	vec3 crop = mix(crop_colour(ph), district, 0.24); // parcels lean a little on the district's tone
 	crop = mix(district, crop, vis(w * 0.9));
 	crop *= 0.93 + 0.14 * fbm(p, 190.0, 227u, 2);
 	// Drill rows along the parcel, only when close enough to see them.
@@ -340,7 +342,7 @@ vec3 paint_fields(vec2 p) {
 	vec2 fe = vec2((lp.x + shift) - colm * l, lp.y - row * w);
 	float edge_m = min(min(fe.x, l - fe.x), min(fe.y, w - fe.y));
 	float edge = 1.0 - smoothstep(2.0, 2.0 + max(metres_per_pixel, 1.0), edge_m);
-	return mix(crop, vec3(0.47, 0.56, 0.31), edge * 0.75 * vis(22.0));
+	return mix(crop, vec3(0.46, 0.52, 0.31), edge * 0.75 * vis(22.0));
 }
 
 vec3 paint_forest(vec2 p, bool dense) {

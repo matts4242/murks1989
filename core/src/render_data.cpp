@@ -20,11 +20,11 @@ RGB base_color(const Hex &h, int, int) {
             double depth = std::min(1.0, std::max(0.0, -h.elev / 40.0));
             return {102 - 34 * depth, 143 - 34 * depth, 179 - 30 * depth};
         }
-        case T_FIELDS: return {139, 137, 88};
+        case T_FIELDS: return {136, 138, 87};
         case T_FOREST: return h.cover >= 20 ? RGB{44, 72, 40} : RGB{58, 91, 47};
         case T_WETLAND: return {118, 137, 109};
         case T_URBAN: return h.cover >= 20 ? RGB{135, 129, 109} : RGB{124, 132, 88};
-        default: return {124, 149, 77}; // pasture and rough ground
+        default: return {126, 140, 82}; // pasture and rough ground
     }
 }
 
