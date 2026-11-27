@@ -24,6 +24,7 @@ RGB base_color(const Hex &h, int, int) {
         case T_FOREST: return h.cover >= 20 ? RGB{44, 72, 40} : RGB{58, 91, 47};
         case T_WETLAND: return {118, 137, 109};
         case T_URBAN: return h.cover >= 20 ? RGB{135, 129, 109} : RGB{124, 132, 88};
+        case T_MIXED: return {112, 126, 72}; // hedgerows and copses
         default: return {126, 140, 82}; // pasture and rough ground
     }
 }

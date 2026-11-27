@@ -137,6 +137,8 @@ void MurksWorld::_bind_methods() {
     ClassDB::bind_method(D_METHOD("get_holding", "hid"), &MurksWorld::get_holding);
     ClassDB::bind_method(D_METHOD("holding_at", "hex"), &MurksWorld::holding_at);
     ClassDB::bind_method(D_METHOD("set_training", "hid", "on"), &MurksWorld::set_training);
+    ClassDB::bind_method(D_METHOD("train_engineers", "hid"), &MurksWorld::train_engineers);
+    ClassDB::bind_method(D_METHOD("build", "id", "kind"), &MurksWorld::build);
     ClassDB::bind_method(D_METHOD("levy", "hid", "kind"), &MurksWorld::levy);
     ClassDB::bind_method(D_METHOD("set_supply_route", "source", "dest"), &MurksWorld::set_supply_route);
     ClassDB::bind_method(D_METHOD("cancel_supply_route", "rid"), &MurksWorld::cancel_supply_route);
@@ -879,8 +881,17 @@ Dictionary MurksWorld::get_unit_info(int id) const {
         d["suppression"] = u.suppression;
         d["pinned"] = u.pinned;
         d["engage_night"] = et.f_night;
-        static const char *kNoun[murks::U_TYPE_COUNT] = {"vehicles", "vehicles", "vehicles", "squads", "vehicles", "guns", "trucks"};
+        static const char *kNoun[murks::U_TYPE_COUNT] = {"vehicles", "vehicles", "vehicles", "squads", "vehicles", "guns", "trucks", "squads"};
         d["element_noun"] = kNoun[u.type < murks::U_TYPE_COUNT ? u.type : 0];
+    }
+    // Engineers: what they can build, and the work under way.
+    if (u.type == murks::U_ENGINEER && u.side == murks::SIDE_PLAYER) {
+        d["engineer"] = true;
+        if (u.build_kind) {
+            d["build_kind"] = (int)u.build_kind;
+            d["build_name"] = murks::holding_kind_name(u.build_kind);
+            d["build_left"] = (int)std::max<int64_t>(0, u.build_done - world_.time_min);
+        }
     }
     d["morale"] = u.morale;
     d["fuel"] = u.fuel;
@@ -1416,6 +1427,13 @@ Dictionary MurksWorld::get_holding(int hid) const {
     d["can_train"] = h.kind == murks::HK_TOWN && world_.militia_max_squads(h) > 0 && h.loyalty >= 25.0f &&
                      world_.militia_squads(h) < world_.militia_max_squads(h);
     d["train_days"] = murks::MILITIA_TRAIN_MIN / 1440;
+    d["built"] = murks::holding_is_built(h.kind);
+    if (h.kind == murks::HK_TOWN && own) {
+        d["engineer_squads"] = murks::ENGINEER_MILITIA_SQUADS;
+        d["engineer_hours"] = murks::ENGINEER_TRAIN_MIN / 60;
+        d["can_train_engineers"] = h.engineers_ready < 0 && world_.militia_squads(h) >= murks::ENGINEER_MILITIA_SQUADS;
+        if (h.engineers_ready >= 0) d["engineers_in"] = (int)std::max<int64_t>(0, h.engineers_ready - world_.time_min);
+    }
     d["squad_men"] = murks::MILITIA_SQUAD_MEN;
     d["can_levy"] = world_.can_levy(h, murks::SIDE_PLAYER) && (h.kind == murks::HK_TOWN || h.kind == murks::HK_FARM);
     Array levies;
@@ -1456,12 +1474,15 @@ Dictionary MurksWorld::get_holding(int hid) const {
 
 Array MurksWorld::get_holdings() const {
     Array out;
-    for (int i = 0; i < (int)world_.holdings.size(); ++i) out.push_back(get_holding(i));
+    for (int i = 0; i < (int)world_.holdings.size(); ++i)
+        if (!world_.holdings[i].wrecked) out.push_back(get_holding(i)); // a wrecked garage or depot is gone
     return out;
 }
 
 int MurksWorld::holding_at(Vector2i hex) const { return world_.holding_at({hex.x, hex.y}); }
 bool MurksWorld::set_training(int hid, bool on) { return world_.set_training(hid, on); }
+String MurksWorld::train_engineers(int hid) { return to_gd(world_.train_engineers(hid)); }
+String MurksWorld::build(int id, int kind) { return own_unit(world_, id) ? to_gd(world_.build(id, kind)) : String("not your unit"); }
 String MurksWorld::levy(int hid, int kind) { return to_gd(world_.levy(hid, kind)); }
 
 Dictionary MurksWorld::set_supply_route(int source, int dest) {

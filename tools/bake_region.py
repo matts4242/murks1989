@@ -49,7 +49,7 @@ ROW_SPACING = HEX_SIZE * 1.5
 PIXEL = 125.0  # sampling raster, ~14 samples per hex
 
 # Terrain codes (core/include/murks/map.hpp)
-T_WATER, T_OPEN, T_FIELDS, T_FOREST, T_WETLAND, T_URBAN = range(6)
+T_WATER, T_OPEN, T_FIELDS, T_FOREST, T_WETLAND, T_URBAN, T_MIXED = range(7)
 F_ROAD, F_MAJOR_ROAD, F_RAIL, F_RIVER, F_BRIDGE, F_MAJOR_RIVER = 1, 2, 4, 8, 16, 32
 NO_SETTLEMENT = 0xFFFF
 # Network edge bits (map.hpp kNetShift): a hex stores its E, NE and NW edges.
@@ -347,9 +347,11 @@ def classify(grid, esum, ecnt, counts):
     m = (built >= 0.30)
     terrain[m] = T_URBAN
     cover[m] = np.where(built[m] >= 0.6, 20, 12)
-    # Scattered woods and hedgerows still block sight a little.
+    # Scattered woods and hedgerows still block sight a little; where they break up open
+    # ground or fields (20-45% trees) the hex is mixed ground, with some cover of its own.
     m = (terrain != T_FOREST) & (terrain != T_URBAN) & (tree >= 0.2)
     cover[m] = 6
+    terrain[m & ((terrain == T_OPEN) | (terrain == T_FIELDS))] = T_MIXED
     is_water = water >= 0.5
     terrain[is_water] = T_WATER
     cover[is_water] = 0
@@ -515,7 +517,7 @@ def compress(src, dst):
 
 def preview(path, terrain, elev, features):
     from PIL import Image
-    pal = np.array([[98, 142, 180], [212, 204, 168], [222, 213, 160], [116, 146, 94], [150, 172, 150], [150, 128, 120]], np.uint8)
+    pal = np.array([[98, 142, 180], [212, 204, 168], [222, 213, 160], [116, 146, 94], [150, 172, 150], [150, 128, 120], [180, 190, 140]], np.uint8)  # ..., mixed
     img = pal[terrain].astype(np.float32)
     hi = np.clip((elev.astype(np.float32) - 250) / 1000, 0, 0.55)[..., None]
     img = img + (np.array([176, 152, 118]) - img) * hi * (terrain != T_WATER)[..., None]

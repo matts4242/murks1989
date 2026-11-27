@@ -23,7 +23,9 @@ namespace murks {
 
 // U_TRUCK: a supply column (the company trains' trucks); it carries cargo on supply routes and
 // never counts as a fighting unit.
-enum UnitType : uint8_t { U_HQ = 0, U_TANK, U_MECH, U_INFANTRY, U_RECON, U_ARTILLERY, U_TRUCK, U_TYPE_COUNT };
+// U_ENGINEER: an engineer platoon trained from a town's militia; it builds garages and depots
+// (see ENGINEER_*), otherwise a lightly armed truck-borne platoon.
+enum UnitType : uint8_t { U_HQ = 0, U_TANK, U_MECH, U_INFANTRY, U_RECON, U_ARTILLERY, U_TRUCK, U_ENGINEER, U_TYPE_COUNT };
 enum Mobility : uint8_t { M_TRACKED = 0, M_WHEELED, M_FOOT };
 // SIDE_RIVAL only takes the field in the three-way scenario (SC_THREE_WAY): a third force at war
 // with both the company and the hostiles. Every side treats every other side as the enemy.
@@ -89,7 +91,14 @@ float slope_factor_min(int mobility); // the smallest slope_factor can be (x0.84
 // a few minutes: it is spotted only within these ranges, beyond them only by chance.
 constexpr int CONCEAL_SPOT_HEXES = 2;       // 1 km
 constexpr int CONCEAL_SPOT_HEXES_RECON = 4; // 2 km
-inline bool terrain_conceals(int terrain) { return terrain == T_FOREST || terrain == T_URBAN; }
+inline bool terrain_conceals(int terrain) { return terrain == T_FOREST || terrain == T_URBAN || terrain == T_MIXED; }
+// Mixed ground (hedgerows, copses) hides less: a unit sitting still is found within 2 km (3 by recon).
+constexpr int CONCEAL_SPOT_HEXES_MIXED = 4;       // 2 km
+constexpr int CONCEAL_SPOT_HEXES_MIXED_RECON = 6; // 3 km
+inline int conceal_spot_hexes(int terrain, bool recon) {
+    if (terrain == T_MIXED) return recon ? CONCEAL_SPOT_HEXES_MIXED_RECON : CONCEAL_SPOT_HEXES_MIXED;
+    return recon ? CONCEAL_SPOT_HEXES_RECON : CONCEAL_SPOT_HEXES;
+}
 // Eye and target heights (metres above ground) the spotting and direct-fire model uses.
 constexpr float SPOT_EYE_M = 3.0f;
 constexpr float SPOT_TARGET_M = 2.5f;
@@ -228,6 +237,11 @@ struct Unit {
     int64_t mount_at = -1;  // when the mount drill finishes (both halted in the same hex), -1 none
     int squad_men = 0;      // squad units: men per squad (display and ration count)
 
+    // Engineers building a garage or depot (HK_GARAGE / HK_DEPOT) where they stand; 0 none.
+    uint8_t build_kind = 0;
+    int64_t build_done = -1;
+    HexCoord build_pos;
+
     // Holdings (see Holding). Militia are the garrison a town raises: they hold their town, take
     // no orders and never count as part of the company. A supply column (U_TRUCK) working a
     // route carries cargo and runs the convoy state machine (see SupplyRoute / ConvoyState).
@@ -259,7 +273,10 @@ struct Unit {
 // own: yields land there, requisitions go there, and the company draws from it with its
 // trains parked at the place or by a supply route (convoys). Capture, loyalty and yields
 // are first estimates (Work Board MRK-08).
-enum HoldingKind : uint8_t { HK_TOWN = 0, HK_FARM, HK_FUEL_DEPOT, HK_AMMO_DUMP, HK_COUNT };
+// HK_GARAGE and HK_DEPOT are built by the company's engineers (see ENGINEER_*): a field garage
+// where requested reinforcements also join, and a forward supply depot.
+enum HoldingKind : uint8_t { HK_TOWN = 0, HK_FARM, HK_FUEL_DEPOT, HK_AMMO_DUMP, HK_GARAGE, HK_DEPOT, HK_COUNT };
+inline bool holding_is_built(int kind) { return kind == HK_GARAGE || kind == HK_DEPOT; }
 const char *holding_kind_name(int kind);
 
 struct Holding {
@@ -281,6 +298,8 @@ struct Holding {
     int64_t captured_at = -100000;
     int64_t last_fight = -100000; // fighting inside the place (collateral damage)
     int64_t levy_until[4] = {-1, -1, -1, -1}; // next time each LevyKind is allowed
+    int64_t engineers_ready = -1; // a town training engineers: when they are ready (-1 none)
+    bool wrecked = false;         // a built garage or depot an enemy has wrecked: gone for good
 };
 
 enum LevyKind : uint8_t { LV_FOOD = 0, LV_FUEL, LV_CASH, LV_MEN, LV_COUNT };
@@ -333,6 +352,17 @@ constexpr int MILITIA_TRAIN_MIN = 2 * 1440; // per squad of 10 (estimate)
 constexpr int MILITIA_SQUAD_MEN = 10;
 constexpr int MILITIA_PER_POP = 2000;     // one squad per 2,000 people
 constexpr int MILITIA_MAX_SQUADS = 6;
+// Engineers: an own town with ENGINEER_MILITIA_SQUADS militia squads gives them up to a course
+// that turns out an engineer platoon (2 squads on 2 trucks) ENGINEER_TRAIN_MIN later, if the
+// town is still held. Engineers halted in a hex build a garage or a depot there in
+// ENGINEER_BUILD_MIN; moving off stops the work. An enemy unit in the hex of a garage or depot
+// wrecks it. At a garage (within GARAGE_REACH, halted, out of the fight) requested
+// reinforcements join as at the trains; at a depot units resupply from the depot's stores as
+// at the trains, and supply routes can carry to it. Times are estimates.
+constexpr int ENGINEER_MILITIA_SQUADS = 2;
+constexpr int ENGINEER_TRAIN_MIN = 1440;
+constexpr int ENGINEER_BUILD_MIN = 1440;
+constexpr int GARAGE_REACH = 1;
 constexpr int LEVY_COOLDOWN_MIN = 1440;   // per holding and kind
 constexpr int CONVOY_LOAD_MIN = 30;       // loading or unloading a column (estimate)
 constexpr int CONVOY_RESUME_MIN = 60;     // after being driven off or halted, try the leg again
@@ -739,6 +769,13 @@ public:
     // Raise militia at an own town (on/off). false if the holding can't (not a town, not owned,
     // loyalty under 25).
     bool set_training(int hid, bool on);
+    // Engineers (see ENGINEER_*). train_engineers: starts a course at an own town ("" or why not).
+    // build: the engineer unit starts a garage or depot where it stands ("" or why not).
+    // at_garage / depot_at: a unit halted at an own garage, or the own depot it stands at (-1).
+    std::string train_engineers(int hid);
+    std::string build(int unit_id, int kind);
+    bool at_garage(const Unit &u) const;
+    int depot_at(const Unit &u) const;
     // Requisition at an own town with an own unit present: moves goods into the holding's stock
     // (men into the company's replacement pool) at a loyalty cost. Returns "" on success, else
     // the reason.
@@ -758,7 +795,7 @@ public:
     // on the map and taken off for either side; the start time can be changed until the clock
     // first moves; the hostile AI can be switched off (hostiles then make no moves of their own,
     // but still fire by their rules of engagement and rearm). All saved with the game.
-    enum SandboxKind { SB_TANK = 0, SB_MECH, SB_RIFLE, SB_RECON, SB_BATTERY, SB_HQ, SB_SUPPLY, SB_KIND_COUNT };
+    enum SandboxKind { SB_TANK = 0, SB_MECH, SB_RIFLE, SB_RECON, SB_BATTERY, SB_HQ, SB_SUPPLY, SB_ENGINEERS, SB_KIND_COUNT };
     bool sandbox = false;
     bool hostile_ai = true; // also drives the rival side in the three-way
     uint8_t scenario = SC_CONTRACT; // ScenarioKind
@@ -856,6 +893,8 @@ private:
     static float replace_rate(const Unit &u, bool acting);
     void replace_losses(int hq, bool acting); // hourly: the replacement pool fills squads (MRK-10)
     void deliver_reinforcements(int hq);       // hourly: arrived reinforcements go to units at the trains (MRK-07)
+    void update_building();                    // hourly: engineers at work, finished garages and depots
+    void wreck(Holding &h);                    // an enemy wrecks a garage or depot
     void update_convoys();               // every tick: the convoy state machine
     bool convoy_arrive_or_repath(Unit &u, HexCoord target, int reach); // true once halted within reach
     void load_convoy(Unit &u, SupplyRoute &r);

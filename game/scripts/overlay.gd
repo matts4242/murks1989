@@ -190,7 +190,7 @@ const THEATER_COUNTER := 22.0
 const COMPANY_COUNTER := 28.0
 const ECHELONS := ["coy", "plt", "plt", "plt", "sec", "btty", "col"] # by unit type (col: a supply column)
 const HOLDING_COL := [Color("#2c5ea8"), Color("#b0342b"), Color("#7a7f74"), Color("#6e3f96")] # company, hostile, independent, rival
-const HOLDING_GLYPH := ["T", "F", "D", "A"]  # town, farm collective, fuel depot, ammo dump
+const HOLDING_GLYPH := ["T", "F", "D", "A", "G", "S"]  # town, farm collective, fuel depot, ammo dump, field garage, supply depot (engineers)
 const SF_MILITIA := 35              # own or seen units: 1 for a town's militia
 const SF_CONVOY := 36               # own supply columns: convoy state, else -1
 const SF_CARGO_T := 37              # own supply columns: tonnes aboard, else -1
@@ -563,6 +563,15 @@ func _draw_symbol(r: Rect2, type: int, ink: Color, lw: float) -> void:
 		5: # Self-propelled artillery: oval and dot
 			_stadium(r, ink, lw)
 			draw_circle(c, r.size.y * 0.12, ink)
+		7: # Engineers: the APP-6 "castle" (a bar with three short legs down)
+			var y0 := c.y - r.size.y * 0.18
+			var y1 := c.y + r.size.y * 0.18
+			var x0 := r.position.x + r.size.x * 0.22
+			var x1 := r.end.x - r.size.x * 0.22
+			draw_line(Vector2(x0, y0), Vector2(x1, y0), ink, lw)
+			for k in 3:
+				var x := lerpf(x0, x1, k * 0.5)
+				draw_line(Vector2(x, y0), Vector2(x, y1), ink, lw)
 		6: # Supply column: the supply bar across the box, wheels under it
 			draw_line(Vector2(r.position.x + r.size.x * 0.12, c.y - r.size.y * 0.08), Vector2(r.end.x - r.size.x * 0.12, c.y - r.size.y * 0.08), ink, lw * 1.6)
 			for k in 3:
@@ -677,7 +686,7 @@ const VEHICLE_KEYS := {
 	"jeep": ["UAZ-469", "UAZ", "GAZ-69", "Jeep", "Iltis", "M151", "Trabant"],
 	"inf": ["men", "squad", "squads", "militia", "rifles"]}
 ## Used when the equipment names nothing known: by unit type (HQ, tank, mech, infantry, recon, artillery, supply).
-const VEHICLE_BY_TYPE := ["jeep", "tank", "ifv", "", "recon", "spg", "truck"]
+const VEHICLE_BY_TYPE := ["jeep", "tank", "ifv", "", "recon", "spg", "truck", "truck"]
 
 
 ## The silhouette key for a unit; looked up once from its equipment and remembered.
@@ -947,7 +956,7 @@ func _draw_holdings(xf: Transform2D, zoom: float, view: Rect2) -> void:
 		var closed := flag.duplicate()
 		closed.append(flag[0])
 		draw_polyline(closed, SIGNAL if sel else Color(0, 0, 0, 0.6), maxf(1.0, s * (0.1 if sel else 0.05)), true)
-		var glyph: String = HOLDING_GLYPH[clampi(int(hd["kind"]), 0, 3)]
+		var glyph: String = HOLDING_GLYPH[clampi(int(hd["kind"]), 0, HOLDING_GLYPH.size() - 1)]
 		_text_center(top + Vector2(s * 0.3, s * 0.3), glyph, int(maxf(8.0, s * 0.42)), Color.WHITE)
 		if hd.get("fighting", false):
 			draw_circle(top + Vector2(-s * 0.22, 0), s * 0.14, Color("#ff6b4a"))

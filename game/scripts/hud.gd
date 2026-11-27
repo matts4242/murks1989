@@ -179,12 +179,13 @@ var orders_hint: Label
 # roe / brk / shape / spacing / standoff: -1 mixed across the selection.
 var ord := {"has_own": false, "mode": -1, "roe": 0, "brk": 0, "pending": false, "delay": "",
 	"in_team": false, "can_form": false, "shape": -1, "spacing": -1, "team": "",
-	"standoff": 255, "default_standoff": 0, "can_dismount": false, "can_mount": false, "detached": false, "can_reinforce": false}
+	"standoff": 255, "default_standoff": 0, "can_dismount": false, "can_mount": false, "detached": false, "can_reinforce": false, "can_build": false}
 
 # Holding panel (a town, farm collective or depot selected by its pennant)
 var holding_panel: PanelContainer
 var holding_text: RichTextLabel
 var train_button: Button
+var engineers_button: Button         # an own town: train engineers from its militia
 var levy_menu: MenuButton
 var route_menu: MenuButton
 var hold := {}                      # the holding shown, as world.get_holding gives it
@@ -632,6 +633,9 @@ func fill_orders(pm: PopupMenu, at_hex: bool, ctx: Dictionary) -> void:
 		_add(more, "Dismount the squads", "cmd", "dismount", KEY_COMMA, true, -1, "The vehicles halt and the squads get out to move and fight on foot.")
 	if ord["can_mount"]:
 		_add(more, "Mount up", "cmd", "mount", KEY_COMMA, true, -1, "The squads walk back to their vehicles and climb aboard (2 min once together).")
+	if ord["can_build"]:
+		_add(more, "Build a field garage here", "cmd", "build_4", 0, true, -1, "The engineers build a garage where they stand, in 24 hours if they stay. Requested reinforcements also join units halted there. An enemy in its hex wrecks it.")
+		_add(more, "Build a supply depot here", "cmd", "build_5", 0, true, -1, "The engineers build a depot where they stand, in 24 hours if they stay. Supply routes can carry to it and units halted there resupply from it. An enemy in its hex wrecks it.")
 	if ord["can_reinforce"]:
 		_add(more, "Request reinforcements", "cmd", "reinforce", 0, true, -1, "Ask the rear for the vehicles, guns or trucks the unit has lost. They reach the trains in two to three days and join once the unit is there. There is no price, only the wait.")
 	if ord["detached"]:
@@ -918,6 +922,15 @@ func _build_holding_panel() -> void:
 		if hold.has("id"):
 			command.emit("holding_train_%d" % int(hold["id"])))
 	row.add_child(train_button)
+	engineers_button = _button("Train engineers")
+	engineers_button.tooltip_text = "Two militia squads take a 24-hour course and come back as an engineer platoon, which builds field garages and supply depots."
+	engineers_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	engineers_button.pressed.connect(func() -> void:
+		if hold.has("id"):
+			command.emit("holding_engineers_%d" % int(hold["id"])))
+	var row2 := HBoxContainer.new()   # a row of its own, so the panel keeps its width
+	col.add_child(row2)
+	row2.add_child(engineers_button)
 	levy_menu = MenuButton.new()
 	levy_menu.text = "Requisition ▾"
 	levy_menu.flat = false
@@ -997,11 +1010,14 @@ func show_holding(hd: Dictionary, routes: Array, own_holdings: Array) -> void:
 		t += "\n[color=#b8c0a8]Hold the place with your units for %d hours, unopposed, to take it. A garrison blocks that.[/color]\n" % 2
 		holding_text.text = t
 		train_button.visible = false
+		engineers_button.visible = false
 		levy_menu.visible = false
 		route_menu.visible = false
 		return
 	train_button.visible = int(hd["kind"]) == 0
-	levy_menu.visible = true
+	engineers_button.visible = int(hd["kind"]) == 0
+	engineers_button.disabled = not hd.get("can_train_engineers", false)
+	levy_menu.visible = not hd.get("built", false)
 	route_menu.visible = true
 	t += _bar("Loyalty", float(hd["loyalty"]))
 	if hd.get("contested", false):
@@ -1015,6 +1031,14 @@ func show_holding(hd: Dictionary, routes: Array, own_holdings: Array) -> void:
 	t += "[color=#9fc8ff]%s[/color]\n" % ("The trains are parked here and draw from these stores." if hd.get("trains_here", false) else "Park the HQ here (or send a supply route) to move the stores to the company.")
 	if hd.get("training", false):
 		t += "Raising militia: next squad in %.1f days\n" % ((1.0 - float(hd.get("training_progress", 0.0))) * int(hd.get("train_days", 2)))
+	if hd.has("engineers_in"):
+		t += "[color=#c8f0a0]Engineer course: the platoon is ready in %d h[/color]\n" % ceili(int(hd["engineers_in"]) / 60.0)
+	elif int(hd["kind"]) == 0 and not hd.get("can_train_engineers", false):
+		t += "[color=#b8c0a8]Engineers need %d militia squads here to train[/color]\n" % int(hd.get("engineer_squads", 2))
+	if int(hd["kind"]) == 4:
+		t += "Requested reinforcements join units halted within 500 m of this garage, as at the trains.\n"
+	elif int(hd["kind"]) == 5:
+		t += "Units halted within 500 m resupply from these stores. Supply routes can carry to it.\n"
 	train_button.set_pressed_no_signal(hd.get("training", false))
 	train_button.disabled = not (hd.get("can_train", false) or hd.get("training", false))
 	if hold_routes.is_empty():
@@ -1245,6 +1269,10 @@ func set_standoff_state(setting: int, default_value: int) -> void:
 
 
 ## Teams: whether the selection holds a detached member (shows Rejoin team).
+func set_build_state(can: bool) -> void:
+	ord["can_build"] = can
+
+
 func set_reinforce_state(can: bool) -> void:
 	ord["can_reinforce"] = can
 
@@ -1337,6 +1365,12 @@ func _wait_text(minutes: int) -> String:
 
 
 ## Reinforcements (MRK-07): vehicles, guns or trucks the unit is short of, or the request on its way.
+func _build_line(info: Dictionary) -> String:
+	if not info.has("build_kind"):
+		return ""
+	return "[color=#c8f0a0]Building a %s[/color]  ready in about %s; moving off stops it\n" % [String(info["build_name"]).to_lower(), _wait_text(int(info["build_left"]))]
+
+
 func _reinforcement_line(info: Dictionary) -> String:
 	if info.has("reinf_count"):
 		var n := int(info["reinf_count"])
@@ -1425,7 +1459,7 @@ func _build_plan_panel() -> void:
 const SBX_KINDS := [["Tank platoon", "Own 4x T-55A, hostile 3x T-72M"], ["Mech platoon", "Own 3x BMP-1, hostile 3x BMP-2, with their squads aboard"],
 	["Rifle platoon", "Own 35 men with RPG-7, hostile 30 men"], ["Recon section", "Own 2x BRDM-2, hostile BRDM-2"],
 	["Battery", "Own 4x 2S1, hostile 3x 2S1"], ["HQ", "Own UAZ-469 with R-145 radio, hostile BTR-60PU"],
-	["Supply column", "6x Ural-375D (own side only)"]]
+	["Supply column", "6x Ural-375D (own side only)"], ["Engineers", "2 squads on GAZ-66 trucks: build garages and depots (own side only)"]]
 ## Civilian kinds (MRK-34), in World CivKind order.
 const SBX_CIV_KINDS := [["Car", "Trabant, Wartburg or Polski Fiat: drives to a town nearby"],
 	["Bus", "Ikarus coach: drives to a town nearby"], ["Tractor", "Farm tractor: drives to a town nearby, slowly"],
@@ -1547,7 +1581,7 @@ const OOB_SEL_BG := Color(0.55, 0.42, 0.08, 0.55)   # the selection (amber, as o
 const OOB_SUB_BG := Color(0.18, 0.4, 0.62, 0.45)    # under a selected commander (blue, as on the map)
 const OOB_SUB := Color("#7fd0ff")
 const OOB_TYPE_ABBR := {"HQ": "HQ", "Tank Plt": "Tank", "Mech Plt": "Mech", "Rifle Plt": "Rifle", "Recon Sect": "Recon",
-	"Arty Bty": "Arty", "Supply Col": "Trucks"}
+	"Arty Bty": "Arty", "Supply Col": "Trucks", "Engr Plt": "Engr"}
 
 
 func _build_oob_panel() -> void:
@@ -2551,6 +2585,7 @@ func close_dialog() -> bool:
 const LEGEND_TERRAIN := [
 	[1, "Open ground", "Pasture and rough ground. Fast going, no cover."],
 	[2, "Fields", "Ploughed, sown or fallow parcels. Open; slower when wet."],
+	[6, "Mixed", "Small fields, hedgerows and copses: some cover, hides units sitting still at 2 km and more, slower going."],
 	[3, "Forest", "Light woods: cover from view and fire, slow for vehicles."],
 	[11, "Dense forest", "Tall, close timber: the best concealment, the slowest going."],
 	[4, "Wetland", "Marsh, bog and pools: very slow, little cover."],
@@ -2860,6 +2895,7 @@ func show_unit(info: Dictionary, count: int) -> void:
 	t += "%s · %s\n" % [_situation(info), info["order"]]
 	t += _replacements_line(info)
 	t += _reinforcement_line(info)
+	t += _build_line(info)
 	if info.get("pending", false):
 		t += "[color=#ffd84a]%s order arrives in %d min[/color]\n" % [info["pending_kind"], int(info["pending_in"])]
 	if info.has("eta_minutes"):

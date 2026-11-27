@@ -13,6 +13,7 @@ const char *terrain_name(uint8_t t) {
         case T_FOREST: return "Forest";
         case T_WETLAND: return "Marsh";
         case T_URBAN: return "Built-up";
+        case T_MIXED: return "Mixed (hedgerows, copses)";
         default: return "Unknown";
     }
 }

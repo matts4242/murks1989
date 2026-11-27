@@ -41,6 +41,7 @@ uint32_t cover_tint(const Hex &h) {
         case T_URBAN: return tall ? tint8(120, 50, 190, 175) : tint8(140, 80, 200, 140);
         case T_FOREST: return tall ? tint8(20, 100, 200, 165) : tint8(50, 130, 210, 130);
         case T_WETLAND: return tint8(230, 200, 90, 90);
+        case T_MIXED: return tint8(90, 170, 190, 105); // some cover
         case T_OPEN:
         case T_FIELDS: return tint8(225, 90, 60, 70);
         default: return 0;
@@ -126,8 +127,8 @@ void plan_key(int mode, std::vector<PlanKey> &out) {
         const float open = terrain_minutes(mob, T_OPEN);
         static const char *what[6] = {"Faster than open ground", "As good as open ground", "Up to 1.6x slower",
                                       "Up to 2.6x slower", "Up to 5x slower", "Slower still"};
-        const int types[5] = {T_OPEN, T_FIELDS, T_FOREST, T_WETLAND, T_URBAN};
-        static const char *tname[6] = {"water", "open ground", "fields", "forest", "wetland", "towns"};
+        const int types[6] = {T_OPEN, T_FIELDS, T_MIXED, T_FOREST, T_WETLAND, T_URBAN};
+        static const char *tname[T_COUNT] = {"water", "open ground", "fields", "forest", "wetland", "towns", "mixed ground"};
         for (int k = 0; k < 6; ++k) {
             std::string speed;
             if (k == 0) speed = "over " + kmh(open * kGoingBand[0]) + " km/h";
@@ -157,11 +158,14 @@ void plan_key(int mode, std::vector<PlanKey> &out) {
         std::snprintf(b, sizeof b, "Hit chance x%.1f vehicles, x%.1f infantry. Hides units that sit still.",
                       terrain_cover_factor(T_FOREST, false), terrain_cover_factor(T_FOREST, true));
         out.push_back({tint8(20, 100, 200, 165), "Forest: good cover", b});
+        std::snprintf(b, sizeof b, "Hit chance x%.2f vehicles, x%.2f infantry. Hides units that sit still, less well.",
+                      terrain_cover_factor(T_MIXED, false), terrain_cover_factor(T_MIXED, true));
+        out.push_back({tint8(90, 170, 190, 105), "Mixed (hedgerows, copses): some cover", b});
         std::snprintf(b, sizeof b, "Hit chance x%.1f. Does not hide.", terrain_cover_factor(T_WETLAND, false));
         out.push_back({tint8(230, 200, 90, 90), "Wetland: little cover", b});
         out.push_back({tint8(225, 90, 60, 70), "Open ground and fields: exposed", "No cover. Seen at full range."});
-        std::snprintf(b, sizeof b, "Hidden units are found only within %d km (%d km by recon), beyond that by chance.",
-                      CONCEAL_SPOT_HEXES / 2, CONCEAL_SPOT_HEXES_RECON / 2);
+        std::snprintf(b, sizeof b, "Hidden units are found only within %d km (%d km by recon; in mixed ground %d and %d km), beyond that by chance.",
+                      CONCEAL_SPOT_HEXES / 2, CONCEAL_SPOT_HEXES_RECON / 2, CONCEAL_SPOT_HEXES_MIXED / 2, CONCEAL_SPOT_HEXES_MIXED_RECON / 2);
         out.push_back({0, "Sitting still and not firing", b});
         out.push_back({0, "Darker: tall cover (20 m or more)", "Tall woods and town blocks also block line of sight."});
         return;
