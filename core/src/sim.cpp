@@ -36,6 +36,9 @@ const UnitTypeInfo kTypes[U_TYPE_COUNT] = {
     // Supply column: 6 Ural-375D (4.5 t each), 2 men a truck with small arms. About 48 L/100 km
     // loaded: 1.4 L a hex for the column, 0.08% of its 1,800 L. First estimates (MRK-09).
     {"Supply Col", M_WHEELED, 6, 1, 0.5f, 0.05f, false, false, 3, 0.08f, 1800, 0.2f, 12, 1, 0},
+    // Engineer platoon: 2 squads on 2 GAZ-66 trucks with tools and explosives; rifles and an
+    // RPG. First estimates (engineers card).
+    {"Engr Plt", M_WHEELED, 6, 2, 2.0f, 0.3f, false, false, 3, 0.06f, 500, 0.6f, 22, 1, 0},
 };
 
 // Minutes per hex by mobility and terrain (water, open, fields, forest, wetland, urban, mixed).
@@ -115,7 +118,7 @@ float slope_factor_min(int mobility) { return mobility == M_FOOT ? std::exp(-3.5
 const UnitTypeInfo &unit_type_info(int type) { return kTypes[type < 0 || type >= U_TYPE_COUNT ? 0 : type]; }
 
 const char *holding_kind_name(int kind) {
-    static const char *names[HK_COUNT] = {"Town", "Farm collective", "Fuel depot", "Ammo dump"};
+    static const char *names[HK_COUNT] = {"Town", "Farm collective", "Fuel depot", "Ammo dump", "Field garage", "Supply depot"};
     return names[kind < 0 || kind >= HK_COUNT ? 0 : kind];
 }
 
@@ -570,6 +573,7 @@ void World::setup_holdings() {
 int World::holding_at(HexCoord h) const {
     int best = -1, bd = 1 << 30;
     for (int i = 0; i < (int)holdings.size(); ++i) {
+        if (holdings[i].wrecked) continue;
         int d = hex_distance(holdings[i].pos, h);
         if (d <= holdings[i].radius && d < bd) {
             bd = d;
@@ -765,12 +769,128 @@ void World::add_militia_squad(Holding &h) {
     bucket_insert(units.back());
 }
 
+// Engineers (see ENGINEER_*).
+std::string World::train_engineers(int hid) {
+    if (hid < 0 || hid >= (int)holdings.size()) return "no such place";
+    Holding &h = holdings[hid];
+    if (h.wrecked || h.kind != HK_TOWN) return "engineers are trained in a town";
+    if (h.owner != SIDE_PLAYER) return "the company does not hold " + h.name;
+    if (h.engineers_ready >= 0) return h.name + " is already training engineers";
+    const int squads = militia_squads(h);
+    if (squads < ENGINEER_MILITIA_SQUADS)
+        return fmt("%s needs %d militia squads to give up for the course (it has %d)", h.name.c_str(), ENGINEER_MILITIA_SQUADS, squads);
+    Unit &m = units[h.militia_unit];
+    m.elements -= ENGINEER_MILITIA_SQUADS;
+    m.elements_max -= ENGINEER_MILITIA_SQUADS;
+    if (m.elements_max <= 0) { // the whole garrison goes: no militia left behind (not a loss)
+        m.alive = false;
+        m.removed = true;
+        m.elements = 0;
+        m.elements_max = ENGINEER_MILITIA_SQUADS; // a unit keeps a size, or saves read as corrupt
+        h.militia_unit = -1;
+    } else {
+        m.strength = 100.0f * m.elements / m.elements_max;
+        m.equipment = fmt("%d squads of %d militia, rifles", m.elements_max, MILITIA_SQUAD_MEN);
+    }
+    h.engineers_ready = time_min + ENGINEER_TRAIN_MIN;
+    push_event(EV_HOLDING, -1, false,
+               fmt("%s: %d militia squads start an engineer course; the platoon is ready in %d hours if the town is held.",
+                   h.name.c_str(), ENGINEER_MILITIA_SQUADS, ENGINEER_TRAIN_MIN / 60));
+    return "";
+}
+
+std::string World::build(int unit_id, int kind) {
+    if (unit_id < 0 || unit_id >= (int)units.size()) return "no such unit";
+    Unit &u = units[unit_id];
+    if (!u.alive || u.side != SIDE_PLAYER || u.type != U_ENGINEER) return "only engineers build";
+    if (!holding_is_built(kind)) return "engineers build a garage or a depot";
+    if (u.moving() || u.pending.active) return u.name + " must be halted where it is to build";
+    if (u.build_kind) return u.name + " is already building";
+    if (map.at(u.pos).terrain == T_WATER) return "nothing can be built on water";
+    if (holding_at(u.pos) >= 0) return "there is already a place here";
+    for (const auto &o : units)
+        if (o.alive && o.build_kind && o.build_pos == u.pos) return "other engineers are building here";
+    u.build_kind = (uint8_t)kind;
+    u.build_done = time_min + ENGINEER_BUILD_MIN;
+    u.build_pos = u.pos;
+    push_event(EV_ORDER, u.id, false,
+               fmt("%s starts building a %s %s: ready in %d hours if they stay.", u.name.c_str(),
+                   kind == HK_GARAGE ? "field garage" : "supply depot", place_name(u.pos).c_str(), ENGINEER_BUILD_MIN / 60));
+    return "";
+}
+
+bool World::at_garage(const Unit &u) const {
+    const bool fighting = time_min - u.last_fired < 30 || time_min - u.last_hit < 30 || time_min - u.last_targeted < 30;
+    if (!u.alive || fighting || u.moving()) return false;
+    for (const auto &h : holdings)
+        if (h.kind == HK_GARAGE && !h.wrecked && h.owner == u.side && hex_distance(u.pos, h.pos) <= GARAGE_REACH) return true;
+    return false;
+}
+
+int World::depot_at(const Unit &u) const {
+    const bool fighting = time_min - u.last_fired < 30 || time_min - u.last_hit < 30 || time_min - u.last_targeted < 30;
+    if (!u.alive || fighting || u.moving()) return -1;
+    for (int i = 0; i < (int)holdings.size(); ++i) {
+        const Holding &h = holdings[i];
+        if (h.kind == HK_DEPOT && !h.wrecked && h.owner == u.side && hex_distance(u.pos, h.pos) <= GARAGE_REACH) return i;
+    }
+    return -1;
+}
+
+// Hourly: engineers at work, and the garage or depot they finish.
+void World::update_building() {
+    for (int i = 0; i < (int)units.size(); ++i) {
+        Unit &u = units[i];
+        if (!u.build_kind) continue;
+        if (!u.alive || u.pos != u.build_pos || u.moving()) {
+            if (u.alive)
+                push_event(EV_ORDER, u.id, false, fmt("%s has left its building site: the work is abandoned.", u.name.c_str()));
+            u.build_kind = 0;
+            u.build_done = -1;
+            continue;
+        }
+        if (time_min < u.build_done) continue;
+        Holding h;
+        h.kind = u.build_kind;
+        h.name = fmt("%s %s", h.kind == HK_GARAGE ? "Garage" : "Depot", place_name(u.pos).c_str());
+        h.pos = u.pos;
+        h.radius = 0;
+        h.owner = h.known_owner = SIDE_PLAYER;
+        h.loyalty = 100;
+        h.captured_at = time_min;
+        holdings.push_back(h);
+        push_event(EV_HOLDING, u.id, true,
+                   fmt("%s has finished a %s %s.", u.name.c_str(), h.kind == HK_GARAGE ? "field garage" : "supply depot",
+                       place_name(u.pos).c_str()));
+        u.build_kind = 0;
+        u.build_done = -1;
+    }
+}
+
+void World::wreck(Holding &h) {
+    const int hid = (int)(&h - &holdings[0]);
+    h.wrecked = true;
+    h.owner = h.known_owner = -1;
+    h.diesel_l = h.ammo_t = h.food_kg = h.cash = 0;
+    for (auto &r : routes)
+        if (r.active && (r.source == hid || r.dest == hid)) r.active = false;
+    push_event(EV_HOLDING, -1, true, fmt("The enemy has wrecked the %s, %s, and what was stored there.", holding_kind_name(h.kind), h.name.c_str()));
+}
+
 // Hourly: who holds each place, loyalty, and militia training.
 void World::update_holdings() {
     for (int hi = 0; hi < (int)holdings.size(); ++hi) {
         Holding &h = holdings[hi];
+        if (h.wrecked) continue;
         int present[SIDE_COUNT];
         for (int s = 0; s < SIDE_COUNT; ++s) present[s] = present_in(h, s);
+        // A garage or depot is not taken: an enemy in its hex with nobody of the owner's wrecks it.
+        if (holding_is_built(h.kind)) {
+            bool enemy = false;
+            for (int k = 0; k < SIDE_COUNT; ++k) enemy |= k != h.owner && present[k] > 0;
+            if (h.owner >= 0 && enemy && present[h.owner] == 0) wreck(h);
+            continue;
+        }
         // Fighting inside the place in the last hour (collateral damage and fear).
         bool fighting = false;
         for_units_near(h.pos, h.radius + 1, [&](const Unit &u) {
@@ -794,6 +914,30 @@ void World::update_holdings() {
             }
         } else {
             h.contested_since = -1;
+        }
+        // An engineer course: broken up if the town is lost, else the platoon joins when it is done.
+        if (h.engineers_ready >= 0) {
+            if (h.owner != SIDE_PLAYER) {
+                h.engineers_ready = -1;
+                push_event(EV_HOLDING, -1, true, fmt("The engineer course in %s is broken up: the town is lost.", h.name.c_str()));
+            } else if (time_min >= h.engineers_ready) {
+                h.engineers_ready = -1;
+                int n = 1;
+                for (const auto &o : units)
+                    if (o.side == SIDE_PLAYER && o.type == U_ENGINEER) ++n;
+                static const char *ord[] = {"1st", "2nd", "3rd"};
+                const std::string name = n <= 3 ? fmt("%s Engineers", ord[n - 1]) : fmt("%dth Engineers", n);
+                int f = 0;
+                for (int k = 0; k < (int)formations.size(); ++k)
+                    if (formations[k].side == SIDE_PLAYER) { f = k; break; }
+                std::vector<int> taken;
+                const int id = spawn(f, SIDE_PLAYER, U_ENGINEER, name, "2x GAZ-66, tools, explosives", h.pos, taken);
+                units[id].morale = 60;
+                units[id].readiness = 80;
+                bucket_insert(units[id]);
+                push_event(EV_HOLDING, id, true,
+                           fmt("%s has finished its course in %s: an engineer platoon joins the company.", name.c_str(), h.name.c_str()));
+            }
         }
         // What the player knows: ownership is seen when the company is within 10 km (or the place is its own).
         bool own_near = h.owner == SIDE_PLAYER;
@@ -1266,7 +1410,7 @@ int World::element_count(const Unit &u) {
     while (i < e.size() && e[i] >= '0' && e[i] <= '9') n = n * 10 + (e[i++] - '0');
     if (n > 0 && i < e.size() && e[i] == 'x') return n;
     if (n > 0 && e.find(" men", i) != std::string::npos) return std::max(1, (int)std::lround(n / 11.0));
-    static const int kDefault[U_TYPE_COUNT] = {2, 3, 3, 3, 2, 6, 6}; // HQ, tank, mech, infantry, recon, artillery (6-gun battery), trucks
+    static const int kDefault[U_TYPE_COUNT] = {2, 3, 3, 3, 2, 6, 6, 2}; // HQ, tank, mech, infantry, recon, artillery (6-gun battery), trucks, engineers
     return kDefault[u.type < U_TYPE_COUNT ? u.type : 0];
 }
 
@@ -1325,6 +1469,7 @@ float World::suppression_weight(const Unit &s) {
         case U_RECON: return 0.5f;
         case U_HQ: return 0.2f;
         case U_TRUCK: return 0.1f; // drivers' rifles
+        case U_ENGINEER: return 0.5f; // rifles and an RPG
         default: break;
     }
     // Guns: by calibre against 155 mm; rocket launchers fire a ripple of rockets each.
@@ -3510,6 +3655,7 @@ void World::update_logistics() {
     update_trains_at_depot(hq);
     replace_losses(hq, acting);
     deliver_reinforcements(hq);
+    update_building();
     stock.personnel = 0;
     for (auto &u : units) {
         if (!u.alive || u.side != SIDE_PLAYER) continue;
@@ -3522,24 +3668,29 @@ void World::update_logistics() {
         if (u.carrier >= 0) stock.personnel += u.squad_men * u.elements;          // squads on foot
         else if (u.dismounts >= 0 && units[u.dismounts].alive) stock.personnel += 3 * u.elements; // crews only
         else stock.personnel += (int)std::round(ti.crew * u.strength / 100.0f);
-        // Resupply from the company train: halted near the HQ and out of the fight for 30 minutes.
-        if (!at_trains(u, hq)) continue;
-        float rate = (u.resting ? 50.0f : 25.0f) * (acting ? ACTING_SUPPLY_RATE : 1.0f);
+        // Resupply from the company train: halted near the HQ and out of the fight for 30 minutes;
+        // or, away from it, from the stores of an own supply depot the unit stands at.
+        const bool trains = at_trains(u, hq);
+        const int depot = trains ? -1 : depot_at(u);
+        if (!trains && depot < 0) continue;
+        double &diesel = trains ? stock.diesel_l : holdings[depot].diesel_l;
+        double &ammo = trains ? stock.ammo_t : holdings[depot].ammo_t;
+        float rate = (u.resting ? 50.0f : 25.0f) * (trains && acting ? ACTING_SUPPLY_RATE : 1.0f);
         float want_fuel = std::min(rate, 100.0f - u.fuel);
         double litres = want_fuel / 100.0 * ti.fuel_litres;
-        if (litres > 0 && stock.diesel_l > 0) {
-            double got = std::min(litres, stock.diesel_l);
-            stock.diesel_l -= got;
-            used_diesel_l_ += got;
+        if (litres > 0 && diesel > 0) {
+            double got = std::min(litres, diesel);
+            diesel -= got;
+            if (trains) used_diesel_l_ += got;
             u.fuel += (float)(got / ti.fuel_litres * 100.0);
             u.out_of_fuel_reported = false;
         }
         float want_ammo = std::min(rate, 100.0f - u.ammo);
         double tonnes = want_ammo / 100.0 * ti.ammo_tonnes;
-        if (tonnes > 0 && stock.ammo_t > 0) {
-            double got = std::min(tonnes, stock.ammo_t);
-            stock.ammo_t -= got;
-            used_ammo_t_ += got;
+        if (tonnes > 0 && ammo > 0) {
+            double got = std::min(tonnes, ammo);
+            ammo -= got;
+            if (trains) used_ammo_t_ += got;
             u.ammo += (float)(got / ti.ammo_tonnes * 100.0);
         }
     }
@@ -3705,7 +3856,7 @@ void World::deliver_reinforcements(int hq) {
             drop();
             continue;
         }
-        if (time_min < r.due || hq < 0 || !at_trains(u, hq)) {
+        if (time_min < r.due || !((hq >= 0 && at_trains(u, hq)) || at_garage(u))) {
             ++i;
             continue;
         }
@@ -3923,6 +4074,7 @@ const SandboxKit kSandboxKit[World::SB_KIND_COUNT] = {
     {U_ARTILLERY, "Battery", "4x 2S1 Gvozdika", "3x 2S1"},
     {U_HQ, "HQ", "UAZ-469, R-145 radio", "BTR-60PU"},
     {U_TRUCK, "Supply Col", "6x Ural-375D", "6x Ural-375D"},
+    {U_ENGINEER, "Engineers", "2x GAZ-66, tools, explosives", "2x GAZ-66, tools, explosives"},
 };
 } // namespace
 
@@ -3936,7 +4088,7 @@ int World::sandbox_place(int side, int kind, HexCoord at) {
     if (!sandbox || formations.empty() || kind < 0 || kind >= SB_KIND_COUNT) return -1;
     if (side != SIDE_PLAYER && side != SIDE_HOSTILE) return -1;
     if (!map.in_bounds(at)) return -1;
-    if (side == SIDE_HOSTILE && kind == SB_SUPPLY) return -1; // hostile trains are not modelled yet
+    if (side == SIDE_HOSTILE && (kind == SB_SUPPLY || kind == SB_ENGINEERS)) return -1; // hostile trains and engineers are not modelled yet
     int f = 0;
     if (side == SIDE_HOSTILE) {
         f = sandbox_hostile_formation();
@@ -4062,7 +4214,7 @@ bool World::set_start_time(int day, int hour) {
 // ------------------------------------------------------------------------------------
 
 namespace {
-constexpr char kSaveMagic[8] = {'M', 'U', 'R', 'K', 'S', 'S', 'V', 'D'}; // v13: reinforcement requests (MRK-07); v12: civilians (MRK-34), the scenario kind (three-way)
+constexpr char kSaveMagic[8] = {'M', 'U', 'R', 'K', 'S', 'S', 'V', 'E'}; // v14: engineers (courses, building, garages and depots); v13: reinforcement requests (MRK-07); v12: civilians (MRK-34), the scenario kind (three-way)
 
 struct SaveWriter {
     std::vector<uint8_t> b;
@@ -4171,6 +4323,8 @@ template <typename A, typename U> void io_unit(A &a, U &u) {
     a.pod(u.cargo_l); a.pod(u.cargo_t); a.pod(u.cargo_kg); a.pod(u.convoy_wait_until); a.pod(u.trip_started);
     // v10: sandbox.
     a.pod(u.removed);
+    // v14: engineers.
+    a.pod(u.build_kind); a.pod(u.build_done); a.pod(u.build_pos);
 }
 
 template <typename A, typename H> void io_holding(A &a, H &h) {
@@ -4180,6 +4334,7 @@ template <typename A, typename H> void io_holding(A &a, H &h) {
     a.pod(h.militia_unit); a.pod(h.training); a.pod(h.training_progress); a.pod(h.contested_since);
     a.pod(h.captured_at); a.pod(h.last_fight);
     for (auto &x : h.levy_until) a.pod(x);
+    a.pod(h.engineers_ready); a.pod(h.wrecked); // v14
 }
 
 template <typename A, typename R> void io_route(A &a, R &r) {
@@ -4348,7 +4503,8 @@ bool World::load_state(const uint8_t *data, size_t size, std::string *error) {
     for (const auto &m : mks)
         if (!marking_ok(map, m)) return fail("save is corrupt");
     for (const auto &h : hs)
-        if (h.settlement < 0 || h.settlement >= (int)map.settlements.size() || !map.in_bounds(h.pos) ||
+        // A garage or depot the engineers built belongs to no settlement.
+        if ((h.settlement < 0 ? !holding_is_built(h.kind) : h.settlement >= (int)map.settlements.size()) || !map.in_bounds(h.pos) ||
             h.kind >= HK_COUNT || h.militia_unit >= (int)us.size())
             return fail("save is corrupt");
     for (const auto &x : rts)

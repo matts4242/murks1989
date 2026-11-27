@@ -177,6 +177,8 @@ public:
     Dictionary get_holding(int hid) const;
     int holding_at(Vector2i hex) const;             // holding whose footprint holds the hex, -1 none
     bool set_training(int hid, bool on);            // raise militia at an own town
+    String train_engineers(int hid);                // engineer course at an own town: "" or why not
+    String build(int id, int kind);                 // engineers build a garage (4) or depot (5) where they stand
     String levy(int hid, int kind);                 // requisition (0 food, 1 fuel, 2 cash, 3 men); "" = done
     Dictionary set_supply_route(int source, int dest); // {"id": route or -1, "error": reason}
     bool cancel_supply_route(int rid);

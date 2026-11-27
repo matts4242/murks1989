@@ -300,7 +300,7 @@ func _sandbox_click(screen_pos: Vector2) -> void:
 		var id: int = world.sandbox_place(sbx_side, sbx_kind, hex)
 		if id < 0:
 			hud.show_toast("Nothing placed there (no free land near the click%s)." % (
-				", and hostile supply columns are not modelled" if sbx_side == 1 and sbx_kind == 6 else ""), 3.0)
+				", and hostile supply columns and engineers are not modelled" if sbx_side == 1 and sbx_kind >= 6 else ""), 3.0)
 		else:
 			if sbx_side == 0:
 				selected = [id]
@@ -535,13 +535,16 @@ func _update_orders_state() -> void:
 	var can_mnt := false
 	var detached := false
 	var can_reinforce := false
+	var can_build := false
 	for id in _own_selected():
 		var mi: Dictionary = world.get_unit_info(id)
 		can_dis = can_dis or bool(mi.get("can_dismount", false))
 		can_mnt = can_mnt or bool(mi.get("can_mount", false))
 		detached = detached or String(mi.get("group_role", "")) == "detached"
 		can_reinforce = can_reinforce or int(mi.get("vehicles_short", 0)) > 0
+		can_build = can_build or (mi.get("engineer", false) and not mi.has("build_kind"))
 	hud.set_reinforce_state(can_reinforce)
+	hud.set_build_state(can_build)
 	hud.set_mount_state(can_dis, can_mnt)
 	hud.set_rejoin_state(detached)
 	var so := -2
@@ -1430,6 +1433,28 @@ func _on_command(name: String) -> void:
 	elif name == "holding_centre":
 		if selected_holding >= 0:
 			camera.position = world.get_holding(selected_holding).get("pos", camera.position)
+	elif name.begins_with("holding_engineers_"):
+		var why: String = world.train_engineers(name.substr(18).to_int())
+		if why == "":
+			hud.show_toast("Engineer course started: the platoon joins in 24 hours if the town is held.", 5.0)
+		else:
+			hud.show_toast("No engineer course: %s." % why, 5.0)
+	elif name.begins_with("build_"):
+		var kind := name.substr(6).to_int()
+		var started := 0
+		var why := ""
+		for id in _own_selected():
+			if not world.get_unit_info(id).get("engineer", false):
+				continue
+			var w: String = world.build(id, kind)
+			if w == "":
+				started += 1
+			else:
+				why = w
+		if started > 0:
+			hud.show_toast("Building a %s: ready in 24 hours if the engineers stay put." % ("field garage" if kind == 4 else "supply depot"), 5.0)
+		else:
+			hud.show_toast("Nothing built: %s." % (why if why != "" else "select engineers"), 5.0)
 	elif name.begins_with("holding_train_"):
 		var hid := name.substr(14).to_int()
 		var hd: Dictionary = world.get_holding(hid)
@@ -2996,6 +3021,39 @@ func _run_uitest() -> void:
 		"the unit panel says when they should arrive")
 	_on_command("reinforce")
 	check.call(hud.toast.text.begins_with("Nothing to ask for"), "a second request while one is on its way is refused")
+	# Engineers: placed in the sandbox, they build a field garage through the order menu's command;
+	# the home town's panel offers to train them from its militia.
+	var eng: int = world.sandbox_place(0, 7, world.get_holding(home_id)["hex"] + Vector2i(-8, 6))
+	check.call(eng >= 0 and world.get_unit_info(eng).get("engineer", false), "engineers can be placed in the sandbox")
+	selected = [eng]
+	selected_holding = -1
+	await _frames(3)
+	check.call(hud.ord.get("can_build", false), "with engineers selected, the order menu offers to build")
+	_on_command("build_4")
+	var ei: Dictionary = world.get_unit_info(eng)
+	check.call(hud.toast.text.begins_with("Building a field garage") and int(ei.get("build_kind", 0)) == 4,
+		"Build a field garage here starts the work: \"%s\"" % hud.toast.text)
+	check.call(hud._build_line(ei).contains("Building a field garage") and hud._build_line(ei).contains("ready in about"), "the unit panel shows the work and the time left")
+	var places_before := world.get_holdings().size()
+	var until := int(world.get_time_minutes()) + 24 * 60 + 61
+	for i in 400:   # advance stops at pause-worthy events: run until the day is out
+		if int(world.get_time_minutes()) >= until:
+			break
+		world.advance(mini(60, until - int(world.get_time_minutes())), 5000.0)
+	var garage := {}
+	for hd in world.get_holdings():
+		if int(hd["kind"]) == 4:
+			garage = hd
+	check.call(world.get_holdings().size() == places_before + 1 and not garage.is_empty() and garage.get("own", false),
+		"a day later the company has a field garage (%s)" % String(garage.get("name", "none")))
+	selected.clear()
+	selected_holding = home_id
+	await _frames(3)
+	check.call(hud.engineers_button.visible, "the home town's panel has Train engineers")
+	_on_command("holding_engineers_%d" % home_id)
+	check.call(hud.toast.text.begins_with("Engineer course started") or hud.toast.text.begins_with("No engineer course"),
+		"Train engineers starts a course or says why not: \"%s\"" % hud.toast.text)
+	selected_holding = -1
 	print("UITEST done: %d passed, %d failed" % [res[0], res[1]])
 	get_tree().quit(1 if res[1] > 0 else 0)
 

@@ -101,6 +101,10 @@ target_link_libraries(reinforcements_test PRIVATE murks_core)
 add_executable(mixed_terrain_test tests/mixed_terrain_test.cpp)
 target_link_libraries(mixed_terrain_test PRIVATE murks_core)
 
+# Engineers: trained from militia, garages and depots, wrecking, save/load. build/engineers_test
+add_executable(engineers_test tests/engineers_test.cpp)
+target_link_libraries(engineers_test PRIVATE murks_core)
+
 # Real-map 4-day scripted runs over several seeds (needs zlib). build/playtest game/data/poland_1989.murkz 4 active 1989 8
 find_package(ZLIB)
 if(ZLIB_FOUND)
