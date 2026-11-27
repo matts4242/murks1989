@@ -2619,7 +2619,7 @@ func _terrain_swatch(code: int) -> Control:
 func _draw_legend_swatch(sw: Control, kind: String) -> void:
 	var c := sw.size * 0.5
 	var k := 21.0 / 288.7   # metres on the map -> pixels in the swatch, as for a 21 px hex
-	var ground := Color8(124, 149, 77)
+	var ground := Color8(126, 140, 82)   # open ground, as the far-zoom palette (render_data.cpp base_color)
 	sw.draw_rect(Rect2(Vector2(0, c.y - 15), Vector2(sw.size.x, 30)), ground)
 	var a := Vector2(2, c.y)
 	var b := Vector2(sw.size.x - 2, c.y)

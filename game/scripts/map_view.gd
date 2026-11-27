@@ -13,8 +13,8 @@ extends Node2D
 const CHUNK_HEXES := 64
 const MAX_LOADED := 260          # chunk meshes kept before unloading far ones
 const CHUNK_MODE_PX := 7.0       # hex size on screen from which roads, rivers and rail are drawn as lines
-const GRID_MODE_PX := 22.0       # hex size on screen at which hex outlines start to show
-const GRID_FULL_PX := 40.0       # ... and at which they reach full strength
+const GRID_MODE_PX := 14.0       # hex size on screen at which hex outlines start to show (faintly)
+const GRID_FULL_PX := 30.0       # ... and at which they reach full strength
 const GRID_STRENGTH := 0.32
 const TOPO_CLOSE_PX := 20.0      # hex size on screen from which contours are every 20 m
 const TOPO_FAR_PX := 3.0         # ... and below which every 500 m (100 m in between)
