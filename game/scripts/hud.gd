@@ -2595,7 +2595,7 @@ const LEGEND_TERRAIN := [
 const LEGEND_LINES := [
 	["road_major", "Main road", "Trunk roads and motorways."],
 	["road", "Road", "Minor and local roads."],
-	["rail", "Railway", "With sleepers across it."],
+	["rail", "Railway", "Black and white dashes."],
 	["river_major", "Major river", "Crossed at bridges."],
 	["river", "River or stream", ""],
 	["bridge", "Bridge", "Pale deck with dark parapets."],
@@ -2663,13 +2663,15 @@ func _draw_legend_swatch(sw: Control, kind: String) -> void:
 			sw.draw_line(a, b, Color8(112, 46, 30), 58.0 * 2 * k)
 			sw.draw_line(a, b, Color8(230, 112, 58), 41.0 * 2 * k)
 		"road":
-			sw.draw_line(a, b, Color8(104, 82, 58), 36.0 * 2 * k)
-			sw.draw_line(a, b, Color8(242, 230, 192), 23.0 * 2 * k)
+			sw.draw_line(a, b, Color8(86, 84, 80), 36.0 * 2 * k)
+			sw.draw_line(a, b, Color8(248, 246, 238), 23.0 * 2 * k)
 		"rail":
-			sw.draw_line(a, b, Color8(44, 42, 46), 2.0)
-			for i in 7:
-				var x := a.x + (i + 0.5) * (b.x - a.x) / 7.0
-				sw.draw_line(Vector2(x, c.y - 28.0 * k), Vector2(x, c.y + 28.0 * k), Color8(44, 42, 46), 1.2)
+			sw.draw_line(a, b, Color8(40, 38, 42), 15.0 * 2 * k)
+			var dash := 120.0 * k
+			var x0 := a.x
+			while x0 < b.x:
+				sw.draw_line(Vector2(x0, c.y), Vector2(minf(x0 + dash, b.x), c.y), Color8(244, 242, 236), 9.0 * 2 * k)
+				x0 += dash * 2.0
 		"river_major":
 			sw.draw_line(a, b, Color8(64, 104, 144), 84.0 * 2 * k)
 			sw.draw_line(a, b, Color8(98, 146, 190), 70.0 * 2 * k)
@@ -2684,8 +2686,8 @@ func _draw_legend_swatch(sw: Control, kind: String) -> void:
 			var l := 130.0 * k
 			var w := 52.0 * k
 			sw.draw_line(c - Vector2(l, 0), c + Vector2(l, 0), Color8(232, 226, 210), w * 2.0)
-			sw.draw_line(a, b, Color8(104, 82, 58), 36.0 * 2 * k)
-			sw.draw_line(a, b, Color8(242, 230, 192), 23.0 * 2 * k)
+			sw.draw_line(a, b, Color8(86, 84, 80), 36.0 * 2 * k)
+			sw.draw_line(a, b, Color8(248, 246, 238), 23.0 * 2 * k)
 			for sgn in [-1.0, 1.0]:
 				sw.draw_line(c + Vector2(-l, w * sgn), c + Vector2(l, w * sgn), Color8(34, 30, 28), 1.2)
 				for e in [-1.0, 1.0]:

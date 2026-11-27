@@ -23,7 +23,7 @@ RGB base_color(const Hex &h, int, int) {
         case T_FIELDS: return {136, 138, 87};
         case T_FOREST: return h.cover >= 20 ? RGB{44, 72, 40} : RGB{58, 91, 47};
         case T_WETLAND: return {118, 137, 109};
-        case T_URBAN: return h.cover >= 20 ? RGB{135, 129, 109} : RGB{124, 132, 88};
+        case T_URBAN: return h.cover >= 20 ? RGB{140, 128, 111} : RGB{130, 128, 89};
         case T_MIXED: return {112, 126, 72}; // hedgerows and copses
         default: return {126, 140, 82}; // pasture and rough ground
     }
@@ -210,8 +210,9 @@ void append_lines(const Map &map, int c0, int r0, ChunkGeometry &g) {
         {NET_RIVER, F_MAJOR_RIVER, 33, 70, rgba8(110, 156, 196), rgba8(98, 146, 190)}, // water
     };
     const Pass roads[] = {
-        {NET_ROAD, F_MAJOR_ROAD, 36, 58, rgba8(104, 82, 58), rgba8(112, 46, 30)},     // casing
-        {NET_ROAD, F_MAJOR_ROAD, 23, 41, rgba8(242, 230, 192), rgba8(230, 112, 58)},  // surface
+        // Two classes that read apart at a glance: main roads orange, minor roads white.
+        {NET_ROAD, F_MAJOR_ROAD, 36, 58, rgba8(86, 84, 80), rgba8(112, 46, 30)},      // casing
+        {NET_ROAD, F_MAJOR_ROAD, 23, 41, rgba8(248, 246, 238), rgba8(230, 112, 58)},  // surface
     };
     HexPath p;
     const int c1 = std::min(c0 + CHUNK, map.cols()), r1 = std::min(r0 + CHUNK, map.rows());
@@ -258,30 +259,29 @@ void append_lines(const Map &map, int c0, int r0, ChunkGeometry &g) {
 
     for (const Pass &L : roads) run(L);
 
-    // Railways: a dark line with sleepers across it every ~60 m.
+    // Railways: the map convention, a dark line with white dashes inside it (120 m dash, 120 m gap).
     std::vector<std::vector<Vec2>> lines;
+    const uint32_t rail_dark = rgba8(40, 38, 42), rail_light = rgba8(244, 242, 236);
     for (int r = r0; r < r1; ++r) {
         for (int c = c0; c < c1; ++c) {
             if (!hex_path(map, c, r, NET_RAIL, 0, p)) continue;
-            draw_hex_path(g, p, 10, 10, rgba8(44, 42, 46), rgba8(44, 42, 46));
+            draw_hex_path(g, p, 15, 15, rail_dark, rail_dark);
             hex_path_polylines(p, lines);
             for (const auto &v : lines) {
-                double len = 0;
-                for (size_t i = 1; i < v.size(); ++i) len += std::hypot(v[i].x - v[i - 1].x, v[i].y - v[i - 1].y);
-                const int n = std::max(1, (int)std::lround(len / 60.0));
-                for (int k = 0; k < n; ++k) {
-                    double s = (k + 0.5) * len / n, run_len = 0;
-                    for (size_t i = 1; i < v.size(); ++i) {
-                        double sl = std::hypot(v[i].x - v[i - 1].x, v[i].y - v[i - 1].y);
-                        if (run_len + sl >= s && sl > 1e-9) {
-                            double t = (s - run_len) / sl, tx = (v[i].x - v[i - 1].x) / sl, ty = (v[i].y - v[i - 1].y) / sl;
-                            double mx = v[i - 1].x + (v[i].x - v[i - 1].x) * t - g.origin_x;
-                            double my = v[i - 1].y + (v[i].y - v[i - 1].y) * t - g.origin_y;
-                            push_line(g, mx - ty * 28, my + tx * 28, mx + ty * 28, my - tx * 28, 6, rgba8(44, 42, 46));
-                            break;
-                        }
-                        run_len += sl;
+                // Dashes measured along the hex's whole path from its edge: 120 m on, 120 m off,
+                // so the rhythm is even and starts the same way in every hex.
+                double at = 0;
+                for (size_t i = 1; i < v.size(); ++i) {
+                    const double sl = std::hypot(v[i].x - v[i - 1].x, v[i].y - v[i - 1].y);
+                    if (sl < 1e-9) continue;
+                    const double tx = (v[i].x - v[i - 1].x) / sl, ty = (v[i].y - v[i - 1].y) / sl;
+                    for (double a = std::floor(at / 240.0) * 240.0; a < at + sl; a += 240.0) {
+                        const double s0 = std::max(at, a) - at, s1 = std::min(at + sl, a + 120.0) - at;
+                        if (s1 - s0 < 2.0) continue;
+                        push_line(g, v[i - 1].x + tx * s0 - g.origin_x, v[i - 1].y + ty * s0 - g.origin_y,
+                                  v[i - 1].x + tx * s1 - g.origin_x, v[i - 1].y + ty * s1 - g.origin_y, 9, rail_light);
                     }
+                    at += sl;
                 }
             }
         }
@@ -426,7 +426,7 @@ void build_overview_rgba(const Map &map, std::vector<uint8_t> &rgba) {
             if (h.features & F_MAJOR_RIVER) blend(rgba8(70, 120, 176), 1.0);
             else if (h.features & F_RIVER) blend(rgba8(84, 132, 182), 0.8);
             if (h.features & F_MAJOR_ROAD) blend(rgba8(214, 92, 52), 0.85);
-            else if (h.features & F_ROAD) blend(rgba8(120, 96, 66), 0.5);
+            else if (h.features & F_ROAD) blend(rgba8(236, 234, 226), 0.45);
             if (h.features & F_RAIL) blend(rgba8(38, 38, 40), 0.6);
             size_t o = ((size_t)r * W + c) * 4;
             rgba[o + 0] = col & 255;
