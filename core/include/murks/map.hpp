@@ -20,6 +20,7 @@ enum Terrain : uint8_t {
     T_FOREST,
     T_WETLAND,
     T_URBAN,
+    T_MIXED,   // patchwork farmland with hedgerows and copses (20-45% trees): some cover (terrain look, card 2)
     T_COUNT
 };
 

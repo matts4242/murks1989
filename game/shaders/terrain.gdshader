@@ -63,6 +63,7 @@ const int T_FIELDS = 2;
 const int T_FOREST = 3;
 const int T_WETLAND = 4;
 const int T_URBAN = 5;
+const int T_MIXED = 6;
 
 void vertex() {
 	world = (MODEL_MATRIX * vec4(VERTEX, 0.0, 1.0)).xy;
@@ -247,6 +248,7 @@ const vec3 FLAT_FOREST_DENSE = vec3(44.0, 72.0, 40.0) / 255.0;
 const vec3 FLAT_WETLAND = vec3(118.0, 137.0, 109.0) / 255.0;
 const vec3 FLAT_TOWN = vec3(124.0, 132.0, 88.0) / 255.0;
 const vec3 FLAT_TOWN_DENSE = vec3(135.0, 129.0, 109.0) / 255.0;
+const vec3 FLAT_MIXED = vec3(112.0, 126.0, 72.0) / 255.0;
 
 vec3 flat_colour(int t, bool dense, float depth) {
 	if (t == T_WATER) {
@@ -257,6 +259,7 @@ vec3 flat_colour(int t, bool dense, float depth) {
 	if (t == T_FOREST) return dense ? FLAT_FOREST_DENSE : FLAT_FOREST;
 	if (t == T_WETLAND) return FLAT_WETLAND;
 	if (t == T_URBAN) return dense ? FLAT_TOWN_DENSE : FLAT_TOWN;
+	if (t == T_MIXED) return FLAT_MIXED;
 	return FLAT_OPEN;
 }
 
@@ -579,8 +582,31 @@ vec3 paint_water(vec2 p, float depth) {
 	return c * (0.97 + 0.06 * fbm(p, 320.0, 501u, 2));
 }
 
+// Mixed ground (hedgerows and copses): smaller fields than open farmland, bounded by wandering
+// hedgerows, with copses and lone trees. Too fine to see from afar, the hedges average into a
+// greener tone, so mixed ground still reads apart from plain fields at playing zoom.
+vec3 paint_mixed(vec2 p) {
+	vec3 c = mix(paint_fields(p * 1.7 + vec2(3100.0, 1700.0)), paint_open(p), 0.3);
+	// Hedgerows: two families of wandering lines, ~5 m wide, every 150-200 m or so.
+	float h1 = abs(vnoise(p / 180.0, 601u) - 0.5) * 180.0 * 0.5;
+	float h2 = abs(vnoise(p / 150.0 + 7.3, 607u) - 0.5) * 150.0 * 0.5;
+	float hd = min(h1, h2);
+	float aa = max(metres_per_pixel * 0.6, 0.5);
+	float hedge = (1.0 - smoothstep(4.0 - aa, 4.0 + aa, hd)) * vis(8.0);
+	vec3 hedge_c = vec3(0.24, 0.35, 0.18) * (0.9 + 0.2 * fbm(p, 24.0, 611u, 2));
+	c = mix(c, hedge_c, hedge);
+	c = mix(c, c * vec3(0.86, 0.93, 0.82), (1.0 - vis(8.0)) * 0.55); // hedges too thin to draw: their tone
+	// Copses of 60-200 m, from the forest's own canopy.
+	float f = fbm(p, 420.0, 613u, 3);
+	float copse = smoothstep(0.64, 0.68, f);
+	c = mix(c, paint_forest(p, false), copse);
+	// Lone trees along the way.
+	return scatter(p, c, 46.0, 0.2 * (1.0 - copse), 617u, vec3(0.20, 0.31, 0.15), 0.17);
+}
+
 vec3 paint(int t, bool dense, vec2 p, float depth) {
 	if (t == T_FOREST) return paint_forest(p, dense);
+	if (t == T_MIXED) return paint_mixed(p);
 	if (t == T_FIELDS) return paint_fields(p);
 	if (t == T_URBAN) return paint_town(p, dense);
 	if (t == T_WETLAND) return paint_wetland(p);

@@ -38,11 +38,12 @@ const UnitTypeInfo kTypes[U_TYPE_COUNT] = {
     {"Supply Col", M_WHEELED, 6, 1, 0.5f, 0.05f, false, false, 3, 0.08f, 1800, 0.2f, 12, 1, 0},
 };
 
-// Minutes per hex by mobility and terrain (water, open, fields, forest, wetland, urban).
+// Minutes per hex by mobility and terrain (water, open, fields, forest, wetland, urban, mixed).
+// Mixed (hedgerows and copses) sits between fields and forest: the gaps have to be found.
 const float kTerrainCost[3][T_COUNT] = {
-    {-1, 2.5f, 3.0f, 6.0f, 14.0f, 3.0f},  // tracked
-    {-1, 4.0f, 5.0f, 10.0f, 30.0f, 2.0f}, // wheeled
-    {-1, 7.0f, 8.0f, 10.0f, 16.0f, 7.0f}, // foot
+    {-1, 2.5f, 3.0f, 6.0f, 14.0f, 3.0f, 3.5f},  // tracked
+    {-1, 4.0f, 5.0f, 10.0f, 30.0f, 2.0f, 6.0f}, // wheeled
+    {-1, 7.0f, 8.0f, 10.0f, 16.0f, 7.0f, 8.0f}, // foot
 };
 const float kRoadCost[3] = {1.2f, 0.9f, 6.0f};
 const float kRiverPenalty[3] = {25.0f, 60.0f, 20.0f};
@@ -90,6 +91,7 @@ float terrain_cover_factor(int terrain, bool soft_target) {
         case T_FOREST: return soft_target ? 0.5f : 0.7f;
         case T_URBAN: return soft_target ? 0.4f : 0.6f;
         case T_WETLAND: return 0.9f;
+        case T_MIXED: return soft_target ? 0.75f : 0.85f; // hedgerows and copses: some cover
         default: return 1.0f;
     }
 }
@@ -3054,7 +3056,7 @@ void World::update_spotting(bool full_pass) {
             const Hex &th = map.at(t.pos);
             bool concealed = terrain_conceals(th.terrain) &&
                              (!t.moving() || t.mode == MV_DELIBERATE) && time_min - t.last_fired > 3;
-            if (concealed && d > (obs.type == U_RECON ? CONCEAL_SPOT_HEXES_RECON : CONCEAL_SPOT_HEXES)) {
+            if (concealed && d > conceal_spot_hexes(th.terrain, obs.type == U_RECON)) {
                 // Beyond close range a hidden unit is found only by chance (movement, a glint,
                 // a careless radio) - unless this side already has eyes on it.
                 bool tracked = time_min - t.last_seen[obs.side] <= 10;
@@ -3091,6 +3093,7 @@ void World::displace_battery(Unit &u) {
         if (!map.in_bounds(h) || map.at(h).terrain == T_WATER || !reachable(u.pos, h)) continue;
         int score = foe >= 0 ? hex_distance(h, units[foe].last_seen_pos[u.side]) * 4 : 0;
         if (map.at(h).terrain == T_FOREST || map.at(h).terrain == T_URBAN) score += 3; // cover
+        else if (map.at(h).terrain == T_MIXED) score += 2;
         score += rng_.range_int(0, 2);
         if (score > best_score) {
             best_score = score;
@@ -3240,6 +3243,7 @@ void World::update_combat() {
             float S = suppression_weight(u) * u.elements + std::min(kills, t.elements) * 1.0f;
             if (tt.armored) S *= ti.indirect ? 0.5f : 0.3f;
             if (th.terrain == T_FOREST || th.terrain == T_URBAN) S *= 0.6f;
+            else if (th.terrain == T_MIXED) S *= 0.8f; // a hedgerow to get behind
             suppress(t, S, time_min + std::max(1, minutes(et.cycle)));
         }
         // Civilians (MRK-34): the area is dangerous for a while. They are non-combatants and

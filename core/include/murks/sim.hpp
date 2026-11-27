@@ -89,7 +89,14 @@ float slope_factor_min(int mobility); // the smallest slope_factor can be (x0.84
 // a few minutes: it is spotted only within these ranges, beyond them only by chance.
 constexpr int CONCEAL_SPOT_HEXES = 2;       // 1 km
 constexpr int CONCEAL_SPOT_HEXES_RECON = 4; // 2 km
-inline bool terrain_conceals(int terrain) { return terrain == T_FOREST || terrain == T_URBAN; }
+inline bool terrain_conceals(int terrain) { return terrain == T_FOREST || terrain == T_URBAN || terrain == T_MIXED; }
+// Mixed ground (hedgerows, copses) hides less: a unit sitting still is found within 2 km (3 by recon).
+constexpr int CONCEAL_SPOT_HEXES_MIXED = 4;       // 2 km
+constexpr int CONCEAL_SPOT_HEXES_MIXED_RECON = 6; // 3 km
+inline int conceal_spot_hexes(int terrain, bool recon) {
+    if (terrain == T_MIXED) return recon ? CONCEAL_SPOT_HEXES_MIXED_RECON : CONCEAL_SPOT_HEXES_MIXED;
+    return recon ? CONCEAL_SPOT_HEXES_RECON : CONCEAL_SPOT_HEXES;
+}
 // Eye and target heights (metres above ground) the spotting and direct-fire model uses.
 constexpr float SPOT_EYE_M = 3.0f;
 constexpr float SPOT_TARGET_M = 2.5f;

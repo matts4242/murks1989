@@ -97,6 +97,10 @@ target_link_libraries(wages_test PRIVATE murks_core)
 add_executable(reinforcements_test tests/reinforcements_test.cpp)
 target_link_libraries(reinforcements_test PRIVATE murks_core)
 
+# Mixed ground (hedgerows, copses): going, cover, concealment, planning keys. build/mixed_terrain_test
+add_executable(mixed_terrain_test tests/mixed_terrain_test.cpp)
+target_link_libraries(mixed_terrain_test PRIVATE murks_core)
+
 # Real-map 4-day scripted runs over several seeds (needs zlib). build/playtest game/data/poland_1989.murkz 4 active 1989 8
 find_package(ZLIB)
 if(ZLIB_FOUND)
@@ -106,5 +110,8 @@ if(ZLIB_FOUND)
     #   build/render_shot game/data/poland_1989.murkz shot.ppm 880 560 40
     #   build/render_shot game/data/poland_1989.murkz bench
     add_executable(render_shot tests/render_shot.cpp)
+    # Marks mixed ground (hedgerows, copses) in a map baked before the bake did it: build/mark_mixed in.murkz out.murkz
+    add_executable(mark_mixed tools/mark_mixed.cpp)
+    target_link_libraries(mark_mixed PRIVATE murks_core ZLIB::ZLIB)
     target_link_libraries(render_shot PRIVATE murks_core ZLIB::ZLIB)
 endif()

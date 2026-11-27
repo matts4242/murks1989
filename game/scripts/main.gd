@@ -3196,7 +3196,7 @@ func _run_views() -> void:
 	sm.set_shader_parameter("metres_per_pixel", 10.0)
 	rect.material = sm
 	layer.add_child(rect)
-	for code in [0, 1, 2, 3, 11, 4, 5, 13]:
+	for code in [0, 1, 2, 3, 11, 4, 5, 13, 6]:
 		sm.set_shader_parameter("swatch", code)
 		for i in 2:
 			await get_tree().process_frame

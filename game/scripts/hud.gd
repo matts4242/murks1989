@@ -2551,6 +2551,7 @@ func close_dialog() -> bool:
 const LEGEND_TERRAIN := [
 	[1, "Open ground", "Pasture and rough ground. Fast going, no cover."],
 	[2, "Fields", "Ploughed, sown or fallow parcels. Open; slower when wet."],
+	[6, "Mixed", "Small fields, hedgerows and copses: some cover, hides units sitting still at 2 km and more, slower going."],
 	[3, "Forest", "Light woods: cover from view and fire, slow for vehicles."],
 	[11, "Dense forest", "Tall, close timber: the best concealment, the slowest going."],
 	[4, "Wetland", "Marsh, bog and pools: very slow, little cover."],
