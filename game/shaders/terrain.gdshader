@@ -246,8 +246,8 @@ const vec3 FLAT_FIELDS = vec3(136.0, 138.0, 87.0) / 255.0;
 const vec3 FLAT_FOREST = vec3(58.0, 91.0, 47.0) / 255.0;
 const vec3 FLAT_FOREST_DENSE = vec3(44.0, 72.0, 40.0) / 255.0;
 const vec3 FLAT_WETLAND = vec3(118.0, 137.0, 109.0) / 255.0;
-const vec3 FLAT_TOWN = vec3(124.0, 132.0, 88.0) / 255.0;
-const vec3 FLAT_TOWN_DENSE = vec3(135.0, 129.0, 109.0) / 255.0;
+const vec3 FLAT_TOWN = vec3(130.0, 128.0, 89.0) / 255.0;
+const vec3 FLAT_TOWN_DENSE = vec3(140.0, 128.0, 111.0) / 255.0;
 const vec3 FLAT_MIXED = vec3(112.0, 126.0, 72.0) / 255.0;
 
 vec3 flat_colour(int t, bool dense, float depth) {
@@ -552,9 +552,22 @@ vec3 paint_town(vec2 p, bool dense) {
 	vec2 ax = vec2(-cs.y, cs.x);
 	vec2 lp = vec2(dot(p - qp, cs), dot(p - qp, ax)) + vec2(10000.0);
 	vec3 avg = dense ? FLAT_TOWN_DENSE : FLAT_TOWN;
+	// Generalised, as a printed map draws a town at small scale: blocks of 70-90 m along the
+	// quarter's street grid with pale streets between, red tile roofs in villages and suburbs,
+	// tile and slate in dense towns. It shows while single buildings are too small to draw.
+	float bs = dense ? 90.0 : 70.0;
+	vec2 bc = floor(lp / bs);
+	vec2 bf = fract(lp / bs);
+	float street_w = max(0.14, 1.2 * metres_per_pixel / bs);
+	bool on_street = bf.x < street_w || bf.y < street_w;
+	float br = rnd(ivec2(bc), qh + 31u);
+	bool block = !on_street && br < (dense ? 0.82 : 0.58);
+	vec3 roof = dense ? (br < 0.45 ? vec3(0.60, 0.36, 0.28) : vec3(0.50, 0.50, 0.50)) : (br < 0.40 ? vec3(0.64, 0.36, 0.27) : vec3(0.55, 0.33, 0.26));
+	vec3 gen = on_street ? vec3(0.64, 0.62, 0.57) : (block ? roof : (dense ? YARD : GARDEN));
+	gen = mix(avg, gen, vis(bs * 0.6));
 	float v = vis(kind == 0 ? 26.0 : 30.0);
 	if (v <= 0.0) {
-		return avg * (0.95 + 0.1 * fbm(p, 400.0, 613u, 2));
+		return gen * (0.95 + 0.1 * fbm(p, 400.0, 613u, 2));
 	}
 	vec3 ground;
 	vec4 here = town_at(kind, lp, qh, ground);
@@ -574,7 +587,7 @@ vec3 paint_town(vec2 p, bool dense) {
 		// The half of a pitched roof facing the light is a touch brighter.
 		c *= 0.94 + 0.1 * step(0.5, fract(lp.x / 8.0));
 	}
-	return mix(avg, c, v);
+	return mix(gen, c, v);
 }
 
 vec3 paint_water(vec2 p, float depth) {
