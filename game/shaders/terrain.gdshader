@@ -33,6 +33,8 @@ uniform float metres_per_pixel = 10.0;
 uniform float detail = 1.0;            // 0: flat colour per terrain (F6 off)
 uniform float edge_noise = 0.3;        // 0 = crisp hex borders
 uniform float grid_alpha = 0.0;
+uniform float step_m = 50.0;           // elevation step lines: metres per height band
+uniform float step_alpha = 0.0;        // 0 = no step lines
 uniform float relief = 1.0;            // hill shading strength
 uniform float contour_interval = 0.0;  // metres between contour lines; 0 = none
 uniform float contour_heavy = 5.0;     // every n-th line is heavier
@@ -744,6 +746,29 @@ void fragment() {
 			}
 			col = mix(col, vec3(dot(col, vec3(0.30, 0.55, 0.15))), 0.35);
 			col = mix(col, tint.rgb, tint.a);
+		}
+		// Elevation step lines: along a hex edge where the per-hex heights the rules use fall
+		// in different height bands, heavier where the ground steps more than one band. They
+		// show hills in hex terms: count the lines to know how far up a slope you are.
+		if (step_alpha > 0.0) {
+			ivec2 sh = world_to_hex(world);
+			vec2 sd = world - hex_center(sh);
+			vec2 sl = abs(sd);
+			float shd = max(sl.x, 0.5 * sl.x + 0.8660254 * sl.y);
+			float se_px = (HEX_W * 0.5 - shd) / metres_per_pixel;
+			if (se_px < 2.0) {
+				ivec2 nh = world_to_hex(hex_center(sh) + sd * ((HEX_W * 0.5 + 40.0) / max(shd, 1.0)));
+				vec4 r0 = hex_rec(sh);
+				vec4 r1 = hex_rec(nh);
+				float b0 = floor(r0.z / step_m);
+				float b1 = floor(r1.z / step_m);
+				// Drawn only on the higher hex, so the line is the lip of a terrace and one hairline wide.
+				if (b0 > b1 && int(r0.x + 0.5) != T_WATER && int(r1.x + 0.5) != T_WATER) {
+					float k = 1.0 - smoothstep(0.4, 1.3, se_px);
+					float heavy = min(1.0, 0.75 + 0.25 * (b0 - b1 - 1.0));
+					col = mix(col, col * vec3(0.48, 0.38, 0.28), k * step_alpha * heavy);
+				}
+			}
 		}
 		if (grid_alpha > 0.0) {
 			ivec2 gh = world_to_hex(world);

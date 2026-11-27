@@ -16,6 +16,10 @@ const CHUNK_MODE_PX := 7.0       # hex size on screen from which roads, rivers a
 const GRID_MODE_PX := 14.0       # hex size on screen at which hex outlines start to show (faintly)
 const GRID_FULL_PX := 30.0       # ... and at which they reach full strength
 const GRID_STRENGTH := 0.32
+const STEP_M := 50.0             # elevation step lines: metres per height band
+const STEP_MODE_PX := 12.0       # hex size on screen at which step lines start to show
+const STEP_FULL_PX := 24.0       # ... and at which they reach full strength
+const STEP_STRENGTH := 0.9
 const TOPO_CLOSE_PX := 20.0      # hex size on screen from which contours are every 20 m
 const TOPO_FAR_PX := 3.0         # ... and below which every 500 m (100 m in between)
 const NATURAL_EDGE_NOISE := 0.3  # how far terrain borders wander (0 = crisp hex borders)
@@ -39,6 +43,7 @@ var topo_lod := 0                # 0: contours every 20 m, heavier every 100 m; 
 var show_grid := true
 var show_detail := true          # painted textures (off: one flat colour per terrain)
 var natural_edges := true        # terrain borders wander (off: crisp hex borders)
+var show_steps := true           # elevation step lines along hex edges (every STEP_M)
 var plan_mode := PLAN_OFF        # the planning mode shown
 var plan_built := -1             # the whole-map mode whose tint image is loaded
 var plan_build_ms := 0.0
@@ -138,6 +143,9 @@ func update_view(center: Vector2, zoom: float, viewport_size: Vector2) -> void:
 	terrain_mat.set_shader_parameter("edge_noise", NATURAL_EDGE_NOISE if natural_edges else 0.0)
 	var grid := clampf((px_per_hex - GRID_MODE_PX) / (GRID_FULL_PX - GRID_MODE_PX), 0.0, 1.0) * GRID_STRENGTH
 	terrain_mat.set_shader_parameter("grid_alpha", grid if show_grid else 0.0)
+	var steps := clampf((px_per_hex - STEP_MODE_PX) / (STEP_FULL_PX - STEP_MODE_PX), 0.0, 1.0) * STEP_STRENGTH
+	terrain_mat.set_shader_parameter("step_m", STEP_M)
+	terrain_mat.set_shader_parameter("step_alpha", steps if show_steps and not show_topo else 0.0)
 	var want_topo := show_topo and has_relief()
 	topo_lod = 0 if px_per_hex >= TOPO_CLOSE_PX else (1 if px_per_hex >= TOPO_FAR_PX else 2)
 	terrain_mat.set_shader_parameter("contour_interval", [20.0, 100.0, 500.0][topo_lod] if want_topo else 0.0)
