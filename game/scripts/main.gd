@@ -95,6 +95,23 @@ var oob_under := {}                # unit id -> true: under a selected commander
 const SF_GROUP := 20
 const SF_ROLE := 21
 var event_log: Array = []
+# Playability pass: alerts strip, box select, control groups.
+const ALERT_KINDS := [
+	["fire", "Under fire", "Fired at in the last 15 minutes."],
+	["pinned", "Pinned", "Suppressed and gone to ground: won't move forward, spots at half range."],
+	["hit", "Badly hit", "Half or more of its vehicles, guns or squads knocked out."],
+	["ammo", "Low ammo", "Ammunition under 30%: resupply soon."],
+	["fuel", "Low fuel", "Fuel under 30%: resupply soon."],
+	["morale", "Shaken", "Morale under 30: may break and fall back on its own."],
+	["cut", "Cut off", "No commander in reach, or orders only by courier: orders are slow."]]
+var alerts := {}                   # alert kind -> Array of own unit ids, worst first
+var alert_cycle := {}              # alert kind -> index of the unit a click on it jumps to next
+var alert_timer := 0.0
+var box_selecting := false         # left button down on the map: a drag draws a selection box
+var box_rect := Rect2()            # screen rectangle of the box being drawn
+var control_groups := {}           # 1..9 -> Array of own unit ids (Ctrl+number stores, the number recalls)
+var last_recall := {"n": -1, "t": 0}
+var cursor_shape := Input.CURSOR_ARROW # crosshair while an order is armed
 var dragging := false
 var drag_moved := false
 var drag_start := Vector2.ZERO
@@ -158,6 +175,8 @@ func _ready() -> void:
 	hud.end_choice.connect(_on_end_choice)
 	hud.save_path = SAVE_FILE
 	hud.event_clicked.connect(func(p: Vector2) -> void: camera.position = p)
+	hud.event_picked.connect(_on_event_picked)
+	hud.alert_picked.connect(_on_alert_picked)
 	hud.oob_pick.connect(_on_oob_pick)
 
 	# Let the loading text draw before the heavy work starts.
@@ -425,6 +444,10 @@ func _process(delta: float) -> void:
 	map_view.update_view(camera.get_screen_center_position(), camera.zoom.x, get_viewport_rect().size)
 	overlay.queue_redraw()
 	tools.queue_redraw()
+	var want := Input.CURSOR_CROSS if move_mode >= 0 and not selected.is_empty() else Input.CURSOR_ARROW
+	if want != cursor_shape:
+		cursor_shape = want
+		Input.set_default_cursor_shape(want)
 
 	hud_timer -= delta
 	if hud_timer <= 0.0:
@@ -438,6 +461,11 @@ func _process(delta: float) -> void:
 		_refresh_selection_panel()
 		_refresh_oob()
 		_check_outcome()
+		alert_timer -= 0.1
+		if alert_timer <= 0.0:
+			alert_timer = 0.5
+			_update_alerts()
+		hud.update_hover_card()
 		if sandbox_mode:
 			_refresh_sandbox_panel()
 	script_ms = script_ms * 0.9 + 0.1 * ((Time.get_ticks_usec() - _t_start) / 1000.0 + overlay.draw_ms)
@@ -695,17 +723,29 @@ func _unhandled_input(event: InputEvent) -> void:
 			if selected.size() == 1 and not _select_team_of(selected[0]):
 				_select_company_of(selected[0])
 			dragging = false
-		elif mb.button_index == MOUSE_BUTTON_LEFT or mb.button_index == MOUSE_BUTTON_MIDDLE:
+		elif mb.button_index == MOUSE_BUTTON_LEFT:
+			# Left: a click selects (Shift adds or removes); a drag draws a selection box
+			# (Shift adds to the selection). The map pans with the middle button or the keys.
+			if mb.pressed:
+				box_selecting = true
+				drag_moved = false
+				drag_start = mb.position
+				box_rect = Rect2(mb.position, Vector2.ZERO)
+			elif box_selecting:
+				box_selecting = false
+				if drag_moved:
+					_box_select(box_rect.abs(), mb.shift_pressed)
+				elif sbx_tool != "":
+					_sandbox_click(mb.position)
+				else:
+					_click_select(mb.position, mb.shift_pressed)
+				box_rect = Rect2()
+		elif mb.button_index == MOUSE_BUTTON_MIDDLE:
 			if mb.pressed:
 				dragging = true
 				drag_moved = false
 				drag_start = mb.position
 			else:
-				if mb.button_index == MOUSE_BUTTON_LEFT and not drag_moved:
-					if sbx_tool != "":
-						_sandbox_click(mb.position)
-					else:
-						_click_select(mb.position, mb.shift_pressed)
 				dragging = false
 		elif mb.button_index == MOUSE_BUTTON_RIGHT and mb.pressed:
 			# Shift+right-click plots a waypoint; an armed order (F/Q/E/R or the panel) goes at
@@ -718,13 +758,18 @@ func _unhandled_input(event: InputEvent) -> void:
 				_open_order_menu(mb.position)
 	elif event is InputEventMouseMotion:
 		var mm := event as InputEventMouseMotion
-		if dragging:
+		if box_selecting:
+			if (mm.position - drag_start).length() > 4.0:
+				drag_moved = true
+			box_rect = Rect2(drag_start, mm.position - drag_start)
+		elif dragging:
 			if (mm.position - drag_start).length() > 4.0:
 				drag_moved = true
 			if drag_moved:
 				camera.position -= mm.relative / camera.zoom.x
 		_update_status()
 		_update_route_preview()
+		hud.update_hover_card()
 	elif event is InputEventKey and event.pressed and not event.echo:
 		var ke := event as InputEventKey
 		if ke.shift_pressed and tools.shift_key(ke.keycode):
@@ -732,17 +777,21 @@ func _unhandled_input(event: InputEvent) -> void:
 		if ke.shift_pressed and ke.keycode == KEY_DELETE:
 			_sandbox_set_tool("delete")
 			return
+		var num := _digit(ke.keycode)
+		if num > 0 and ke.ctrl_pressed:
+			_store_group(num)
+			return
+		if num > 0:
+			_recall_group(num)
+			return
 		_on_key(ke.keycode)
 
 
 func _on_key(key: Key) -> void:
 	match key:
 		KEY_SPACE: set_speed(0 if speed_index > 0 else last_speed)
-		KEY_1: set_speed(1)
-		KEY_2: set_speed(2)
-		KEY_3: set_speed(3)
-		KEY_4: set_speed(4)
-		KEY_5: set_speed(5)
+		KEY_EQUAL, KEY_PLUS, KEY_KP_ADD: _speed_step(1)
+		KEY_MINUS, KEY_KP_SUBTRACT: _speed_step(-1)
 		KEY_PERIOD: _step_15()
 		KEY_H: _order_hold()
 		KEY_G: _on_toggle("Grid")
@@ -969,6 +1018,8 @@ func _on_menu_action(name: String) -> void:
 			camera.zoom = Vector2.ONE * clampf(get_viewport_rect().size.x / world.get_world_size().x * 0.95, ZOOM_MIN, ZOOM_MAX)
 		"next_unit": _select_next()
 		"step": _step_15()
+		"faster": _speed_step(1)
+		"slower": _speed_step(-1)
 
 
 ## Esc: close a dialog, else cancel an armed order, else open or close the pause menu.
@@ -1173,6 +1224,182 @@ func _click_select(screen_pos: Vector2, add: bool) -> void:
 			selected.append(best)
 	else:
 		selected = [best]
+
+
+## Selects the own units whose counters lie inside a screen rectangle (left-drag).
+## With `add` (Shift), they join the selection; without, they replace it.
+func _box_select(r: Rect2, add: bool) -> void:
+	if r.size.x < 4.0 and r.size.y < 4.0:
+		return
+	var xf := get_viewport().get_canvas_transform()
+	var hits: Array[int] = []
+	if overlay.grouping_active():
+		for g in overlay.groups:
+			if int(g.get("side", 0)) == 0 and r.has_point(g["pos"]):
+				for id in g["ids"]:
+					hits.append(int(id))
+	for i in snapshot.size() / stride:
+		var o := i * stride
+		if int(snapshot[o + 1]) != 0:
+			continue
+		var id := int(snapshot[o])
+		if hits.has(id):
+			continue
+		if r.has_point(xf * display_position(id)):
+			hits.append(id)
+	if hits.is_empty():
+		if not add:
+			selected.clear()
+		return
+	selected_holding = -1
+	if not add:
+		selected.clear()
+	for id in hits:
+		if not selected.has(id):
+			selected.append(id)
+	hud.show_toast("%d unit%s selected." % [selected.size(), "" if selected.size() == 1 else "s"], 2.0)
+
+
+## + and -: one speed faster or slower (- from the slowest pauses; + from pause resumes at 1 min).
+func _speed_step(d: int) -> void:
+	set_speed(clampi(speed_index + d, 0, SPEEDS.size() - 1))
+
+
+## 1..9 for the number keys (top row or keypad), else 0.
+func _digit(k: Key) -> int:
+	if k >= KEY_1 and k <= KEY_9:
+		return int(k - KEY_1) + 1
+	if k >= KEY_KP_1 and k <= KEY_KP_9:
+		return int(k - KEY_KP_1) + 1
+	return 0
+
+
+## Ctrl+number: the own units selected become control group `n` (an empty selection clears it).
+func _store_group(n: int) -> void:
+	var own := _own_selected()
+	if own.is_empty():
+		control_groups.erase(n)
+		hud.show_toast("Group %d cleared." % n, 2.0)
+	else:
+		control_groups[n] = own.duplicate()
+		hud.show_toast("Group %d: %d unit%s. %d selects them, twice to centre." % [n, own.size(), "" if own.size() == 1 else "s", n], 3.0)
+	hud.set_control_groups(_group_summary())
+
+
+## A number key: selects control group `n`; pressing it again within half a second centres on it.
+func _recall_group(n: int) -> void:
+	var ids: Array[int] = []
+	for id in control_groups.get(n, []):
+		if disp_row.has(int(id)):
+			ids.append(int(id))
+	if ids.is_empty():
+		hud.show_toast("Group %d is empty. Ctrl+%d stores the selection." % [n, n], 2.5)
+		return
+	control_groups[n] = ids
+	selected = ids
+	selected_holding = -1
+	var now := Time.get_ticks_msec()
+	if int(last_recall["n"]) == n and now - int(last_recall["t"]) < 500:
+		camera.position = _centre_of(ids)
+	last_recall = {"n": n, "t": now}
+	hud.set_control_groups(_group_summary())
+
+
+## Group number -> unit count, for the strip under the top bar.
+func _group_summary() -> Dictionary:
+	var out := {}
+	for n in control_groups:
+		var c := 0
+		for id in control_groups[n]:
+			if disp_row.has(int(id)):
+				c += 1
+		if c > 0:
+			out[n] = c
+	return out
+
+
+func _centre_of(ids: Array) -> Vector2:
+	var sum := Vector2.ZERO
+	for id in ids:
+		sum += display_position(int(id))
+	return sum / maxf(1.0, ids.size())
+
+
+## The alerts strip: own units that need attention, by kind. Snapshot fields where they
+## exist; ammo and fuel from the unit's info (a few dozen units, twice a second).
+func _update_alerts() -> void:
+	var now := world.get_time_minutes()
+	var out := {}
+	for k in ALERT_KINDS:
+		out[k[0]] = []
+	for i in snapshot.size() / stride:
+		var o := i * stride
+		if int(snapshot[o + 1]) != 0:
+			continue
+		if stride > 35 and snapshot[o + 35] > 0.5:
+			continue # a town's militia takes no orders
+		var id := int(snapshot[o])
+		if now - snapshot[o + 16] < 15.0:
+			out["fire"].append(id)
+		if stride > 34 and snapshot[o + 34] >= 1000.0:
+			out["pinned"].append(id)
+		var em := int(snapshot[o + 19])
+		var ea := int(snapshot[o + 18])
+		if em > 0 and ea * 2 <= em:
+			out["hit"].append(id)
+		if snapshot[o + 8] < 30.0:
+			out["morale"].append(id)
+		var link := int(snapshot[o + 26])
+		if link == 0 or link == 3:
+			out["cut"].append(id)
+		var info: Dictionary = world.get_unit_info(id)
+		if info.is_empty():
+			continue
+		if float(info.get("ammo", 100.0)) < 30.0:
+			out["ammo"].append(id)
+		if float(info.get("fuel", 100.0)) < 30.0:
+			out["fuel"].append(id)
+	alerts = out
+	var shown: Array = []
+	for k in ALERT_KINDS:
+		var ids: Array = out[k[0]]
+		if ids.is_empty():
+			continue
+		var names: Array[String] = []
+		for id in ids:
+			names.append(short_name(int(id)))
+		shown.append({"kind": k[0], "label": k[1], "count": ids.size(),
+			"tip": "%s\n%s\nClick to jump to the next one." % [k[2], ", ".join(names)]})
+	hud.set_alerts(shown)
+
+
+## A click on an alert: select the next unit of that kind and centre the map on it.
+func _on_alert_picked(kind: String) -> void:
+	var ids: Array = alerts.get(kind, [])
+	if ids.is_empty():
+		return
+	var i := int(alert_cycle.get(kind, 0)) % ids.size()
+	alert_cycle[kind] = i + 1
+	var id := int(ids[i])
+	selected = [id]
+	selected_holding = -1
+	camera.position = display_position(id)
+	if camera.zoom.x < 0.03:
+		camera.zoom = Vector2.ONE * 0.045 # out of the theater view, so the unit's counter shows
+
+
+## A click on a report: centre on it and select the unit it is about, if it is on the map.
+func _on_event_picked(e: Dictionary) -> void:
+	if e.has("pos"):
+		camera.position = e["pos"]
+	var id := int(e.get("unit", -1))
+	if id >= 0 and disp_row.has(id):
+		selected = [id]
+		selected_holding = -1
+		if not e.has("pos"):
+			camera.position = display_position(id)
+	if e.has("pos"):
+		pings.append({"pos": e["pos"], "t": Time.get_ticks_msec(), "color": Color(1, 1, 1)})
 
 
 func _select_next() -> void:
@@ -2156,6 +2383,9 @@ func _run_uitest() -> void:
 	hud.menu_action.emit("start")
 	await _frames(2)
 	check.call(not hud.title_screen.visible and not hud.is_modal(), "New campaign leaves the title screen")
+	await _frames(2)
+	_update_alerts()
+	print("UITEST info  alerts at the start: ", alerts, " ", short_name(6), " ", short_name(7))
 
 	# Right-click a hex with the whole company selected: the order menu opens; pick Road march here.
 	_select_company_of(0)
@@ -2996,6 +3226,122 @@ func _run_uitest() -> void:
 		"the unit panel says when they should arrive")
 	_on_command("reinforce")
 	check.call(hud.toast.text.begins_with("Nothing to ask for"), "a second request while one is on its way is refused")
+
+	# Playability pass: alerts strip, clickable reports, box select, control groups, hover card.
+	_update_alerts()
+	var any_kind := ""
+	for k in ALERT_KINDS:
+		if not (alerts.get(k[0], []) as Array).is_empty():
+			any_kind = k[0]
+			break
+	print("UITEST info  alerts: ", alerts)
+	check.call(alerts.has("fire") and alerts.has("ammo") and alerts.has("cut"), "the alerts cover every kind")
+	check.call(any_kind != "" and hud.alerts_panel.visible and hud.alerts_row.get_child_count() >= 2,
+		"after the sandbox fight the attention strip shows (%s)" % any_kind)
+	if any_kind != "":
+		selected = []
+		camera.position = Vector2.ZERO
+		hud.alert_picked.emit(any_kind)
+		var first_id := int(alerts[any_kind][0])
+		check.call(selected == [first_id] and camera.position.distance_to(display_position(first_id)) < 1.0,
+			"clicking an alert selects its unit and centres on it")
+	var ev := {}
+	for e in event_log:
+		if int(e.get("unit", -1)) >= 0 and disp_row.has(int(e["unit"])) and e.has("pos"):
+			ev = e
+			break
+	check.call(not ev.is_empty(), "a report about a unit on the map")
+	if not ev.is_empty():
+		selected = []
+		hud.event_picked.emit(ev)
+		check.call(selected == [int(ev["unit"])] and camera.position == (ev["pos"] as Vector2),
+			"clicking a report centres on it and selects its unit")
+
+	_on_menu_action("centre")
+	camera.position = display_position(0)
+	camera.zoom = Vector2.ONE * 0.045
+	await _frames(3)
+	selected = []
+	_push_left_drag(Vector2(LEFT_DOCK_X + 60, 220), vs - Vector2(420, 140), false)
+	await _frames(2)
+	var boxed := 0
+	for id in selected:
+		if int(world.get_unit_info(id).get("side", 1)) == 0:
+			boxed += 1
+	check.call(boxed >= 3 and boxed == selected.size(), "left-drag box-selects %d own units and no hostiles" % boxed)
+	check.call(not box_selecting, "the box is gone after the release")
+	var before := selected.size()
+	var cam0 := camera.position
+	_push_left_drag(Vector2(LEFT_DOCK_X + 30, 200), Vector2(LEFT_DOCK_X + 50, 215), false)
+	await _frames(2)
+	check.call(selected.is_empty() and camera.position == cam0, "a left-drag over empty map clears the selection and does not pan (was %d)" % before)
+	_push_left_drag(Vector2(LEFT_DOCK_X + 60, 220), vs - Vector2(420, 140), false)
+	await _frames(1)
+	var boxed_n := selected.size()
+	if boxed_n > 1:
+		selected.resize(1)
+	_push_left_drag(Vector2(LEFT_DOCK_X + 60, 220), vs - Vector2(420, 140), true)
+	await _frames(1)
+	check.call(selected.size() == boxed_n, "Shift+drag adds the box to the selection")
+	_push_middle_drag(vs * 0.5, vs * 0.5 + Vector2(100, 0))
+	await _frames(1)
+	check.call(camera.position.x < cam0.x - 1.0, "middle-drag pans the map")
+	camera.position = cam0
+	set_speed(0)
+	_push_key(KEY_EQUAL)
+	await _frames(1)
+	check.call(speed_index == 1, "+ starts the clock at the slowest speed")
+	_push_key(KEY_EQUAL)
+	_push_key(KEY_MINUS)
+	_push_key(KEY_MINUS)
+	await _frames(1)
+	check.call(speed_index == 0, "- steps down to pause")
+
+	selected = [1, 2]
+	_push_mod_key(KEY_3, true, false)
+	await _frames(1)
+	check.call(control_groups.get(3, []) == [1, 2], "Ctrl+3 stores the selection as group 3")
+	check.call(hud.groups_row.get_child_count() >= 2, "the group shows as a chip in the strip")
+	selected = []
+	_push_key(KEY_3)
+	await _frames(1)
+	check.call(selected == [1, 2], "3 selects group 3")
+	check.call(speed_index == 0, "3 no longer changes the speed")
+	camera.position = Vector2.ZERO
+	_push_key(KEY_3)
+	await _frames(1)
+	check.call(camera.position.distance_to(_centre_of([1, 2])) < 1.0, "3 twice centres on the group")
+
+	await _frames(2)
+	var target := {}
+	for dc in overlay.drawn:
+		if int(dc["side"]) == 0:
+			target = dc
+	check.call(not target.is_empty(), "an own counter is drawn")
+	if not target.is_empty():
+		var c: Vector2 = (target["rect"] as Rect2).get_center()
+		Input.warp_mouse(c)
+		var mv := InputEventMouseMotion.new()
+		mv.position = c
+		mv.global_position = c
+		get_viewport().push_input(mv)
+		await _frames(2)
+		hud.update_hover_card()
+		var nm := String(world.get_unit_info(int(target["id"]))["name"])
+		check.call(hud.hover_card.visible and hud.hover_text.get_parsed_text().contains(nm) and hud.hover_text.get_parsed_text().contains("Ammo"),
+			"hovering a counter shows its card (%s)" % nm)
+	check.call(hud._stats_line(80, 50, 20, 100).contains("[table=2]") and hud._stats_line(80, 50, 20, 100).contains("#ff5040"),
+		"morale, fuel, ammo and readiness show as bars, low ones red")
+	selected = [1]
+	_push_key(KEY_E)
+	await _frames(2)
+	check.call(move_mode == 2 and cursor_shape == Input.CURSOR_CROSS, "an armed order turns the cursor into a crosshair")
+	_push_key(KEY_ESCAPE)
+	await _frames(2)
+	check.call(move_mode == -1 and cursor_shape == Input.CURSOR_ARROW, "Esc puts the arrow back")
+	for a in OS.get_cmdline_user_args():
+		if a.begins_with("--uishots="):
+			await _ui_shots(a.substr(10))
 	print("UITEST done: %d passed, %d failed" % [res[0], res[1]])
 	get_tree().quit(1 if res[1] > 0 else 0)
 
@@ -3046,6 +3392,93 @@ func _push_ctrl_drag(a: Vector2, b: Vector2) -> void:
 	rel.position = b
 	rel.global_position = b
 	get_viewport().push_input(rel)
+
+
+const LEFT_DOCK_X := 320.0  # right of the order of battle panel
+
+func _push_mod_key(k: Key, ctrl: bool, alt: bool) -> void:
+	for down in [true, false]:
+		var ev := InputEventKey.new()
+		ev.keycode = k
+		ev.physical_keycode = k
+		ev.ctrl_pressed = ctrl
+		ev.alt_pressed = alt
+		ev.pressed = down
+		get_viewport().push_input(ev)
+
+
+## Left-button drag from a to b (the selection box), Shift held if `shift`.
+func _push_left_drag(a: Vector2, b: Vector2, shift: bool) -> void:
+	_push_drag(MOUSE_BUTTON_LEFT, a, b, shift)
+
+
+func _push_middle_drag(a: Vector2, b: Vector2) -> void:
+	_push_drag(MOUSE_BUTTON_MIDDLE, a, b, false)
+
+
+func _push_drag(button: MouseButton, a: Vector2, b: Vector2, shift: bool) -> void:
+	var press := InputEventMouseButton.new()
+	press.button_index = button
+	press.pressed = true
+	press.shift_pressed = shift
+	press.position = a
+	press.global_position = a
+	get_viewport().push_input(press)
+	var last := a
+	for t in [0.33, 0.66, 1.0]:
+		var mv := InputEventMouseMotion.new()
+		mv.position = a.lerp(b, t)
+		mv.global_position = mv.position
+		mv.relative = mv.position - last
+		last = mv.position
+		mv.shift_pressed = shift
+		mv.button_mask = MOUSE_BUTTON_MASK_LEFT if button == MOUSE_BUTTON_LEFT else MOUSE_BUTTON_MASK_MIDDLE
+		get_viewport().push_input(mv)
+	var rel := InputEventMouseButton.new()
+	rel.button_index = button
+	rel.pressed = false
+	rel.shift_pressed = shift
+	rel.position = b
+	rel.global_position = b
+	get_viewport().push_input(rel)
+
+
+## --uishots=<dir> with --uitest: pictures of the playability pass for the README.
+func _ui_shots(dir: String) -> void:
+	DirAccess.make_dir_recursive_absolute(dir)
+	var cap := func(name: String) -> void:
+		await _frames(4)
+		await RenderingServer.frame_post_draw
+		get_viewport().get_texture().get_image().save_png(dir.path_join(name))
+	camera.position = display_position(0)
+	camera.zoom = Vector2.ONE * 0.06
+	_update_alerts()
+	selected = [0]
+	await _frames(3)
+	var hov := {}
+	for dc in overlay.drawn:
+		if int(dc["side"]) == 0 and int(dc["id"]) != 0:
+			hov = dc
+	if not hov.is_empty():
+		Input.warp_mouse((hov["rect"] as Rect2).get_center())
+		await _frames(2)
+		hud.update_hover_card()
+	await cap.call("53_hover_alerts.png")
+	hud.hover_card.visible = false
+	selected = []
+	var vs := get_viewport_rect().size
+	box_selecting = true
+	drag_moved = true
+	drag_start = Vector2(LEFT_DOCK_X + 140, 200)
+	box_rect = Rect2(drag_start, vs * Vector2(0.55, 0.6) - drag_start)
+	await cap.call("54_box_select.png")
+	box_selecting = false
+	_box_select(box_rect.abs(), false)
+	selected = [1]
+	move_mode = 3
+	Input.warp_mouse(vs * Vector2(0.42, 0.3))
+	await cap.call("55_armed_assault.png")
+	move_mode = -1
 
 
 func _push_click(button: MouseButton, pos: Vector2) -> void:

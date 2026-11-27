@@ -66,6 +66,8 @@ func _draw() -> void:
 	_draw_fx(xf)
 	_draw_pings(xf)
 	_draw_hover(xf)
+	_draw_armed(xf)
+	_draw_box()
 	draw_ms = (Time.get_ticks_usec() - t0) / 1000.0
 
 
@@ -1727,3 +1729,41 @@ func _draw_pings(xf: Transform2D) -> void:
 		var col: Color = p["color"]
 		col.a = 1.0 - age / 3.0
 		draw_arc(s, 12.0 + age * 40.0, 0, TAU, 32, col, 3.0)
+
+
+# --- Playability pass: selection box, armed order -------------------------------------------
+
+## Shift + left-drag: the selection box.
+func _draw_box() -> void:
+	if not main.box_selecting or not main.drag_moved:
+		return
+	var r: Rect2 = main.box_rect.abs()
+	draw_rect(r, Color(1.0, 0.86, 0.5, 0.12), true)
+	draw_rect(r, Color(1.0, 0.86, 0.5, 0.9), false, 1.5)
+
+
+## An armed order (F/Q/E/R or the panel): a line from the selection to the cursor and a tag
+## saying what the next right-click sends, how far, and how to cancel.
+func _draw_armed(xf: Transform2D) -> void:
+	var mode: int = main.move_mode
+	if mode < 0 or main.selected.is_empty() or main.hud.is_menu_open() or main.hud.is_modal():
+		return
+	var own: Array[int] = main._own_selected()
+	if own.is_empty():
+		return
+	var mp := get_local_mouse_position()
+	var from: Vector2 = main._centre_of(own)
+	var a: Vector2 = xf * from
+	var cols := [Color(0.6, 0.85, 1.0), Color(0.75, 0.95, 0.7), Color(1.0, 0.86, 0.5), Color(1.0, 0.45, 0.35)]
+	var col: Color = cols[clampi(mode, 0, 3)]
+	_stroke_route(PackedVector2Array([a, mp]), col, 2.0, 10.0)
+	draw_arc(mp, 9.0, 0.0, TAU, 20, col, 1.6, true)
+	var km: float = from.distance_to(xf.affine_inverse() * mp) / 1000.0
+	var text := "%s · %.1f km · right-click to send · Esc cancels" % [main.MODE_NAMES[mode], km]
+	var fs := 13
+	var w := font.get_string_size(text, HORIZONTAL_ALIGNMENT_LEFT, -1, fs).x
+	var p := mp + Vector2(16, -14)
+	if p.x + w + 10.0 > size.x:
+		p.x = mp.x - w - 26.0
+	draw_rect(Rect2(p - Vector2(5, fs), Vector2(w + 10.0, fs + 8.0)), Color(0.05, 0.06, 0.05, 0.85), true)
+	draw_string(font, p, text, HORIZONTAL_ALIGNMENT_LEFT, -1, fs, col)
