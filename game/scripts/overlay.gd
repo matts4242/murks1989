@@ -47,7 +47,6 @@ func _draw() -> void:
 		_draw_zones(xf, zoom)
 	if main.map_view.show_topo and not main.map_view.relief_labels.is_empty():
 		_draw_topo(xf, zoom, view)
-	_draw_towns(xf, zoom, view)
 	if main.show_los:
 		_draw_los(xf, zoom)
 	if main.plan_mode == MapView.PLAN_SIGHT:
@@ -62,6 +61,7 @@ func _draw() -> void:
 	_draw_orders(xf)
 	_draw_civilians(xf, view)
 	_draw_units(xf, view)
+	_draw_towns(xf, zoom, view)   # after the counters, so a counter never hides a town's name
 	_draw_net_outlines()
 	_draw_fx(xf)
 	_draw_pings(xf)
@@ -168,9 +168,31 @@ func _draw_towns(xf: Transform2D, zoom: float, view: Rect2) -> void:
 		if px < 8.0:
 			draw_circle(s, dot_r + 1.0, Color(0, 0, 0, 0.7))
 			draw_circle(s, dot_r, Color(1, 1, 1, 0.9))
-		var p := s + Vector2(6, -6)
-		draw_string_outline(font, p, town_names[i], HORIZONTAL_ALIGNMENT_LEFT, -1, fs, 4, Color(1, 1, 0.94, 0.85))
-		draw_string(font, p, town_names[i], HORIZONTAL_ALIGNMENT_LEFT, -1, fs, Color(0.12, 0.10, 0.08))
+		# The name goes up and right of the place, or the first of a few other spots that no
+		# counter or holding flag covers (the counters are already drawn by now).
+		var tname: String = town_names[i]
+		var tsz := font.get_string_size(tname, HORIZONTAL_ALIGNMENT_LEFT, -1, fs)
+		var spots := [Vector2(6, -6), Vector2(-tsz.x * 0.5, -px * 0.6 - 4.0), Vector2(-tsz.x * 0.5, px * 0.6 + tsz.y),
+			Vector2(-tsz.x - 6, -6), Vector2(6, tsz.y + 2)]
+		var p: Vector2 = s + spots[0]
+		for off in spots:
+			var q: Vector2 = s + off
+			if not _covered(Rect2(q + Vector2(-2, -tsz.y * 0.8), Vector2(tsz.x + 4, tsz.y))):
+				p = q
+				break
+		draw_string_outline(font, p, tname, HORIZONTAL_ALIGNMENT_LEFT, -1, fs, 4, Color(1, 1, 0.94, 0.85))
+		draw_string(font, p, tname, HORIZONTAL_ALIGNMENT_LEFT, -1, fs, Color(0.12, 0.10, 0.08))
+
+
+## True when a screen rectangle overlaps a counter or holding flag drawn this frame.
+func _covered(r: Rect2) -> bool:
+	for d in drawn:
+		if r.intersects((d["rect"] as Rect2).grow(3.0)):
+			return true
+	for d in drawn_holdings:
+		if r.intersects(d["rect"] as Rect2):
+			return true
+	return false
 
 
 # --- Units -------------------------------------------------------------------------
@@ -185,7 +207,7 @@ const SIDE_COL := [Color("#2c5ea8"), Color("#b0342b"), Color("#6e3f96")]
 const BOX_PAPER := Color("#f4f2ea")
 const SYMBOL_INK := Color("#141712")
 const SIGNAL := Color("#d39a17")
-const MIN_COUNTER := 10.0
+const MIN_COUNTER := 26.0          # never smaller: the symbol and strength figure stay readable
 const THEATER_COUNTER := 22.0
 const COMPANY_COUNTER := 28.0
 const ECHELONS := ["coy", "plt", "plt", "plt", "sec", "btty", "col"] # by unit type (col: a supply column)
@@ -228,10 +250,11 @@ func hex_px() -> float:
 
 
 ## Counter side length: a fixed share of the hex (0.9 x the hex corner radius, about half
-## the hex's width), so a counter and its pips always sit inside their own hex. Below
-## MIN_COUNTER pixels it stops shrinking; that still fits the hex down to 14 px per hex,
-## where company grouping takes over. Only with grouping switched off, further out than
-## that, is a counter larger than its hex (nothing could be shown otherwise).
+## the hex's width), so a counter and its pips sit inside their own hex close in. Below
+## MIN_COUNTER pixels (about 50 px per hex) it stops shrinking, so the symbol, strength
+## figure and order badge stay readable at playing zoom; counters in neighbouring hexes
+## then share screen space and fan out as a stack until company grouping takes over at
+## 14 px per hex.
 func counter_size() -> float:
 	return maxf(hex_px() * 0.9, MIN_COUNTER)
 
@@ -281,7 +304,7 @@ func _draw_units(xf: Transform2D, view: Rect2) -> void:
 	var stride: int = main.stride
 	var n := snap.size() / stride
 	var s := counter_size()
-	var by_hex := hex_px() * 1.7 >= s * 0.75 # hexes big enough to hold their own stack
+	var by_hex := hex_px() * 1.7 >= s * 1.05 # hexes wider than a counter hold their own stack
 	var stacks := {}
 	for i in n:
 		var o := i * stride
@@ -292,7 +315,14 @@ func _draw_units(xf: Transform2D, view: Rect2) -> void:
 		if by_hex:
 			key = Vector2i(roundi(snap[o + 3] / 50.0), roundi(snap[o + 4] / 50.0)) # the hex the unit is in
 		else:
-			key = Vector2i(floori(sp.x / (s * 0.6)), floori(sp.y / (s * 0.6)))
+			# Hexes too small for a counter: units closer on screen than about a counter
+			# join one stack (by distance, so two units a pixel apart never fall into
+			# different cells of a grid and overlap as two stacks).
+			key = Vector2i(roundi(sp.x), roundi(sp.y))
+			for k0 in stacks.keys():
+				if ((stacks[k0][0]["pos"]) as Vector2).distance_to(sp) < s * 0.9:
+					key = k0
+					break
 		var item := _row_item(o, i)
 		item["pos"] = sp
 		if not stacks.has(key):
@@ -312,8 +342,18 @@ func _draw_units(xf: Transform2D, view: Rect2) -> void:
 		var m: int = st.size()
 		var ss := s * maxf(0.7, 1.0 - 0.08 * (m - 1))
 		var step := minf(ss * 0.16, (s * 1.25 - ss) / maxf(1.0, m - 1.0))
+		# One order-delay tag per stack (the longest wait) and, in a fanned stack, the name
+		# and pips of the top counter only, so the text under a stack doesn't pile up.
+		var wait := -1.0
+		for it2 in st:
+			wait = maxf(wait, float(it2["order_in"]))
 		for k in m:
 			var it: Dictionary = st[k]
+			if m > 1:
+				it["order_in"] = wait if k == m - 1 else -1.0
+				if k < m - 1:
+					it["no_label"] = true
+					it["no_pips"] = true
 			var off := (k - (m - 1) * 0.5) * step
 			var c: Vector2 = (it["pos"] as Vector2) + Vector2(off, -off)
 			_draw_counter(c, ss, it)
@@ -346,6 +386,14 @@ func _outline(pts: PackedVector2Array, col: Color, w: float) -> void:
 	draw_polyline(closed, col, w, true)
 
 
+## Text centred on x with its baseline at p.y, on a dark halo so it reads on any ground.
+func _text_halo(p: Vector2, text: String, fs: int, col: Color) -> void:
+	var tw := font.get_string_size(text, HORIZONTAL_ALIGNMENT_LEFT, -1, fs).x
+	var lp := Vector2(p.x - tw * 0.5, p.y)
+	draw_string_outline(font, lp, text, HORIZONTAL_ALIGNMENT_LEFT, -1, fs, 4, Color(0, 0, 0, 0.85))
+	draw_string(font, lp, text, HORIZONTAL_ALIGNMENT_LEFT, -1, fs, col)
+
+
 func _text_center(p: Vector2, text: String, fs: int, col: Color) -> void:
 	var sz := font.get_string_size(text, HORIZONTAL_ALIGNMENT_LEFT, -1, fs)
 	draw_string(font, p + Vector2(-sz.x * 0.5, sz.y * 0.32), text, HORIZONTAL_ALIGNMENT_LEFT, -1, fs, col)
@@ -357,6 +405,7 @@ func _draw_counter(c: Vector2, s: float, it: Dictionary) -> void:
 	var rad := maxf(1.5, s * 0.11)
 	var ghost: bool = it["ghost"]
 	var side: int = it["side"]
+	var below_y := c.y + h + 2.0 # the next free line under the counter (pips, name, tags)
 	var fill: Color = SIDE_COL[clampi(side, 0, 2)]
 	var shape := _rrect(c, s, rad)
 	if ghost:
@@ -400,8 +449,9 @@ func _draw_counter(c: Vector2, s: float, it: Dictionary) -> void:
 			var ea0: int = it["elem"]
 			var cc := Color.WHITE if ea0 >= em else (Color("#ffcc4d") if ea0 * 2 >= em else Color("#ff6b4a"))
 			draw_string(font, Vector2(c.x - h + s * 0.08, c.y + h - s * 0.07), str(ea0),
-				HORIZONTAL_ALIGNMENT_LEFT, -1, int(s * 0.27), cc)
+				HORIZONTAL_ALIGNMENT_LEFT, -1, maxi(10, int(s * 0.27)), cc)
 		if em > 0 and s >= 18.0 and not it.get("no_pips", false):
+			below_y = c.y + h + 3.0 + clampf(s * 0.11, 4.0, 9.0) + 2.0
 			var ea: int = it["elem"]
 			var pw := clampf(s * 0.11, 4.0, 9.0)
 			var gap := pw * 1.4
@@ -417,12 +467,11 @@ func _draw_counter(c: Vector2, s: float, it: Dictionary) -> void:
 					draw_rect(r, Color(0, 0, 0, 0.35))
 					draw_rect(r, Color(1, 1, 1, 0.9), false, 1.0)
 		var label: String = it["label"]
-		if label != "" and s >= 40.0:
+		if label != "" and s >= 40.0 and not it.get("no_label", false):
 			var fs := maxi(10, int(s * 0.22))
-			var tw := font.get_string_size(label, HORIZONTAL_ALIGNMENT_LEFT, -1, fs).x
-			var lp := Vector2(c.x - tw * 0.5, c.y + h + fs + clampf(s * 0.11, 4.0, 9.0) + 6.0)
-			draw_string_outline(font, lp, label, HORIZONTAL_ALIGNMENT_LEFT, -1, fs, 3, Color(0, 0, 0, 0.8))
-			draw_string(font, lp, label, HORIZONTAL_ALIGNMENT_LEFT, -1, fs, Color.WHITE)
+			below_y += fs
+			_text_halo(Vector2(c.x, below_y), label, fs, Color.WHITE)
+			below_y += 3.0
 	# Under fire: a bar along the top edge, red when hit in the last two minutes.
 	var fire: float = it["fire"]
 	if not ghost and fire > 0.05:
@@ -450,10 +499,10 @@ func _draw_counter(c: Vector2, s: float, it: Dictionary) -> void:
 			draw_string(font, Vector2(c.x - h, c.y - h - s * 0.1), "PIN", HORIZONTAL_ALIGNMENT_LEFT, -1, pfs, bc)
 	# A supply column: tonnes aboard bottom right (or "empty"), and the leg it is on as its badge.
 	var cv: int = it.get("convoy", -1)
-	if cv >= 0 and s >= 22.0 and not ghost:
+	if cv >= 0 and s >= 40.0 and not ghost:
 		var cargo: float = it.get("cargo", 0.0)
 		var ct := ("%.0f t" % cargo) if cargo >= 0.95 else ("%.1f t" % cargo if cargo > 0.05 else "empty")
-		var cfs := int(s * 0.2)
+		var cfs := maxi(9, int(s * 0.2))
 		var cw := font.get_string_size(ct, HORIZONTAL_ALIGNMENT_LEFT, -1, cfs).x
 		draw_string(font, Vector2(c.x + h - s * 0.08 - cw, c.y + h - s * 0.07), ct, HORIZONTAL_ALIGNMENT_LEFT, -1, cfs,
 			Color("#c8f0a0") if cargo > 0.05 else Color(0.85, 0.85, 0.8))
@@ -461,7 +510,7 @@ func _draw_counter(c: Vector2, s: float, it: Dictionary) -> void:
 	var carry: int = it.get("carry", -1)
 	if carry > 0 and s >= 22.0 and not ghost:
 		var ct := "+%d" % carry
-		var cfs := int(s * 0.24)
+		var cfs := maxi(9, int(s * 0.24))
 		var cw := font.get_string_size(ct, HORIZONTAL_ALIGNMENT_LEFT, -1, cfs).x
 		draw_string(font, Vector2(c.x + h - s * 0.08 - cw, c.y + h - s * 0.07), ct, HORIZONTAL_ALIGNMENT_LEFT, -1, cfs, Color("#c8f0a0"))
 	# Order badge: M move, R road march, D deliberate, A assault, F falling back, G regroup, S rest, E embarking.
@@ -492,15 +541,13 @@ func _draw_counter(c: Vector2, s: float, it: Dictionary) -> void:
 	var sel_tag: bool = it.get("sel", false) and main.selected.size() <= 4 # a whole company selected stays uncluttered
 	if not sel_tag and int(it.get("so_set", -1)) == 255:
 		so = 0
-	if (roe > 0 or so > 0) and not ghost:
+	if (roe > 0 or so > 0) and not ghost and not it.get("no_label", false):
 		var tag := ""
 		if roe > 0:
 			tag = "RET FIRE" if roe == 1 else "HOLD FIRE"
 		if so > 0:
 			tag += (" " if tag != "" else "") + "S/O %.1fkm" % (so * 0.5)
-		var tp := Vector2(c.x - h, c.y + h + (20.0 if s < 44.0 else s * 0.2 + 24.0))
-		draw_string_outline(font, tp, tag, HORIZONTAL_ALIGNMENT_LEFT, -1, 9, 3, Color(0, 0, 0, 0.85))
-		draw_string(font, tp, tag, HORIZONTAL_ALIGNMENT_LEFT, -1, 9, Color(1.0, 0.8, 0.45))
+		_text_halo(Vector2(c.x, below_y + 10.0), tag, 10, Color(1.0, 0.8, 0.45))
 	# Team colour: a frame in the team's colour (thinner and dashed-looking when the member
 	# has left the formation on its own orders); the leader carries a pennant in it.
 	var tcol: int = it.get("tcol", -1)
@@ -1235,6 +1282,7 @@ func _signal_tag(p: Vector2, text: String) -> void:
 func _draw_orders(xf: Transform2D) -> void:
 	var w := clampf(hex_px() * 0.1, 2.0, 6.0)
 	var own_col: Color = SIDE_COL[0].lightened(0.35)
+	var pending_tags := [] # orders on their way: one tag per order kind and place, not one per unit
 	for id in main.selected:
 		var info: Dictionary = main.world.get_unit_info(id)
 		if info.is_empty() or not info.get("alive", false) or int(info["side"]) != 0:
@@ -1262,7 +1310,18 @@ func _draw_orders(xf: Transform2D) -> void:
 				_stroke_route(PackedVector2Array([start, to]), own_col, w * 0.9, 8.0)
 			else:
 				to = start
-			_signal_tag(to, "%s +%d′" % ["Adjust" if info.get("pending_adjust", false) else info.get("pending_kind", "Order"), int(info.get("pending_in", 0))])
+			var kind: String = "Adjust" if info.get("pending_adjust", false) else String(info.get("pending_kind", "Order"))
+			var mins := int(info.get("pending_in", 0))
+			var merged := false
+			for pt in pending_tags:
+				if pt["kind"] == kind and (pt["pos"] as Vector2).distance_to(to) < 60.0:
+					pt["lo"] = mini(int(pt["lo"]), mins)
+					pt["hi"] = maxi(int(pt["hi"]), mins)
+					pt["n"] = int(pt["n"]) + 1
+					merged = true
+					break
+			if not merged:
+				pending_tags.append({"pos": to, "kind": kind, "lo": mins, "hi": mins, "n": 1})
 		# Waypoints still ahead (MRK-20): numbered markers, and the later legs as straight
 		# lines styled by their move mode (the leg under way is the path above).
 		var route: Array = info.get("route", [])
@@ -1280,6 +1339,10 @@ func _draw_orders(xf: Transform2D) -> void:
 				_signal_tag(start, "Route paused: %s" % why)
 			elif info.has("route_halt_in"):
 				_signal_tag(start, "Halt %d′" % int(info["route_halt_in"]))
+	for pt in pending_tags:
+		var when := ("+%d′" % int(pt["lo"])) if pt["lo"] == pt["hi"] else ("+%d–%d′" % [int(pt["lo"]), int(pt["hi"])])
+		var who := "" if int(pt["n"]) == 1 else "  ×%d" % int(pt["n"])
+		_signal_tag(pt["pos"], "%s %s%s" % [pt["kind"], when, who])
 	_draw_route_draft(xf, w, own_col)
 
 

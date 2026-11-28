@@ -53,7 +53,8 @@ const VIEW_GROUPS := [
 		["Topo", "Topographic map: contour lines and heights", KEY_F8],
 		["Detail", "Painted terrain textures (off: flat colours)", KEY_F6],
 		["Edges", "Natural terrain edges (off: crisp hex borders)", 0],
-		["Steps", "Elevation step lines (every 50 m)", 0]]],
+		["Tint", "Elevation tint (higher ground lighter)", 0],
+		["Steps", "Elevation step lines", 0]]],
 	["Units", [["Group", "Company grouping on the theater map", KEY_O],
 		["Vehicles", "Vehicles on counters (off: NATO symbols)", KEY_F7],
 		["Civilians", "Civilian traffic and services", KEY_F12]]],
@@ -1329,7 +1330,7 @@ func _mounted_line(info: Dictionary) -> String:
 			return mi + "%d aboard (%d men each) · Dismount: , key\n" % [int(info["squads_aboard"]), int(info["squad_men"])]
 		if info.get("squads_out", false):
 			var walking := " · walking back to mount up" if info.get("squads_mounting", false) else ""
-			return mi + "%d on foot as %s, %.1f km away%s\n" % [int(info["squads_count"]), info["squads_name"], float(info["squads_km"]), walking]
+			return mi + "%d on foot as %s, %s%s\n" % [int(info["squads_count"]), info["squads_name"], _km_away(float(info["squads_km"])), walking]
 		return mi + "[color=#ff6b4a]all lost[/color]\n"
 	if info.has("carrier_name"):
 		if not info.get("carrier_alive", false):
@@ -1337,8 +1338,13 @@ func _mounted_line(info: Dictionary) -> String:
 		if info.get("mounting", false):
 			return mi + "walking back to %s, %.1f km, to mount up\n" % [info["carrier_name"], float(info["carrier_km"])]
 		var fits := "" if info.get("can_mount", false) else "  [color=#ff6b4a](too few vehicles left to mount)[/color]"
-		return mi + "dismounted from %s (%d vehicles), %.1f km away%s\n" % [info["carrier_name"], int(info["carrier_vehicles"]), float(info["carrier_km"]), fits]
+		return mi + "dismounted from %s (%d vehicles), %s%s\n" % [info["carrier_name"], int(info["carrier_vehicles"]), _km_away(float(info["carrier_km"])), fits]
 	return ""
+
+
+## "1.4 km away", or "beside them" when closer than 100 m ("0.0 km away" reads as an error).
+func _km_away(km: float) -> String:
+	return "beside them" if km < 0.1 else "%.1f km away" % km
 
 
 ## Replacements (MRK-10): squads short, and whether the company's pool is filling them.

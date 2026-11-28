@@ -196,6 +196,7 @@ func _start_world() -> void:
 	hud.set_toggle("Detail", map_view.show_detail)
 	hud.set_toggle("Edges", map_view.natural_edges)
 	hud.set_toggle("Steps", map_view.show_steps)
+	hud.set_toggle("Tint", map_view.show_tint)
 	hud.set_toggle("Vehicles", overlay.show_vehicles)
 	hud.set_toggle("Civilians", show_civilians)
 	hud.set_toggle("Topo", map_view.show_topo)
@@ -809,8 +810,13 @@ func _on_toggle(name: String) -> void:
 		"Steps":
 			map_view.show_steps = not map_view.show_steps
 			hud.set_toggle(name, map_view.show_steps)
-			hud.show_toast("Elevation step lines: a line along each hex edge where the ground steps up %d m." % int(MapView.STEP_M) if map_view.show_steps
-				else "Elevation step lines off.")
+			hud.show_toast("Elevation step lines: a line on the higher side of each hex edge where the ground steps up a band (25 m in flat country, up to 200 m in mountains)." if map_view.show_steps
+				else "Elevation step lines off.", 5.0)
+		"Tint":
+			map_view.show_tint = not map_view.show_tint
+			hud.set_toggle(name, map_view.show_tint)
+			hud.show_toast("Elevation tint: ground higher than the country around it is lighter, lower ground darker." if map_view.show_tint
+				else "Elevation tint off.", 5.0)
 		"Edges":
 			map_view.natural_edges = not map_view.natural_edges
 			hud.set_toggle(name, map_view.natural_edges)
@@ -2292,13 +2298,12 @@ func _run_uitest() -> void:
 	_on_toggle("Edges")
 	await _frames(2)
 	check.call(map_view.natural_edges and float(tmat.get_shader_parameter("edge_noise")) > 0.0, "natural edges back on")
-	check.call(float(tmat.get_shader_parameter("step_alpha")) > 0.0 and float(tmat.get_shader_parameter("step_m")) == 50.0,
-		"elevation step lines show at 40 px per hex, every 50 m")
+	check.call(float(tmat.get_shader_parameter("step_alpha")) > 0.0, "elevation step lines show at 40 px per hex")
 	await RenderingServer.frame_post_draw
 	var stepped := get_viewport().get_texture().get_image()
 	view.show_popup()
 	await _frames(2)
-	check.call(_menu_pick(view.get_popup(), "Elevation step lines (every 50 m)"), "View menu has Elevation step lines")
+	check.call(_menu_pick(view.get_popup(), "Elevation step lines"), "View menu has Elevation step lines")
 	view.get_popup().hide()
 	await _frames(3)
 	check.call(not map_view.show_steps and float(tmat.get_shader_parameter("step_alpha")) == 0.0, "step lines off on request")
@@ -2307,10 +2312,31 @@ func _run_uitest() -> void:
 	var step_px := 0
 	for y in range(120, 780, 3):
 		for x in range(40, 1560, 3):
-			if stepped.get_pixel(x, y).v < unstepped.get_pixel(x, y).v - 0.03:
+			if absf(stepped.get_pixel(x, y).v - unstepped.get_pixel(x, y).v) > 0.03:
 				step_px += 1
-	check.call(step_px > 20, "the step lines darken hex edges where the height band changes (%d sampled pixels)" % step_px)
+	check.call(step_px > 20, "the step lines mark hex edges where the height band changes (%d sampled pixels)" % step_px)
 	_on_toggle("Steps")
+	await _frames(2)
+	# Elevation tint: on by default, View menu entry, and it changes the picture.
+	check.call(map_view.show_tint and float(tmat.get_shader_parameter("tint_alpha")) > 0.0 and tmat.get_shader_parameter("height_avg") != null,
+		"the elevation tint is on, with the local average height loaded")
+	await RenderingServer.frame_post_draw
+	var tint_on_img := get_viewport().get_texture().get_image()
+	view.show_popup()
+	await _frames(2)
+	check.call(_menu_pick(view.get_popup(), "Elevation tint (higher ground lighter)"), "View menu has Elevation tint")
+	view.get_popup().hide()
+	await _frames(3)
+	check.call(not map_view.show_tint and float(tmat.get_shader_parameter("tint_alpha")) == 0.0, "elevation tint off on request")
+	await RenderingServer.frame_post_draw
+	var untinted := get_viewport().get_texture().get_image()
+	var tint_px := 0
+	for y in range(120, 780, 6):
+		for x in range(40, 1560, 6):
+			if absf(tint_on_img.get_pixel(x, y).v - untinted.get_pixel(x, y).v) > 0.02:
+				tint_px += 1
+	check.call(tint_px > 500, "the tint lightens and darkens the ground with its height (%d of 27,940 sampled pixels)" % tint_px)
+	_on_toggle("Tint")
 	await _frames(2)
 	camera.zoom = Vector2.ONE * 0.02   # 10 px per hex
 	await _frames(2)
@@ -2334,21 +2360,26 @@ func _run_uitest() -> void:
 	await _frames(2)
 	check.call(not hud.legend_panel.visible and not hud.pause_screen.visible, "Esc closes the legend without opening the pause menu")
 
-	# Counters: a fixed share of the hex at every zoom the hex can hold one, each showing
-	# its unit's most important vehicle; F7 switches to NATO symbols and back.
+	# Counters: a fixed share of the hex once the hex is big enough, never smaller than a
+	# readable minimum, each showing its unit's most important vehicle; F7 switches to NATO
+	# symbols and back.
 	var fits := true
+	var readable := true
 	for z in [0.03, 0.06, 0.12, 0.3]:
 		camera.zoom = Vector2.ONE * float(z)
 		await _frames(1)
 		var hex_w: float = 500.0 * float(z)
-		# A square of side a fits a pointy-top hex of width w up to a = 0.732 w.
-		if overlay.counter_size() > hex_w * 0.732:
-			fits = false
-		if z >= 0.06 and absf(overlay.counter_size() / hex_w - 0.52) > 0.01:
-			fits = false
+		var cs: float = overlay.counter_size()
+		if cs < overlay.MIN_COUNTER - 0.01:
+			readable = false
+		if hex_w * 0.52 >= overlay.MIN_COUNTER:
+			# A square of side a fits a pointy-top hex of width w up to a = 0.732 w.
+			if cs > hex_w * 0.732 or absf(cs / hex_w - 0.52) > 0.01:
+				fits = false
 	camera.zoom = zoom_was
 	await _frames(2)
-	check.call(fits, "counters fit inside their hex from 15 to 150 px per hex, at 52% of its width once above the minimum")
+	check.call(readable, "counters never shrink below %d px, so the symbol and strength stay readable" % int(overlay.MIN_COUNTER))
+	check.call(fits, "close in (60 and 150 px per hex) a counter is 52% of its hex's width and fits inside it")
 	check.call(Overlay.classify_equipment("4x T-55A") == "tank" and Overlay.classify_equipment("UAZ-469, R-145 radio") == "jeep"
 		and Overlay.classify_equipment("3x BMP-1") == "ifv" and Overlay.classify_equipment("3x BTR-60PB") == "apc_w"
 		and Overlay.classify_equipment("4x 2S1 Gvozdika") == "spg" and Overlay.classify_equipment("6x Ural-375D") == "truck"

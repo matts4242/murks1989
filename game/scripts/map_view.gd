@@ -16,7 +16,8 @@ const CHUNK_MODE_PX := 7.0       # hex size on screen from which roads, rivers a
 const GRID_MODE_PX := 14.0       # hex size on screen at which hex outlines start to show (faintly)
 const GRID_FULL_PX := 30.0       # ... and at which they reach full strength
 const GRID_STRENGTH := 0.32
-const STEP_M := 50.0             # elevation step lines: metres per height band
+const AVG_LEVEL := 3             # local average height: the raster at 1/2^3 resolution
+const TINT_STRENGTH := 1.0       # elevation tint: higher ground than around it lighter, lower darker
 const STEP_MODE_PX := 12.0       # hex size on screen at which step lines start to show
 const STEP_FULL_PX := 24.0       # ... and at which they reach full strength
 const STEP_STRENGTH := 0.9
@@ -43,7 +44,8 @@ var topo_lod := 0                # 0: contours every 20 m, heavier every 100 m; 
 var show_grid := true
 var show_detail := true          # painted textures (off: one flat colour per terrain)
 var natural_edges := true        # terrain borders wander (off: crisp hex borders)
-var show_steps := true           # elevation step lines along hex edges (every STEP_M)
+var show_steps := true           # elevation step lines along hex edges (band size from the local relief)
+var show_tint := true            # elevation tint
 var plan_mode := PLAN_OFF        # the planning mode shown
 var plan_built := -1             # the whole-map mode whose tint image is loaded
 var plan_build_ms := 0.0
@@ -96,6 +98,19 @@ func setup_relief() -> void:
 	terrain_mat.set_shader_parameter("height_tex", ImageTexture.create_from_image(img))
 	terrain_mat.set_shader_parameter("height_px", world.get_height_pixel_size())
 	terrain_mat.set_shader_parameter("has_height", true)
+	# The local average height for the elevation tint and the step-line spacing: the
+	# raster averaged down to 1/8 (1.4 km texels), mipmapped, so the shader can read the
+	# mean height over a few kilometres around any point in one filtered lookup.
+	var avg := img.duplicate() as Image
+	avg.generate_mipmaps()
+	var w := maxi(img.get_width() >> AVG_LEVEL, 1)
+	var h := maxi(img.get_height() >> AVG_LEVEL, 1)
+	var ofs := avg.get_mipmap_offset(AVG_LEVEL)
+	var bytes := avg.get_data().slice(ofs, ofs + w * h * 2)
+	var small := Image.create_from_data(w, h, false, img.get_format(), bytes)
+	small.generate_mipmaps()
+	terrain_mat.set_shader_parameter("height_avg", ImageTexture.create_from_image(small))
+	terrain_mat.set_shader_parameter("height_avg_px", world.get_height_pixel_size() * float(1 << AVG_LEVEL))
 
 
 ## Shows a planning mode. Whole-map modes build their tint image once when chosen (a few
@@ -144,8 +159,8 @@ func update_view(center: Vector2, zoom: float, viewport_size: Vector2) -> void:
 	var grid := clampf((px_per_hex - GRID_MODE_PX) / (GRID_FULL_PX - GRID_MODE_PX), 0.0, 1.0) * GRID_STRENGTH
 	terrain_mat.set_shader_parameter("grid_alpha", grid if show_grid else 0.0)
 	var steps := clampf((px_per_hex - STEP_MODE_PX) / (STEP_FULL_PX - STEP_MODE_PX), 0.0, 1.0) * STEP_STRENGTH
-	terrain_mat.set_shader_parameter("step_m", STEP_M)
 	terrain_mat.set_shader_parameter("step_alpha", steps if show_steps and not show_topo else 0.0)
+	terrain_mat.set_shader_parameter("tint_alpha", TINT_STRENGTH if show_tint else 0.0)
 	var want_topo := show_topo and has_relief()
 	topo_lod = 0 if px_per_hex >= TOPO_CLOSE_PX else (1 if px_per_hex >= TOPO_FAR_PX else 2)
 	terrain_mat.set_shader_parameter("contour_interval", [20.0, 100.0, 500.0][topo_lod] if want_topo else 0.0)
