@@ -2334,21 +2334,26 @@ func _run_uitest() -> void:
 	await _frames(2)
 	check.call(not hud.legend_panel.visible and not hud.pause_screen.visible, "Esc closes the legend without opening the pause menu")
 
-	# Counters: a fixed share of the hex at every zoom the hex can hold one, each showing
-	# its unit's most important vehicle; F7 switches to NATO symbols and back.
+	# Counters: a fixed share of the hex once the hex is big enough, never smaller than a
+	# readable minimum, each showing its unit's most important vehicle; F7 switches to NATO
+	# symbols and back.
 	var fits := true
+	var readable := true
 	for z in [0.03, 0.06, 0.12, 0.3]:
 		camera.zoom = Vector2.ONE * float(z)
 		await _frames(1)
 		var hex_w: float = 500.0 * float(z)
-		# A square of side a fits a pointy-top hex of width w up to a = 0.732 w.
-		if overlay.counter_size() > hex_w * 0.732:
-			fits = false
-		if z >= 0.06 and absf(overlay.counter_size() / hex_w - 0.52) > 0.01:
-			fits = false
+		var cs: float = overlay.counter_size()
+		if cs < overlay.MIN_COUNTER - 0.01:
+			readable = false
+		if hex_w * 0.52 >= overlay.MIN_COUNTER:
+			# A square of side a fits a pointy-top hex of width w up to a = 0.732 w.
+			if cs > hex_w * 0.732 or absf(cs / hex_w - 0.52) > 0.01:
+				fits = false
 	camera.zoom = zoom_was
 	await _frames(2)
-	check.call(fits, "counters fit inside their hex from 15 to 150 px per hex, at 52% of its width once above the minimum")
+	check.call(readable, "counters never shrink below %d px, so the symbol and strength stay readable" % int(overlay.MIN_COUNTER))
+	check.call(fits, "close in (60 and 150 px per hex) a counter is 52% of its hex's width and fits inside it")
 	check.call(Overlay.classify_equipment("4x T-55A") == "tank" and Overlay.classify_equipment("UAZ-469, R-145 radio") == "jeep"
 		and Overlay.classify_equipment("3x BMP-1") == "ifv" and Overlay.classify_equipment("3x BTR-60PB") == "apc_w"
 		and Overlay.classify_equipment("4x 2S1 Gvozdika") == "spg" and Overlay.classify_equipment("6x Ural-375D") == "truck"
