@@ -33,8 +33,10 @@ uniform float metres_per_pixel = 10.0;
 uniform float detail = 1.0;            // 0: flat colour per terrain (F6 off)
 uniform float edge_noise = 0.3;        // 0 = crisp hex borders
 uniform float grid_alpha = 0.0;
-uniform float step_m = 50.0;           // elevation step lines: metres per height band
-uniform float step_alpha = 0.0;        // 0 = no step lines
+uniform float step_alpha = 0.0;        // 0 = no step lines (band size follows the local relief)
+uniform float tint_alpha = 0.0;        // elevation tint: 0 = none
+uniform sampler2D height_avg : filter_linear_mipmap, repeat_disable; // height raster at 1/8, mipmapped
+uniform float height_avg_px = 1440.0;  // metres per texel of height_avg's top level
 uniform float relief = 1.0;            // hill shading strength
 uniform float contour_interval = 0.0;  // metres between contour lines; 0 = none
 uniform float contour_heavy = 5.0;     // every n-th line is heavier
@@ -680,6 +682,47 @@ float hill_shade(vec3 hg) {
 	return clamp(1.0 + (lam * 1.7 - steep) * k, 0.5, 1.4);
 }
 
+// Mean height over a few kilometres around p (mip level 1 = 2.9 km texels, filtered).
+float local_mean(vec2 p, float lod) {
+	vec2 uv = p / (height_avg_px * vec2(textureSize(height_avg, 0)));
+	return textureLod(height_avg, uv, lod).r;
+}
+
+// Slope of the mean height at one scale, in metres per 500 m.
+float mean_slope(vec2 p, float lod) {
+	float d = height_avg_px * exp2(lod);
+	float gx = local_mean(p + vec2(d, 0.0), lod) - local_mean(p - vec2(d, 0.0), lod);
+	float gy = local_mean(p + vec2(0.0, d), lod) - local_mean(p - vec2(0.0, d), lod);
+	return length(vec2(gx, gy)) / (2.0 * d) * 500.0;
+}
+
+// How steep the country around p is, in metres per hex (500 m): the steeper of the
+// slopes over 1.4 km (valley sides) and 6 km (a broad rise), at least 2 m.
+float local_relief(vec2 p) {
+	return max(2.0, max(mean_slope(p, 0.0), mean_slope(p, 2.0)));
+}
+
+// Step-line band size from the local relief: about one line every three to four hexes up
+// a slope (closer, and lines along hex edges read as a second hex grid), from 25 m in flat
+// country to 400 m in the mountains.
+float step_band(vec2 p) {
+	float r = local_relief(p) * 3.5;
+	return r < 35.0 ? 25.0 : (r < 75.0 ? 50.0 : (r < 150.0 ? 100.0 : (r < 300.0 ? 200.0 : 400.0)));
+}
+
+// Elevation tint: ground higher than the country around it lighter and warmer, lower
+// ground darker and cooler, measured against the local relief, so a 15 m rise in flat
+// farmland shows as plainly as a 150 m ridge in the hills.
+vec3 elevation_tint(vec3 c, vec2 p, float h) {
+	float m = local_mean(p, 1.0);
+	float scale = max(12.0, local_relief(p) * 3.0);
+	float t = clamp((h - m) / scale, -1.0, 1.0);
+	t = t * (1.5 - 0.5 * abs(t));   // a little stronger near the mean, no hard clip
+	vec3 up = c * vec3(1.16, 1.12, 1.00) + vec3(0.025, 0.02, 0.0);
+	vec3 down = c * vec3(0.84, 0.88, 0.94);
+	return mix(c, t > 0.0 ? up : down, abs(t) * 0.75 * tint_alpha);
+}
+
 // High ground grows a little paler and browner.
 vec3 highland(vec3 c, float h) {
 	float hi = smoothstep(350.0, 1400.0, h) * 0.25;
@@ -731,6 +774,9 @@ void fragment() {
 			}
 			col = mix(near, col, t_far);
 		}
+		if (tint_alpha > 0.0 && has_height && contour_interval <= 0.0) {
+			col = elevation_tint(col, world, hg.x);
+		}
 		if (contour_interval > 0.0 && has_height) {
 			col = contours(col, hg.x);
 		}
@@ -760,13 +806,24 @@ void fragment() {
 				ivec2 nh = world_to_hex(hex_center(sh) + sd * ((HEX_W * 0.5 + 40.0) / max(shd, 1.0)));
 				vec4 r0 = hex_rec(sh);
 				vec4 r1 = hex_rec(nh);
-				float b0 = floor(r0.z / step_m);
-				float b1 = floor(r1.z / step_m);
+				// The band comes from the relief at the edge's middle, so both hexes agree.
+				float band = has_height ? step_band(hex_center(sh) + sd * (HEX_W * 0.5 / max(shd, 1.0))) : 50.0;
+				// Heights smoothed over about 1.4 km: the per-hex heights are rough (a hex can
+				// stand tens of metres above or below both neighbours), and banding them draws a
+				// zig-zag along every band boundary that reads as a second hex grid. Smoothed, a
+				// band boundary is one clean terrace line round the hill.
+				float z0 = has_height ? local_mean(hex_center(sh), 0.0) : r0.z;
+				float z1 = has_height ? local_mean(hex_center(nh), 0.0) : r1.z;
+				float b0 = floor(z0 / band);
+				float b1 = floor(z1 / band);
 				// Drawn only on the higher hex, so the line is the lip of a terrace and one hairline wide.
 				if (b0 > b1 && int(r0.x + 0.5) != T_WATER && int(r1.x + 0.5) != T_WATER) {
 					float k = 1.0 - smoothstep(0.4, 1.3, se_px);
 					float heavy = min(1.0, 0.75 + 0.25 * (b0 - b1 - 1.0));
-					col = mix(col, col * vec3(0.48, 0.38, 0.28), k * step_alpha * heavy);
+					// Dark brown on light ground, pale on dark ground (forest), so it shows on both.
+					float lum = dot(col, vec3(0.3, 0.55, 0.15));
+					vec3 ink = lum > 0.27 ? col * vec3(0.48, 0.38, 0.28) : mix(col, vec3(0.92, 0.86, 0.66), 0.42);
+					col = mix(col, ink, k * step_alpha * heavy);
 				}
 			}
 		}
